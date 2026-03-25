@@ -1,0 +1,118 @@
+# ============================================================================
+# NebulaCR Local Development Stack
+#
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose logs -f        # Tail logs
+#   docker compose down -v        # Stop and remove volumes
+#
+# After startup:
+#   docker login localhost:5000 -u admin -p admin
+#   docker tag myimage:latest localhost:5000/demo/default/myimage:latest
+#   docker push localhost:5000/demo/default/myimage:latest
+# ============================================================================
+
+services:
+  # ── OCI Registry Service ──────────────────────────────────────────────────
+  registry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["nebula-registry"]
+    ports:
+      - "5000:5000"   # Registry API
+      - "9090:9090"   # Prometheus metrics
+    environment:
+      RUST_LOG: "info,nebula_registry=debug,nebula_common=debug"
+      NEBULACR_SERVER__LISTEN_ADDR: "0.0.0.0:5000"
+      NEBULACR_SERVER__METRICS_ADDR: "0.0.0.0:9090"
+      NEBULACR_AUTH__ISSUER: "nebulacr"
+      NEBULACR_AUTH__AUDIENCE: "nebulacr-registry"
+      NEBULACR_AUTH__SIGNING_ALGORITHM: "RS256"
+      NEBULACR_AUTH__VERIFICATION_KEY_PATH: "/etc/nebulacr/keys/public.pem"
+      NEBULACR_AUTH__TOKEN_TTL_SECONDS: "300"
+      NEBULACR_STORAGE__BACKEND: "filesystem"
+      NEBULACR_STORAGE__ROOT: "/var/lib/nebulacr/data"
+      NEBULACR_RATE_LIMIT__DEFAULT_RPS: "100"
+      NEBULACR_RATE_LIMIT__IP_RPS: "50"
+    volumes:
+      - registry-data:/var/lib/nebulacr/data
+      - jwt-keys:/etc/nebulacr/keys:ro
+    depends_on:
+      auth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - nebulacr
+
+  # ── Auth / Token Service ──────────────────────────────────────────────────
+  auth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["nebula-auth"]
+    ports:
+      - "5001:5001"   # Auth API
+    environment:
+      RUST_LOG: "info,nebula_auth=debug,nebula_common=debug"
+      NEBULACR_SERVER__AUTH_LISTEN_ADDR: "0.0.0.0:5001"
+      NEBULACR_AUTH__ISSUER: "nebulacr"
+      NEBULACR_AUTH__AUDIENCE: "nebulacr-registry"
+      NEBULACR_AUTH__SIGNING_ALGORITHM: "RS256"
+      NEBULACR_AUTH__SIGNING_KEY_PATH: "/etc/nebulacr/keys/private.pem"
+      NEBULACR_AUTH__VERIFICATION_KEY_PATH: "/etc/nebulacr/keys/public.pem"
+      NEBULACR_AUTH__TOKEN_TTL_SECONDS: "300"
+      # Bootstrap admin credentials (development only -- password: "admin")
+      NEBULACR_AUTH__BOOTSTRAP_ADMIN__USERNAME: "admin"
+      NEBULACR_AUTH__BOOTSTRAP_ADMIN__PASSWORD_HASH: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+      NEBULACR_RATE_LIMIT__TOKEN_ISSUE_RPM: "60"
+    volumes:
+      - jwt-keys:/etc/nebulacr/keys
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - nebulacr
+
+  # ── Key Generator (init container) ────────────────────────────────────────
+  # Generates RSA key pair for JWT signing on first run.
+  keygen:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -f /keys/private.pem ]; then
+          apk add --no-cache openssl
+          echo "Generating RSA 4096-bit key pair for JWT signing..."
+          openssl genrsa -out /keys/private.pem 4096
+          openssl rsa -in /keys/private.pem -pubout -out /keys/public.pem
+          chmod 640 /keys/private.pem
+          chmod 644 /keys/public.pem
+          echo "Keys generated successfully."
+        else
+          echo "Keys already exist, skipping generation."
+        fi
+    volumes:
+      - jwt-keys:/keys
+    networks: []
+
+volumes:
+  registry-data:
+    driver: local
+  jwt-keys:
+    driver: local
+
+networks:
+  nebulacr:
+    driver: bridge

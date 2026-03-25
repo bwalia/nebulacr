@@ -1,0 +1,168 @@
+# ============================================================================
+# GitLab CI: Build and Push to NebulaCR
+#
+# This pipeline demonstrates the zero-trust CI/CD flow with GitLab:
+#   1. Request an OIDC identity token from GitLab's token service
+#   2. Exchange it for a short-lived NebulaCR access token
+#   3. Use the access token to docker login + push
+#
+# No long-lived secrets are required. GitLab's OIDC identity token proves
+# the pipeline's identity, and the NebulaCR token expires after 5 minutes.
+#
+# Prerequisites:
+#   - Configure your NebulaCR auth service to trust GitLab's OIDC issuer:
+#       issuer_url = "https://gitlab.com"   (or your self-hosted instance)
+#       client_id  = "nebulacr"
+#   - Create a tenant and project in NebulaCR
+#   - Bind the GitLab subject to a role:
+#       subject = "project_path:my-group/my-project:ref_type:branch:ref:main"
+#   - Enable the id_tokens keyword in your GitLab instance (GitLab 15.7+)
+# ============================================================================
+
+stages:
+  - build
+  - push
+  - verify
+
+variables:
+  # NebulaCR connection settings -- adjust for your deployment
+  NEBULACR_REGISTRY: registry.example.com:5000
+  NEBULACR_AUTH_URL: https://auth.example.com:5001
+  NEBULACR_TENANT: my-org
+  NEBULACR_PROJECT: my-project
+  IMAGE_NAME: my-app
+  # Full image reference used across stages
+  IMAGE_REF: "${NEBULACR_REGISTRY}/${NEBULACR_TENANT}/${NEBULACR_PROJECT}/${IMAGE_NAME}"
+
+# ── Request OIDC identity token from GitLab ──────────────────────────────
+# GitLab generates a short-lived JWT containing claims like:
+#   sub: "project_path:my-group/my-project:ref_type:branch:ref:main"
+#   iss: "https://gitlab.com"
+#   aud: "nebulacr"
+# The audience must match the client_id configured in NebulaCR.
+id_tokens:
+  GITLAB_OIDC_TOKEN:
+    aud: nebulacr
+
+# ── Build stage ──────────────────────────────────────────────────────────
+build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    # Install curl and jq for token exchange
+    - apk add --no-cache curl jq
+  script:
+    # ── Step 1: Exchange GitLab OIDC token for NebulaCR access token ──
+    # POST the GitLab OIDC token to NebulaCR's auth service.
+    # The auth service validates the JWT against GitLab's JWKS endpoint,
+    # resolves the subject to a tenant role, and returns a short-lived
+    # registry access token (default: 5 minutes).
+    - |
+      RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+        "${NEBULACR_AUTH_URL}/auth/token" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"identity_token\": \"${GITLAB_OIDC_TOKEN}\",
+          \"scope\": {
+            \"tenant\": \"${NEBULACR_TENANT}\",
+            \"project\": \"${NEBULACR_PROJECT}\",
+            \"repository\": \"${IMAGE_NAME}\",
+            \"actions\": [\"pull\", \"push\"]
+          }
+        }")
+
+      HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+      BODY=$(echo "$RESPONSE" | sed '$d')
+
+      if [ "$HTTP_CODE" != "200" ]; then
+        echo "ERROR: NebulaCR auth failed (HTTP $HTTP_CODE)"
+        # Do NOT echo the full body -- it may contain diagnostic info
+        # that should not leak to logs. Log only the error type.
+        echo "$BODY" | jq -r '.error // "unknown error"'
+        exit 1
+      fi
+
+      # Extract the access token
+      ACCESS_TOKEN=$(echo "$BODY" | jq -r '.token')
+      EXPIRES_IN=$(echo "$BODY" | jq -r '.expires_in')
+      echo "NebulaCR token obtained, expires in ${EXPIRES_IN}s"
+
+    # ── Step 2: Docker login using the short-lived token ──────────────
+    # Username is ignored by NebulaCR (subject is in the JWT), but
+    # Docker requires a non-empty value.
+    - echo "$ACCESS_TOKEN" | docker login "${NEBULACR_REGISTRY}" --username "gitlab-ci" --password-stdin
+
+    # ── Step 3: Build the Docker image ────────────────────────────────
+    - docker build --pull
+        --label "org.opencontainers.image.source=${CI_PROJECT_URL}"
+        --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}"
+        --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        -t "${IMAGE_REF}:${CI_COMMIT_SHA}"
+        -t "${IMAGE_REF}:${CI_COMMIT_REF_SLUG}"
+        -t "${IMAGE_REF}:latest"
+        .
+
+    # ── Step 4: Push the image to NebulaCR ────────────────────────────
+    - docker push "${IMAGE_REF}:${CI_COMMIT_SHA}"
+    - docker push "${IMAGE_REF}:${CI_COMMIT_REF_SLUG}"
+    - docker push "${IMAGE_REF}:latest"
+
+    # ── Step 5: Clean up credentials ──────────────────────────────────
+    # Remove the Docker config to prevent token leakage. The token is
+    # short-lived, but defense in depth is good practice.
+    - docker logout "${NEBULACR_REGISTRY}"
+  after_script:
+    # Ensure logout even if the script fails
+    - docker logout "${NEBULACR_REGISTRY}" 2>/dev/null || true
+  rules:
+    # Run on main branch pushes and merge requests
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        # Do not push "latest" tag for merge requests
+        PUSH_LATEST: "false"
+
+# ── Verify stage ─────────────────────────────────────────────────────────
+verify:
+  stage: verify
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    # Re-authenticate with pull-only scope for verification
+    - |
+      RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+        "${NEBULACR_AUTH_URL}/auth/token" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"identity_token\": \"${GITLAB_OIDC_TOKEN}\",
+          \"scope\": {
+            \"tenant\": \"${NEBULACR_TENANT}\",
+            \"project\": \"${NEBULACR_PROJECT}\",
+            \"repository\": \"${IMAGE_NAME}\",
+            \"actions\": [\"pull\"]
+          }
+        }")
+      HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+      BODY=$(echo "$RESPONSE" | sed '$d')
+      ACCESS_TOKEN=$(echo "$BODY" | jq -r '.token')
+
+    - echo "$ACCESS_TOKEN" | docker login "${NEBULACR_REGISTRY}" --username "gitlab-ci" --password-stdin
+
+    # Pull the image we just pushed to verify it is accessible
+    - docker pull "${IMAGE_REF}:${CI_COMMIT_SHA}"
+    - echo "Image verified successfully."
+  after_script:
+    - docker logout "${NEBULACR_REGISTRY}" 2>/dev/null || true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  needs:
+    - build

@@ -1,0 +1,187 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: projects.nebulacr.io
+  labels:
+    {{- include "nebulacr.labels" . | nindent 4 }}
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: nebulacr.io
+  names:
+    kind: Project
+    listKind: ProjectList
+    plural: projects
+    singular: project
+    shortNames:
+      - proj
+    categories:
+      - nebulacr
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Tenant
+          type: string
+          jsonPath: .spec.tenantRef
+        - name: Visibility
+          type: string
+          jsonPath: .spec.visibility
+        - name: Status
+          type: string
+          jsonPath: .status.phase
+        - name: Repositories
+          type: integer
+          jsonPath: .status.repositoryCount
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Project groups related repositories under a tenant.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: ProjectSpec defines the desired state of a Project.
+              required:
+                - tenantRef
+                - displayName
+              properties:
+                tenantRef:
+                  type: string
+                  description: Reference to the owning Tenant by name.
+                  minLength: 1
+                displayName:
+                  type: string
+                  description: Human-readable project name.
+                  minLength: 1
+                  maxLength: 256
+                description:
+                  type: string
+                  description: Optional description of the project.
+                  maxLength: 1024
+                visibility:
+                  type: string
+                  description: Visibility level of repositories in this project.
+                  enum:
+                    - private
+                    - internal
+                    - public
+                  default: private
+                immutableTags:
+                  type: boolean
+                  description: Whether tags in this project are immutable once pushed.
+                  default: false
+                vulnerabilityScanning:
+                  type: object
+                  description: Vulnerability scanning configuration.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    blockOnCritical:
+                      type: boolean
+                      description: Block pulls of images with critical vulnerabilities.
+                      default: false
+                    blockOnHigh:
+                      type: boolean
+                      description: Block pulls of images with high vulnerabilities.
+                      default: false
+                retentionPolicy:
+                  type: object
+                  description: Tag retention policy for this project.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    maxTagAge:
+                      type: string
+                      description: Maximum age of tags before garbage collection (e.g., 90d, 1y).
+                      pattern: '^[0-9]+(d|w|m|y)$'
+                    keepLastN:
+                      type: integer
+                      format: int32
+                      description: Always keep the last N tags regardless of age.
+                      minimum: 0
+                    keepSemver:
+                      type: boolean
+                      description: Always keep tags matching semver patterns.
+                      default: true
+                quotas:
+                  type: object
+                  description: Project-level quota overrides.
+                  properties:
+                    maxRepositories:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                    maxTagsPerRepository:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                    storageBytes:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                labels:
+                  type: object
+                  description: Arbitrary key-value labels.
+                  additionalProperties:
+                    type: string
+            status:
+              type: object
+              description: ProjectStatus defines the observed state of a Project.
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Active
+                    - Suspended
+                    - Deleting
+                repositoryCount:
+                  type: integer
+                  format: int32
+                storageUsedBytes:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                observedGeneration:
+                  type: integer
+                  format: int64

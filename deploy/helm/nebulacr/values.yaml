@@ -1,0 +1,265 @@
+## NebulaCR Helm Chart Values
+## ===========================
+
+## -- Global settings --
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+## -- Registry service --
+registry:
+  image:
+    repository: ghcr.io/nebulacr/registry
+    tag: ""  # Defaults to appVersion
+    pullPolicy: IfNotPresent
+  replicas: 2
+  port: 5000
+  metricsPort: 9090
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations: {}
+  podLabels: {}
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+## -- Auth service --
+auth:
+  image:
+    repository: ghcr.io/nebulacr/auth
+    tag: ""  # Defaults to appVersion
+    pullPolicy: IfNotPresent
+  replicas: 2
+  port: 5001
+  metricsPort: 9091
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations: {}
+  podLabels: {}
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+## -- OIDC provider configuration --
+oidc:
+  enabled: true
+  issuerUrl: "https://accounts.google.com"
+  clientId: ""
+  clientSecret: ""
+  # Additional OIDC scopes beyond openid
+  scopes:
+    - openid
+    - profile
+    - email
+  # Claim used for mapping to tenant identity
+  tenantClaim: "org_id"
+  # Where to redirect after auth
+  redirectUri: ""
+
+## -- JWT signing key configuration --
+jwt:
+  # Provide an existing secret name or leave empty to generate
+  existingSecret: ""
+  # RSA private key PEM (base64-encoded); only used if existingSecret is empty
+  signingKey: ""
+  # RSA public key PEM (base64-encoded); only used if existingSecret is empty
+  verificationKey: ""
+  # Token lifetime in seconds
+  accessTokenTtl: 3600
+  refreshTokenTtl: 86400
+
+## -- Storage backend --
+storage:
+  # One of: filesystem, s3, gcs, azure
+  backend: filesystem
+
+  filesystem:
+    rootDirectory: /var/lib/nebulacr/data
+    persistence:
+      enabled: true
+      storageClass: ""
+      accessMode: ReadWriteOnce
+      size: 50Gi
+      existingClaim: ""
+
+  s3:
+    bucket: ""
+    region: "us-east-1"
+    endpoint: ""
+    accessKey: ""
+    secretKey: ""
+    existingSecret: ""
+    # secretKey keys inside the Secret
+    accessKeyField: "access-key"
+    secretKeyField: "secret-key"
+    pathStyle: false
+    encrypt: true
+    sseAlgorithm: "AES256"
+
+  gcs:
+    bucket: ""
+    keyfile: ""
+    existingSecret: ""
+    # Key inside the Secret that holds the service account JSON
+    keyfileField: "keyfile.json"
+
+  azure:
+    container: ""
+    accountName: ""
+    accountKey: ""
+    existingSecret: ""
+    accountKeyField: "account-key"
+
+## -- Rate limiting --
+rateLimiting:
+  enabled: true
+  # Requests per second per client IP
+  requestsPerSecond: 100
+  # Burst size
+  burst: 200
+  # Pull rate per tenant (per minute)
+  pullRatePerTenant: 1000
+  # Push rate per tenant (per minute)
+  pushRatePerTenant: 500
+
+## -- Observability --
+observability:
+  logLevel: info
+  # Set to "json" for structured logging
+  logFormat: json
+  # OpenTelemetry collector endpoint (gRPC)
+  otlpEndpoint: ""
+  # Enable trace propagation
+  tracing:
+    enabled: false
+    samplingRatio: 0.1
+
+## -- Horizontal Pod Autoscaler --
+autoscaling:
+  registry:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 60
+
+  auth:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 60
+
+## -- Ingress --
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  host: registry.example.com
+  tls:
+    enabled: false
+    secretName: ""
+  # Path routing
+  registryPath: /v2
+  authPath: /auth
+
+## -- Prometheus ServiceMonitor --
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  # Additional metric relabelings
+  metricRelabelings: []
+  # Additional relabelings
+  relabelings: []
+
+## -- Service accounts --
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # For IRSA / Workload Identity
+  # annotations:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/nebulacr
+
+## -- Pod disruption budget --
+podDisruptionBudget:
+  registry:
+    enabled: true
+    minAvailable: 1
+  auth:
+    enabled: true
+    minAvailable: 1
+
+## -- Network policy --
+networkPolicy:
+  enabled: false

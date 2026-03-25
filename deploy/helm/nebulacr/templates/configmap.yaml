@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nebulacr.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.labels" . | nindent 4 }}
+data:
+  registry.yaml: |
+    server:
+      listen_addr: "0.0.0.0:{{ .Values.registry.port }}"
+      metrics_addr: "0.0.0.0:{{ .Values.registry.metricsPort }}"
+
+    auth:
+      service_url: "http://{{ include "nebulacr.fullname" . }}-auth:{{ .Values.auth.port }}"
+      {{- if .Values.oidc.enabled }}
+      oidc:
+        issuer_url: {{ .Values.oidc.issuerUrl | quote }}
+        client_id: {{ .Values.oidc.clientId | quote }}
+        scopes:
+          {{- toYaml .Values.oidc.scopes | nindent 10 }}
+        tenant_claim: {{ .Values.oidc.tenantClaim | quote }}
+        {{- if .Values.oidc.redirectUri }}
+        redirect_uri: {{ .Values.oidc.redirectUri | quote }}
+        {{- end }}
+      {{- end }}
+      jwt:
+        access_token_ttl: {{ .Values.jwt.accessTokenTtl }}
+        refresh_token_ttl: {{ .Values.jwt.refreshTokenTtl }}
+        signing_key_path: "/etc/nebulacr/keys/signing.pem"
+        verification_key_path: "/etc/nebulacr/keys/verification.pem"
+
+    storage:
+      backend: {{ .Values.storage.backend | quote }}
+      {{- if eq .Values.storage.backend "filesystem" }}
+      filesystem:
+        root_directory: {{ .Values.storage.filesystem.rootDirectory | quote }}
+      {{- end }}
+      {{- if eq .Values.storage.backend "s3" }}
+      s3:
+        bucket: {{ .Values.storage.s3.bucket | quote }}
+        region: {{ .Values.storage.s3.region | quote }}
+        {{- if .Values.storage.s3.endpoint }}
+        endpoint: {{ .Values.storage.s3.endpoint | quote }}
+        {{- end }}
+        path_style: {{ .Values.storage.s3.pathStyle }}
+        encrypt: {{ .Values.storage.s3.encrypt }}
+        sse_algorithm: {{ .Values.storage.s3.sseAlgorithm | quote }}
+      {{- end }}
+      {{- if eq .Values.storage.backend "gcs" }}
+      gcs:
+        bucket: {{ .Values.storage.gcs.bucket | quote }}
+        keyfile_path: "/etc/nebulacr/gcs/keyfile.json"
+      {{- end }}
+      {{- if eq .Values.storage.backend "azure" }}
+      azure:
+        container: {{ .Values.storage.azure.container | quote }}
+        account_name: {{ .Values.storage.azure.accountName | quote }}
+      {{- end }}
+
+    {{- if .Values.rateLimiting.enabled }}
+    rate_limiting:
+      enabled: true
+      requests_per_second: {{ .Values.rateLimiting.requestsPerSecond }}
+      burst: {{ .Values.rateLimiting.burst }}
+      pull_rate_per_tenant: {{ .Values.rateLimiting.pullRatePerTenant }}
+      push_rate_per_tenant: {{ .Values.rateLimiting.pushRatePerTenant }}
+    {{- end }}
+
+    observability:
+      log_level: {{ .Values.observability.logLevel | quote }}
+      log_format: {{ .Values.observability.logFormat | quote }}
+      {{- if .Values.observability.otlpEndpoint }}
+      otlp_endpoint: {{ .Values.observability.otlpEndpoint | quote }}
+      {{- end }}
+      {{- if .Values.observability.tracing.enabled }}
+      tracing:
+        enabled: true
+        sampling_ratio: {{ .Values.observability.tracing.samplingRatio }}
+      {{- end }}
+
+  auth.yaml: |
+    server:
+      listen_addr: "0.0.0.0:{{ .Values.auth.port }}"
+      metrics_addr: "0.0.0.0:{{ .Values.auth.metricsPort }}"
+
+    {{- if .Values.oidc.enabled }}
+    oidc:
+      issuer_url: {{ .Values.oidc.issuerUrl | quote }}
+      client_id: {{ .Values.oidc.clientId | quote }}
+      scopes:
+        {{- toYaml .Values.oidc.scopes | nindent 8 }}
+      tenant_claim: {{ .Values.oidc.tenantClaim | quote }}
+      {{- if .Values.oidc.redirectUri }}
+      redirect_uri: {{ .Values.oidc.redirectUri | quote }}
+      {{- end }}
+    {{- end }}
+
+    jwt:
+      access_token_ttl: {{ .Values.jwt.accessTokenTtl }}
+      refresh_token_ttl: {{ .Values.jwt.refreshTokenTtl }}
+      signing_key_path: "/etc/nebulacr/keys/signing.pem"
+      verification_key_path: "/etc/nebulacr/keys/verification.pem"
+
+    observability:
+      log_level: {{ .Values.observability.logLevel | quote }}
+      log_format: {{ .Values.observability.logFormat | quote }}
+      {{- if .Values.observability.otlpEndpoint }}
+      otlp_endpoint: {{ .Values.observability.otlpEndpoint | quote }}
+      {{- end }}
+      {{- if .Values.observability.tracing.enabled }}
+      tracing:
+        enabled: true
+        sampling_ratio: {{ .Values.observability.tracing.samplingRatio }}
+      {{- end }}

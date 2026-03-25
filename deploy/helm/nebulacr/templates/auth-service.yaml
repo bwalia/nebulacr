@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.auth.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.auth.port }}
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.auth.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "nebulacr.auth.selectorLabels" . | nindent 4 }}

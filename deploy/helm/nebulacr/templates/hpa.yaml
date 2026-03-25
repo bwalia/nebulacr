@@ -1,0 +1,67 @@
+{{- if .Values.autoscaling.registry.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-registry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.registry.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "nebulacr.fullname" . }}-registry
+  minReplicas: {{ .Values.autoscaling.registry.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.registry.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.registry.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.registry.targetMemoryUtilizationPercentage }}
+  {{- with .Values.autoscaling.registry.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+{{- if .Values.autoscaling.auth.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.auth.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "nebulacr.fullname" . }}-auth
+  minReplicas: {{ .Values.autoscaling.auth.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.auth.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.auth.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.auth.targetMemoryUtilizationPercentage }}
+  {{- with .Values.autoscaling.auth.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

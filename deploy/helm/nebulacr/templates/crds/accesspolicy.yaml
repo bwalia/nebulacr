@@ -1,0 +1,216 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: accesspolicies.nebulacr.io
+  labels:
+    {{- include "nebulacr.labels" . | nindent 4 }}
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: nebulacr.io
+  names:
+    kind: AccessPolicy
+    listKind: AccessPolicyList
+    plural: accesspolicies
+    singular: accesspolicy
+    shortNames:
+      - ap
+    categories:
+      - nebulacr
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Tenant
+          type: string
+          jsonPath: .spec.tenantRef
+        - name: Effect
+          type: string
+          jsonPath: .spec.effect
+        - name: Priority
+          type: integer
+          jsonPath: .spec.priority
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: AccessPolicy defines fine-grained access control rules for registry resources.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: AccessPolicySpec defines the desired access control rules.
+              required:
+                - tenantRef
+                - subjects
+                - resources
+                - actions
+                - effect
+              properties:
+                tenantRef:
+                  type: string
+                  description: Reference to the Tenant this policy applies to.
+                  minLength: 1
+                description:
+                  type: string
+                  description: Human-readable description of this policy.
+                  maxLength: 1024
+                priority:
+                  type: integer
+                  format: int32
+                  description: Priority of this policy. Higher values take precedence. Default is 0.
+                  default: 0
+                  minimum: -1000
+                  maximum: 1000
+                effect:
+                  type: string
+                  description: Whether this policy allows or denies access.
+                  enum:
+                    - Allow
+                    - Deny
+                subjects:
+                  type: array
+                  description: Subjects (identities) this policy applies to.
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - kind
+                    properties:
+                      kind:
+                        type: string
+                        description: Type of subject.
+                        enum:
+                          - User
+                          - Group
+                          - ServiceAccount
+                          - Anonymous
+                      name:
+                        type: string
+                        description: Name or identifier of the subject. Supports glob patterns.
+                      oidcClaim:
+                        type: string
+                        description: Match based on a specific OIDC claim value.
+                      claimValue:
+                        type: string
+                        description: Expected value for the OIDC claim.
+                resources:
+                  type: array
+                  description: Resources this policy governs.
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - type
+                    properties:
+                      type:
+                        type: string
+                        description: Resource type.
+                        enum:
+                          - repository
+                          - tag
+                          - manifest
+                          - blob
+                          - project
+                      namePattern:
+                        type: string
+                        description: Glob pattern matching resource names. Default is '*' (all).
+                        default: "*"
+                      projectRef:
+                        type: string
+                        description: Limit scope to a specific project.
+                actions:
+                  type: array
+                  description: Actions this policy applies to.
+                  minItems: 1
+                  items:
+                    type: string
+                    enum:
+                      - pull
+                      - push
+                      - delete
+                      - list
+                      - admin
+                      - "*"
+                conditions:
+                  type: array
+                  description: Additional conditions that must be met for this policy.
+                  items:
+                    type: object
+                    required:
+                      - type
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - SourceIP
+                          - TimeWindow
+                          - MFARequired
+                      sourceCidrs:
+                        type: array
+                        description: CIDR ranges for SourceIP condition.
+                        items:
+                          type: string
+                      timeWindowStart:
+                        type: string
+                        description: Start of allowed time window (HH:MM UTC).
+                        pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+                      timeWindowEnd:
+                        type: string
+                        description: End of allowed time window (HH:MM UTC).
+                        pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            status:
+              type: object
+              description: AccessPolicyStatus defines the observed state.
+              properties:
+                valid:
+                  type: boolean
+                  description: Whether the policy passed validation.
+                lastEvaluated:
+                  type: string
+                  format: date-time
+                  description: When this policy was last evaluated.
+                matchCount:
+                  type: integer
+                  format: int64
+                  description: Number of times this policy matched a request.
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                observedGeneration:
+                  type: integer
+                  format: int64

@@ -1,0 +1,157 @@
+# ============================================================================
+# GitHub Actions: Build and Push to NebulaCR
+#
+# This workflow demonstrates the zero-trust CI/CD flow:
+#   1. Request an OIDC identity token from GitHub's token service
+#   2. Exchange it for a short-lived NebulaCR access token
+#   3. Use the access token to docker login + push
+#
+# No long-lived secrets are stored -- GitHub's OIDC identity is the only
+# credential, and the NebulaCR token expires after 5 minutes.
+#
+# Prerequisites:
+#   - Configure your NebulaCR auth service to trust GitHub's OIDC issuer:
+#       issuer_url = "https://token.actions.githubusercontent.com"
+#       client_id  = "nebulacr"
+#   - Create a tenant and project in NebulaCR
+#   - Bind the GitHub subject (repo:org/repo:ref:refs/heads/main) to a role
+# ============================================================================
+
+name: Build and Push to NebulaCR
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Required: request OIDC token permissions from GitHub
+permissions:
+  id-token: write    # Needed to request the OIDC JWT from GitHub
+  contents: read     # Needed to check out the repository
+
+env:
+  # NebulaCR connection settings -- adjust for your deployment
+  NEBULACR_REGISTRY: registry.example.com:5000
+  NEBULACR_AUTH_URL: https://auth.example.com:5001
+  NEBULACR_TENANT: my-org
+  NEBULACR_PROJECT: my-project
+  IMAGE_NAME: my-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Step 1: Check out source code ──────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Request OIDC identity token from GitHub ────────────────
+      # GitHub provides a short-lived JWT that proves this workflow's
+      # identity. The token contains claims like:
+      #   sub: "repo:my-org/my-repo:ref:refs/heads/main"
+      #   iss: "https://token.actions.githubusercontent.com"
+      #   aud: "nebulacr"
+      # NebulaCR validates this token against GitHub's JWKS endpoint.
+      - name: Get GitHub OIDC token
+        id: github-oidc
+        run: |
+          # Request an OIDC token from GitHub's token service.
+          # The audience must match what NebulaCR expects (configured in OIDC provider).
+          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nebulacr" | jq -r '.value')
+
+          if [ -z "$OIDC_TOKEN" ] || [ "$OIDC_TOKEN" = "null" ]; then
+            echo "::error::Failed to obtain OIDC token from GitHub"
+            exit 1
+          fi
+
+          # Mask the token so it does not appear in logs
+          echo "::add-mask::$OIDC_TOKEN"
+          echo "token=$OIDC_TOKEN" >> "$GITHUB_OUTPUT"
+
+      # ── Step 3: Exchange OIDC token for NebulaCR access token ──────────
+      # POST the GitHub OIDC token to NebulaCR's auth service.
+      # The auth service:
+      #   a) Validates the GitHub JWT against the JWKS endpoint
+      #   b) Maps the subject claim to a tenant role via access policies
+      #   c) Returns a short-lived (5 min) registry access token
+      - name: Authenticate to NebulaCR
+        id: nebulacr-auth
+        run: |
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ env.NEBULACR_AUTH_URL }}/auth/token" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "identity_token": "${{ steps.github-oidc.outputs.token }}",
+              "scope": {
+                "tenant": "${{ env.NEBULACR_TENANT }}",
+                "project": "${{ env.NEBULACR_PROJECT }}",
+                "repository": "${{ env.IMAGE_NAME }}",
+                "actions": ["pull", "push"]
+              }
+            }')
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::NebulaCR auth failed (HTTP $HTTP_CODE): $BODY"
+            exit 1
+          fi
+
+          # Extract the access token and mask it in logs
+          ACCESS_TOKEN=$(echo "$BODY" | jq -r '.token')
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+          # Log the token expiry for debugging (safe -- not the token itself)
+          EXPIRES_IN=$(echo "$BODY" | jq -r '.expires_in')
+          echo "NebulaCR token obtained, expires in ${EXPIRES_IN}s"
+
+      # ── Step 4: Docker login using the short-lived token ───────────────
+      # The access token is used as the password for docker login.
+      # Username can be any non-empty string; NebulaCR ignores it (the
+      # subject is embedded in the JWT).
+      - name: Docker login to NebulaCR
+        run: |
+          echo "${{ steps.nebulacr-auth.outputs.token }}" | \
+            docker login "${{ env.NEBULACR_REGISTRY }}" \
+              --username "github-actions" \
+              --password-stdin
+
+      # ── Step 5: Build the Docker image ─────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Only push on main branch, not on PRs
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:latest
+          # Layer caching for faster builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Provenance and SBOM attestations
+          provenance: true
+          sbom: true
+
+      # ── Step 6: Docker logout (cleanup) ────────────────────────────────
+      # Always remove credentials from the runner, even if previous steps
+      # failed. The token is short-lived, but defense in depth applies.
+      - name: Docker logout
+        if: always()
+        run: docker logout "${{ env.NEBULACR_REGISTRY }}"
+
+      # ── Step 7: Verify the pushed image (optional) ─────────────────────
+      - name: Verify image exists in registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # Pull the image by digest to confirm it was pushed successfully
+          docker pull "${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Image successfully pushed and verified."

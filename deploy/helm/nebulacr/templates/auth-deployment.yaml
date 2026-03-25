@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.auth.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.auth.enabled }}
+  replicas: {{ .Values.auth.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nebulacr.auth.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.auth.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "nebulacr.auth.selectorLabels" . | nindent 8 }}
+        {{- with .Values.auth.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "nebulacr.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.auth.securityContext | nindent 8 }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "nebulacr.auth.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+        {{- with .Values.auth.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.auth.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.auth.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: auth
+          image: {{ include "nebulacr.auth.image" . }}
+          imagePullPolicy: {{ .Values.auth.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.auth.containerSecurityContext | nindent 12 }}
+          args:
+            - serve
+            - --config=/etc/nebulacr/config/auth.yaml
+          ports:
+            - name: http
+              containerPort: {{ .Values.auth.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.auth.metricsPort }}
+              protocol: TCP
+          env:
+            - name: NEBULACR_LOG_LEVEL
+              value: {{ .Values.observability.logLevel | quote }}
+            {{- if and .Values.oidc.enabled .Values.oidc.clientSecret }}
+            - name: NEBULACR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nebulacr.fullname" . }}-oidc
+                  key: client-secret
+            {{- end }}
+            {{- if .Values.observability.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            {{- end }}
+            {{- with .Values.auth.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.auth.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nebulacr/config
+              readOnly: true
+            - name: signing-keys
+              mountPath: /etc/nebulacr/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.auth.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "nebulacr.configMapName" . }}
+        - name: signing-keys
+          secret:
+            secretName: {{ include "nebulacr.jwt.secretName" . }}
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- with .Values.auth.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

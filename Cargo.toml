@@ -1,0 +1,80 @@
+[workspace]
+members = [
+    "crates/nebula-common",
+    "crates/nebula-auth",
+    "crates/nebula-registry",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["NebulaCR Contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/nebulacr/nebulacr"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "limit", "request-id"] }
+hyper = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Auth / JWT / OIDC
+jsonwebtoken = "9"
+openidconnect = "4"
+oauth2 = "5"
+
+# Crypto
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.9"
+
+# Storage
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+bytes = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.28"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.27"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Config
+config = "0.14"
+dotenvy = "0.15"
+
+# Async utilities
+futures = "0.3"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Rate limiting
+governor = "0.8"
+
+# Internal crates
+nebula-common = { path = "crates/nebula-common" }
+nebula-auth = { path = "crates/nebula-auth" }
+nebula-registry = { path = "crates/nebula-registry" }
