@@ -105,6 +105,24 @@ spec:
                   name: {{ include "nebulacr.azure.secretName" . }}
                   key: {{ .Values.storage.azure.accountKeyField }}
             {{- end }}
+            {{- if .Values.pullThroughCache.enabled }}
+            {{- range $name, $upstream := .Values.pullThroughCache.upstreams }}
+            {{- if or $upstream.existingSecret $upstream.username }}
+            {{- $envPrefix := $name | upper | replace "." "_" | replace "-" "_" }}
+            {{- $secretName := include "nebulacr.upstream.secretName" (list (include "nebulacr.fullname" $) $name $upstream) }}
+            - name: {{ $envPrefix }}_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ default "username" $upstream.usernameField }}
+            - name: {{ $envPrefix }}_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ default "password" $upstream.passwordField }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.observability.otlpEndpoint }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}

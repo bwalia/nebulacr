@@ -151,3 +151,17 @@ ConfigMap name
 {{- define "nebulacr.configMapName" -}}
 {{- printf "%s-config" (include "nebulacr.fullname" .) }}
 {{- end }}
+
+{{/*
+Upstream registry secret name
+*/}}
+{{- define "nebulacr.upstream.secretName" -}}
+{{- $fullname := index . 0 -}}
+{{- $name := index . 1 -}}
+{{- $upstream := index . 2 -}}
+{{- if $upstream.existingSecret }}
+{{- $upstream.existingSecret }}
+{{- else }}
+{{- printf "%s-upstream-%s" $fullname ($name | replace "." "-") }}
+{{- end }}
+{{- end }}

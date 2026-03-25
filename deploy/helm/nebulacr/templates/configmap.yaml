@@ -58,6 +58,21 @@ data:
         account_name: {{ .Values.storage.azure.accountName | quote }}
       {{- end }}
 
+    {{- if .Values.pullThroughCache.enabled }}
+    pull_through_cache:
+      enabled: true
+      default_upstream: {{ .Values.pullThroughCache.defaultUpstream | quote }}
+      ttl: {{ .Values.pullThroughCache.ttl }}
+      upstreams:
+        {{- range $name, $upstream := .Values.pullThroughCache.upstreams }}
+        {{ $name }}:
+          url: {{ $upstream.url | quote }}
+          {{- if or $upstream.existingSecret $upstream.username }}
+          credentials_env_prefix: {{ $name | upper | replace "." "_" | replace "-" "_" | quote }}
+          {{- end }}
+        {{- end }}
+    {{- end }}
+
     {{- if .Values.rateLimiting.enabled }}
     rate_limiting:
       enabled: true

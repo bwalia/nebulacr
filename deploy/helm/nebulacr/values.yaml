@@ -1,5 +1,28 @@
 ## NebulaCR Helm Chart Values
 ## ===========================
+##
+## Quick Start — Pull-through cache for Docker Hub:
+##
+##   helm install nebulacr ./deploy/helm/nebulacr
+##
+## That's it! The default values enable pull-through caching for Docker Hub,
+## GHCR, GCR, Quay.io, and registry.k8s.io. No auth config needed.
+##
+## Then configure your container runtime to use NebulaCR as a mirror.
+## Example for containerd (/etc/containerd/config.toml):
+##
+##   [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+##     endpoint = ["http://nebulacr-registry.nebulacr.svc.cluster.local:5000"]
+##
+## Or pull directly:
+##   docker pull <nebulacr-host>:5000/library/nginx:latest
+##   docker pull <nebulacr-host>:5000/ghcr.io/org/repo:tag
+##
+## To add Docker Hub credentials (avoids rate limits):
+##
+##   helm install nebulacr ./deploy/helm/nebulacr \
+##     --set pullThroughCache.upstreams.docker\.io.username=myuser \
+##     --set pullThroughCache.upstreams.docker\.io.password=mytoken
 
 ## -- Global settings --
 nameOverride: ""
@@ -95,9 +118,75 @@ auth:
   extraVolumes: []
   extraVolumeMounts: []
 
+## -- Pull-through cache / registry mirror --
+## When enabled, NebulaCR acts as a transparent caching proxy.
+## Images not found locally are fetched from the upstream registry,
+## cached, and served on subsequent pulls.
+pullThroughCache:
+  enabled: true
+
+  # Default upstream used when no prefix matches (e.g. "nginx" → Docker Hub)
+  defaultUpstream: docker.io
+
+  # How long cached manifests/tags are considered fresh before re-checking upstream (seconds)
+  ttl: 86400  # 24 hours
+
+  # Pre-configured upstream registries
+  # Each entry maps a prefix to an upstream URL and optional credentials.
+  # Pull "myregistry:5000/ghcr/org/repo:tag" to fetch from ghcr.io/org/repo:tag
+  upstreams:
+    docker.io:
+      url: "https://registry-1.docker.io"
+      # Docker Hub credentials (recommended to avoid rate limits)
+      username: ""
+      password: ""
+      existingSecret: ""
+      usernameField: "username"
+      passwordField: "password"
+
+    ghcr.io:
+      url: "https://ghcr.io"
+      username: ""
+      password: ""
+      existingSecret: ""
+      usernameField: "username"
+      passwordField: "password"
+
+    gcr.io:
+      url: "https://gcr.io"
+      username: ""
+      password: ""
+      existingSecret: ""
+      usernameField: "username"
+      passwordField: "password"
+
+    quay.io:
+      url: "https://quay.io"
+      username: ""
+      password: ""
+      existingSecret: ""
+      usernameField: "username"
+      passwordField: "password"
+
+    registry.k8s.io:
+      url: "https://registry.k8s.io"
+      username: ""
+      password: ""
+      existingSecret: ""
+      usernameField: "username"
+      passwordField: "password"
+
+    # Add custom upstreams:
+    # my.private.registry:
+    #   url: "https://my.private.registry"
+    #   existingSecret: "my-registry-creds"
+    #   usernameField: "user"
+    #   passwordField: "pass"
+
 ## -- OIDC provider configuration --
 oidc:
-  enabled: true
+  # Disabled by default for easy cache-only install; enable for multi-tenant auth
+  enabled: false
   issuerUrl: "https://accounts.google.com"
   clientId: ""
   clientSecret: ""
