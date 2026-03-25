@@ -4,16 +4,16 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use base64::Engine;
 use chrono::Utc;
 use governor::{Quota, RateLimiter};
-use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -305,12 +305,7 @@ async fn resolve_role(
 
 /// Build a signed JWT from the given claims.
 fn sign_token(state: &AppState, claims: &TokenClaims) -> Result<String, RegistryError> {
-    encode(
-        &Header::new(Algorithm::RS256),
-        claims,
-        &state.encoding_key,
-    )
-    .map_err(|e| {
+    encode(&Header::new(Algorithm::RS256), claims, &state.encoding_key).map_err(|e| {
         error!(error = %e, "failed to encode JWT");
         RegistryError::Internal("token signing failed".into())
     })
@@ -473,11 +468,12 @@ async fn get_token(
 
     // Resolve tenant
     let tenants = state.tenants.read().await;
-    let tenant = tenants
-        .get(&requested_scope.tenant)
-        .ok_or_else(|| RegistryError::TenantNotFound {
-            tenant: requested_scope.tenant.clone(),
-        })?;
+    let tenant =
+        tenants
+            .get(&requested_scope.tenant)
+            .ok_or_else(|| RegistryError::TenantNotFound {
+                tenant: requested_scope.tenant.clone(),
+            })?;
     let tenant_id = tenant.id;
     drop(tenants);
 
@@ -558,7 +554,9 @@ fn load_jwt_keys(config: &RegistryConfig) -> (EncodingKey, DecodingKey) {
     }
 
     // Fall back to embedded development keys
-    warn!("configured key paths not found — using embedded development RSA keys (NOT FOR PRODUCTION)");
+    warn!(
+        "configured key paths not found — using embedded development RSA keys (NOT FOR PRODUCTION)"
+    );
     let priv_pem = include_bytes!("dev_key.pem");
     let pub_pem = include_bytes!("dev_key.pub.pem");
     let enc = EncodingKey::from_rsa_pem(priv_pem).expect("embedded dev private key must be valid");

@@ -44,7 +44,11 @@ struct AppState {
     decoding_key: Arc<DecodingKey>,
     prom_handle: PrometheusHandle,
     #[allow(dead_code)]
-    rate_limiters: Arc<RwLock<HashMap<String, Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>>>>,
+    rate_limiters: Arc<
+        RwLock<
+            HashMap<String, Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>>,
+        >,
+    >,
     default_rate_limiter: Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>,
 }
 
@@ -90,17 +94,17 @@ where
         validation.set_issuer(&[&app_state.config.auth.issuer]);
         validation.validate_exp = true;
 
-        let token_data: TokenData<TokenClaims> =
-            jsonwebtoken::decode(token, &app_state.decoding_key, &validation).map_err(|e| {
-                match e.kind() {
-                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-                        RegistryError::TokenExpired
-                    }
-                    _ => RegistryError::TokenInvalid {
-                        reason: e.to_string(),
-                    },
-                }
-            })?;
+        let token_data: TokenData<TokenClaims> = jsonwebtoken::decode(
+            token,
+            &app_state.decoding_key,
+            &validation,
+        )
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => RegistryError::TokenExpired,
+            _ => RegistryError::TokenInvalid {
+                reason: e.to_string(),
+            },
+        })?;
 
         Ok(AuthenticatedClaims(token_data.claims))
     }
@@ -121,17 +125,15 @@ fn authorize(
     // Check role-level permission first
     if !claims.role.can(action) {
         return Err(RegistryError::Forbidden {
-            reason: format!(
-                "role {:?} does not permit action {:?}",
-                claims.role, action
-            ),
+            reason: format!("role {:?} does not permit action {:?}", claims.role, action),
         });
     }
 
     // Check scopes: at least one scope must match the repository and include the action
-    let scope_ok = claims.scopes.iter().any(|s| {
-        (s.repository == repo_path || s.repository == "*") && s.actions.contains(&action)
-    });
+    let scope_ok = claims
+        .scopes
+        .iter()
+        .any(|s| (s.repository == repo_path || s.repository == "*") && s.actions.contains(&action));
 
     if !scope_ok {
         return Err(RegistryError::Forbidden {
@@ -260,10 +262,20 @@ async fn head_manifest(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Pull)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
 
     let path = resolve_manifest_path(
-        &state, &params.tenant, &params.project, &params.name, &params.reference,
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &params.reference,
     )
     .await?;
     let store_path = StorePath::from(path);
@@ -314,7 +326,13 @@ async fn get_manifest(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Pull)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
 
     counter!("registry_pull_total",
         "tenant" => params.tenant.clone(),
@@ -323,7 +341,11 @@ async fn get_manifest(
     .increment(1);
 
     let path = resolve_manifest_path(
-        &state, &params.tenant, &params.project, &params.name, &params.reference,
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &params.reference,
     )
     .await?;
     let store_path = StorePath::from(path);
@@ -371,7 +393,13 @@ async fn put_manifest(
     Path(params): Path<ManifestRef>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Push)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Push,
+    )?;
 
     counter!("registry_push_total",
         "tenant" => params.tenant.clone(),
@@ -400,7 +428,10 @@ async fn put_manifest(
     // If reference is a tag (not a digest), create a tag link
     if !params.reference.starts_with("sha256:") {
         let tag_p = tag_link_path(
-            &params.tenant, &params.project, &params.name, &params.reference,
+            &params.tenant,
+            &params.project,
+            &params.name,
+            &params.reference,
         );
         let tag_store_path = StorePath::from(tag_p);
         state
@@ -436,10 +467,20 @@ async fn delete_manifest(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Delete)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Delete,
+    )?;
 
     let path = resolve_manifest_path(
-        &state, &params.tenant, &params.project, &params.name, &params.reference,
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &params.reference,
     )
     .await?;
     let store_path = StorePath::from(path);
@@ -455,7 +496,10 @@ async fn delete_manifest(
     // If it was a tag reference, also delete the tag link
     if !params.reference.starts_with("sha256:") {
         let tag_p = tag_link_path(
-            &params.tenant, &params.project, &params.name, &params.reference,
+            &params.tenant,
+            &params.project,
+            &params.name,
+            &params.reference,
         );
         let tag_store_path = StorePath::from(tag_p);
         let _ = state.store.delete(&tag_store_path).await;
@@ -471,9 +515,20 @@ async fn head_blob(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<BlobRef>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Pull)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
 
-    let path = blob_path(&params.tenant, &params.project, &params.name, &params.digest);
+    let path = blob_path(
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &params.digest,
+    );
     let store_path = StorePath::from(path);
 
     let meta = state
@@ -508,7 +563,13 @@ async fn get_blob(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<BlobRef>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Pull)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
 
     counter!("registry_pull_total",
         "tenant" => params.tenant.clone(),
@@ -516,7 +577,12 @@ async fn get_blob(
     )
     .increment(1);
 
-    let path = blob_path(&params.tenant, &params.project, &params.name, &params.digest);
+    let path = blob_path(
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &params.digest,
+    );
     let store_path = StorePath::from(path);
 
     let result = state
@@ -556,7 +622,13 @@ async fn initiate_blob_upload(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<RepoPath>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Push)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Push,
+    )?;
 
     let upload_id = Uuid::new_v4().to_string();
 
@@ -598,7 +670,13 @@ async fn upload_blob_chunk(
     Path(params): Path<UploadRef>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Push)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Push,
+    )?;
 
     let path = upload_path(&params.tenant, &params.project, &params.name, &params.uuid);
     let store_path = StorePath::from(path);
@@ -659,7 +737,13 @@ async fn complete_blob_upload(
     Query(query): Query<DigestQuery>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Push)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Push,
+    )?;
 
     let expected_digest = query.digest.ok_or(RegistryError::DigestInvalid {
         expected: "sha256:...".to_string(),
@@ -700,8 +784,12 @@ async fn complete_blob_upload(
     }
 
     // Store the final blob
-    let final_blob_path =
-        blob_path(&params.tenant, &params.project, &params.name, &expected_digest);
+    let final_blob_path = blob_path(
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &expected_digest,
+    );
     let final_store_path = StorePath::from(final_blob_path);
     state
         .store
@@ -740,7 +828,13 @@ async fn list_tags(
     Path(params): Path<RepoPath>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Response, RegistryError> {
-    authorize(&claims, &params.tenant, &params.project, &params.name, Action::Pull)?;
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
 
     let prefix = tags_prefix(&params.tenant, &params.project, &params.name);
     let store_prefix = StorePath::from(prefix.clone());
@@ -812,11 +906,7 @@ async fn catalog(
     for prefix_entry in &list_result.common_prefixes {
         let project_prefix = prefix_entry.clone();
 
-        if let Ok(project_list) = state
-            .store
-            .list_with_delimiter(Some(&project_prefix))
-            .await
-        {
+        if let Ok(project_list) = state.store.list_with_delimiter(Some(&project_prefix)).await {
             for repo_prefix in &project_list.common_prefixes {
                 let repo_path = repo_prefix.to_string();
                 let repo_name = repo_path.trim_end_matches('/');
@@ -869,13 +959,14 @@ async fn resolve_manifest_path(
         let tag_p = tag_link_path(tenant, project, name, reference);
         let store_path = StorePath::from(tag_p);
 
-        let result = state
-            .store
-            .get(&store_path)
-            .await
-            .map_err(|_| RegistryError::ManifestUnknown {
-                reference: reference.to_string(),
-            })?;
+        let result =
+            state
+                .store
+                .get(&store_path)
+                .await
+                .map_err(|_| RegistryError::ManifestUnknown {
+                    reference: reference.to_string(),
+                })?;
 
         let digest_bytes = result
             .bytes()
@@ -1020,10 +1111,7 @@ async fn main() -> anyhow::Result<()> {
             patch(upload_blob_chunk).put(complete_blob_upload),
         )
         // Tag listing
-        .route(
-            "/v2/{tenant}/{project}/{name}/tags/list",
-            get(list_tags),
-        )
+        .route("/v2/{tenant}/{project}/{name}/tags/list", get(list_tags))
         // Catalog
         .route("/v2/_catalog", get(catalog));
 

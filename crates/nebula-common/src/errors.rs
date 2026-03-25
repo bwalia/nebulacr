@@ -94,9 +94,9 @@ impl RegistryError {
             | Self::TagUnknown { .. }
             | Self::TenantNotFound { .. }
             | Self::ProjectNotFound { .. } => StatusCode::NOT_FOUND,
-            Self::BlobUploadInvalid
-            | Self::DigestInvalid { .. }
-            | Self::ManifestInvalid { .. } => StatusCode::BAD_REQUEST,
+            Self::BlobUploadInvalid | Self::DigestInvalid { .. } | Self::ManifestInvalid { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Unauthorized | Self::TokenExpired | Self::TokenInvalid { .. } => {
                 StatusCode::UNAUTHORIZED
             }

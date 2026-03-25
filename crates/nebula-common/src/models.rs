@@ -104,7 +104,13 @@ impl Role {
     /// Actions permitted for this role.
     pub fn allowed_actions(&self) -> &'static [Action] {
         match self {
-            Role::Admin => &[Action::Pull, Action::Push, Action::Delete, Action::Tag, Action::Manage],
+            Role::Admin => &[
+                Action::Pull,
+                Action::Push,
+                Action::Delete,
+                Action::Tag,
+                Action::Manage,
+            ],
             Role::Maintainer => &[Action::Pull, Action::Push, Action::Delete, Action::Tag],
             Role::Reader => &[Action::Pull],
         }
