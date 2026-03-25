@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 nebula-common = { workspace = true }
+nebula-resilience = { workspace = true }
+nebula-mirror = { workspace = true }
+nebula-replication = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }

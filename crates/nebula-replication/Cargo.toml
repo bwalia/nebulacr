@@ -1,0 +1,21 @@
+[package]
+name = "nebula-replication"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nebula-common = { workspace = true }
+nebula-resilience = { path = "../nebula-resilience" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+object_store = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+async-trait = "0.1"

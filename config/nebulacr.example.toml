@@ -196,3 +196,110 @@ ip_rps = 50
 # Protects the auth service from brute-force and token flooding attacks.
 # This is intentionally a lower limit than the general API rate limit.
 token_issue_rpm = 60
+
+
+# ── Resilience (HA) ──────────────────────────────────────────────────────
+# Connection-level resilience with retry logic and circuit breaker protection.
+# Wraps the storage backend to handle transient failures automatically.
+
+# [resilience.retry]
+# # Maximum number of retry attempts for failed storage operations.
+# max_retries = 3
+# # Base delay in milliseconds for exponential backoff.
+# base_delay_ms = 100
+# # Maximum delay in milliseconds (caps exponential growth).
+# max_delay_ms = 5000
+# # Add random jitter to delays to avoid thundering herd.
+# jitter = true
+
+# [resilience.circuit_breaker]
+# # Number of consecutive failures before the circuit opens.
+# failure_threshold = 5
+# # Number of consecutive successes in half-open state before closing.
+# success_threshold = 3
+# # Duration in seconds the circuit stays open before allowing a test request.
+# open_duration_secs = 30
+
+
+# ── Mirror (Pull-Through Cache) ──────────────────────────────────────────
+# Pull-through cache that transparently fetches images from upstream registries
+# when they are not found locally. Fetched content is cached for future requests.
+
+# [mirror]
+# # Enable pull-through mirroring.
+# enabled = true
+# # Default cache TTL in seconds. Manifests older than this are re-fetched.
+# cache_ttl_secs = 3600
+
+# # Configure upstream registries. Multiple upstreams can be configured.
+# # On a local miss, upstreams are tried in order (tenant-specific first).
+
+# [[mirror.upstreams]]
+# # Unique name for this upstream.
+# name = "docker-hub"
+# # Base URL of the upstream OCI registry.
+# url = "https://registry-1.docker.io"
+# # Only mirror for repositories in this tenant (optional, omit for all tenants).
+# # tenant_prefix = "library"
+# # Credentials for private upstreams (optional).
+# # username = "myuser"
+# # password = "mypassword"
+# # Override the default cache TTL for this upstream (optional).
+# # cache_ttl_secs = 7200
+
+# [[mirror.upstreams]]
+# name = "ghcr"
+# url = "https://ghcr.io"
+# tenant_prefix = "github"
+
+
+# ── Multi-Region Replication & Failover ───────────────────────────────────
+# Configure multi-region deployment with automatic replication and failover.
+# Each region runs its own NebulaCR instance. The primary region accepts writes
+# and replicates to secondaries. Secondaries serve reads and can be promoted
+# on primary failure.
+
+# [multi_region]
+# # Name of this region (must match one of the entries in [[multi_region.regions]]).
+# local_region = "us-east-1"
+# # Health check interval in seconds for failover monitoring.
+# health_check_interval_secs = 10
+# # Port for the internal replication API (not exposed to clients).
+# internal_port = 5002
+
+# [multi_region.replication]
+# # Replication mode:
+# #   "async"     - Eventual consistency. Writes return immediately. (default)
+# #   "semi_sync" - Wait for at least one secondary to acknowledge.
+# mode = "async"
+# # Maximum acceptable replication lag in seconds before alerting.
+# max_lag_secs = 60
+# # Number of objects to replicate per batch.
+# batch_size = 50
+# # Interval in seconds between replication sweeps.
+# sweep_interval_secs = 10
+
+# [[multi_region.regions]]
+# name = "us-east-1"
+# # Public registry endpoint for this region.
+# endpoint = "https://registry-us.example.com"
+# # Internal endpoint for replication traffic (not exposed to clients).
+# internal_endpoint = "http://registry-us-internal:5002"
+# # Whether this is the primary region (accepts writes).
+# is_primary = true
+# # Failover priority (lower = promoted first). Primary should have lowest.
+# priority = 1
+
+# [[multi_region.regions]]
+# name = "eu-west-1"
+# endpoint = "https://registry-eu.example.com"
+# internal_endpoint = "http://registry-eu-internal:5002"
+# is_primary = false
+# priority = 2
+
+# [[multi_region.regions]]
+# name = "ap-southeast-1"
+# endpoint = "https://registry-ap.example.com"
+# internal_endpoint = "http://registry-ap-internal:5002"
+# is_primary = false
+# priority = 3

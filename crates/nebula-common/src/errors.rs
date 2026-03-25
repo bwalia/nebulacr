@@ -51,6 +51,18 @@ pub enum RegistryError {
 
     #[error("storage error: {0}")]
     Storage(String),
+
+    #[error("circuit breaker open for {target}")]
+    CircuitBreakerOpen { target: String },
+
+    #[error("upstream registry error: {0}")]
+    UpstreamError(String),
+
+    #[error("all retries exhausted: {0}")]
+    RetriesExhausted(String),
+
+    #[error("region failover: {0}")]
+    FailoverError(String),
 }
 
 /// OCI error response envelope.
@@ -83,6 +95,10 @@ impl RegistryError {
             Self::RateLimitExceeded => "TOOMANYREQUESTS",
             Self::TokenExpired | Self::TokenInvalid { .. } => "UNAUTHORIZED",
             Self::Internal(_) | Self::Storage(_) => "UNKNOWN",
+            Self::CircuitBreakerOpen { .. } => "UNAVAILABLE",
+            Self::UpstreamError(_) => "UPSTREAM_ERROR",
+            Self::RetriesExhausted(_) => "RETRIES_EXHAUSTED",
+            Self::FailoverError(_) => "FAILOVER_ERROR",
         }
     }
 
@@ -103,6 +119,9 @@ impl RegistryError {
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
             Self::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(_) | Self::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::CircuitBreakerOpen { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UpstreamError(_) | Self::RetriesExhausted(_) => StatusCode::BAD_GATEWAY,
+            Self::FailoverError(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "nebula-resilience"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+object_store = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+rand = { workspace = true }
+async-trait = "0.1"

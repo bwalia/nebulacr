@@ -12,6 +12,156 @@ pub struct RegistryConfig {
     pub rate_limit: RateLimitConfig,
     pub vault: Option<VaultConfig>,
     pub github_oidc: Option<GitHubOidcConfig>,
+    pub resilience: Option<ResilienceConfig>,
+    pub mirror: Option<MirrorConfig>,
+    pub multi_region: Option<MultiRegionConfig>,
+}
+
+// ── Resilience configuration ─────────────────────────────────────
+
+/// Configuration for retry and circuit breaker behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResilienceConfig {
+    pub retry: RetryConfig,
+    pub circuit_breaker: CircuitBreakerCfg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts.
+    pub max_retries: u32,
+    /// Base delay in milliseconds for exponential backoff.
+    pub base_delay_ms: u64,
+    /// Maximum delay in milliseconds.
+    pub max_delay_ms: u64,
+    /// Whether to add random jitter to delay.
+    pub jitter: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerCfg {
+    /// Failures before opening.
+    pub failure_threshold: u32,
+    /// Successes in half-open before closing.
+    pub success_threshold: u32,
+    /// Duration the circuit stays open (seconds).
+    pub open_duration_secs: u64,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            retry: RetryConfig {
+                max_retries: 3,
+                base_delay_ms: 100,
+                max_delay_ms: 5000,
+                jitter: true,
+            },
+            circuit_breaker: CircuitBreakerCfg {
+                failure_threshold: 5,
+                success_threshold: 3,
+                open_duration_secs: 30,
+            },
+        }
+    }
+}
+
+// ── Mirror configuration ─────────────────────────────────────────
+
+/// Configuration for pull-through mirror/cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorConfig {
+    /// Whether mirroring is enabled.
+    pub enabled: bool,
+    /// Upstream registries to mirror from.
+    pub upstreams: Vec<UpstreamRegistryConfig>,
+    /// Default cache TTL in seconds.
+    pub cache_ttl_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamRegistryConfig {
+    /// Unique name for this upstream.
+    pub name: String,
+    /// Base URL (e.g., "https://registry-1.docker.io").
+    pub url: String,
+    /// Only mirror for repos matching this tenant prefix.
+    pub tenant_prefix: Option<String>,
+    /// Optional authentication.
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// Cache TTL override for this upstream (seconds).
+    pub cache_ttl_secs: Option<u64>,
+}
+
+impl Default for MirrorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            upstreams: vec![],
+            cache_ttl_secs: 3600,
+        }
+    }
+}
+
+// ── Multi-region configuration ───────────────────────────────────
+
+/// Configuration for multi-region replication and failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRegionConfig {
+    /// Name of the local region (e.g., "us-east-1").
+    pub local_region: String,
+    /// All regions in the cluster.
+    pub regions: Vec<RegionCfg>,
+    /// Replication policy.
+    pub replication: ReplicationPolicyCfg,
+    /// Health check interval in seconds.
+    pub health_check_interval_secs: u64,
+    /// Port for the internal replication API.
+    pub internal_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionCfg {
+    /// Region name (e.g., "us-east-1").
+    pub name: String,
+    /// Public registry API endpoint URL.
+    pub endpoint: String,
+    /// Internal replication endpoint URL.
+    pub internal_endpoint: String,
+    /// Whether this is the primary region.
+    pub is_primary: bool,
+    /// Failover priority (lower = higher priority).
+    pub priority: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationPolicyCfg {
+    /// Replication mode: "async" or "semi_sync".
+    pub mode: String,
+    /// Max acceptable replication lag in seconds.
+    pub max_lag_secs: u64,
+    /// Objects per replication batch.
+    pub batch_size: usize,
+    /// Interval between replication sweeps (seconds).
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for MultiRegionConfig {
+    fn default() -> Self {
+        Self {
+            local_region: "us-east-1".into(),
+            regions: vec![],
+            replication: ReplicationPolicyCfg {
+                mode: "async".into(),
+                max_lag_secs: 60,
+                batch_size: 50,
+                sweep_interval_secs: 10,
+            },
+            health_check_interval_secs: 10,
+            internal_port: 5002,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +330,9 @@ impl Default for RegistryConfig {
             },
             vault: None,
             github_oidc: None,
+            resilience: None,
+            mirror: None,
+            multi_region: None,
         }
     }
 }

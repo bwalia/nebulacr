@@ -23,7 +23,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use object_store::{ObjectStore, local::LocalFileSystem, path::Path as StorePath};
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
-use tracing::{info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use nebula_common::auth::TokenClaims;
@@ -33,6 +33,18 @@ use nebula_common::models::Action;
 use nebula_common::storage::{
     blob_path, manifest_path, sha256_digest, tag_link_path, tags_prefix, upload_path,
 };
+
+use nebula_mirror::MirrorService;
+use nebula_mirror::service::MirrorConfig as MirrorServiceConfig;
+use nebula_mirror::upstream::UpstreamConfig;
+use nebula_replication::event::ReplicationEvent;
+use nebula_replication::failover::FailoverManager;
+use nebula_replication::region::{
+    MultiRegionConfig as ReplicationMultiRegionConfig, RegionConfig as ReplicationRegionConfig,
+    ReplicationMode, ReplicationPolicy,
+};
+use nebula_replication::replicator::{ReplicationHandle, Replicator};
+use nebula_resilience::{CircuitBreakerConfig, ResilientObjectStore, RetryPolicy};
 
 // ── Application State ────────────────────────────────────────────────────────
 
@@ -48,6 +60,12 @@ struct AppState {
     #[allow(dead_code)]
     rate_limiters: Arc<RwLock<HashMap<String, Arc<KeyedRateLimiter>>>>,
     default_rate_limiter: Arc<KeyedRateLimiter>,
+    /// Pull-through mirror service (optional).
+    mirror_service: Option<Arc<MirrorService>>,
+    /// Replication handle for enqueuing events (optional).
+    replication_handle: Option<ReplicationHandle>,
+    /// Failover manager for multi-region read failover (optional).
+    failover_manager: Option<Arc<FailoverManager>>,
 }
 
 // ── JWT Auth Extractor ───────────────────────────────────────────────────────
@@ -348,16 +366,52 @@ async fn get_manifest(
     .await?;
     let store_path = StorePath::from(path);
 
-    let data = state
-        .store
-        .get(&store_path)
-        .await
-        .map_err(|_| RegistryError::ManifestUnknown {
-            reference: params.reference.clone(),
-        })?
-        .bytes()
-        .await
-        .map_err(|e| RegistryError::Storage(e.to_string()))?;
+    let data = match state.store.get(&store_path).await {
+        Ok(result) => result
+            .bytes()
+            .await
+            .map_err(|e| RegistryError::Storage(e.to_string()))?,
+        Err(_) => {
+            // Try mirror fallback
+            if let Some(ref mirror) = state.mirror_service {
+                debug!(
+                    tenant = %params.tenant,
+                    reference = %params.reference,
+                    "Local manifest miss, trying upstream mirror"
+                );
+                let result = mirror
+                    .fetch_manifest(
+                        &params.tenant,
+                        &params.project,
+                        &params.name,
+                        &params.reference,
+                    )
+                    .await
+                    .map_err(|e| RegistryError::UpstreamError(e.to_string()))?;
+                result.data
+            } else if let Some(ref failover) = state.failover_manager {
+                // Try reading from another region
+                debug!(
+                    tenant = %params.tenant,
+                    reference = %params.reference,
+                    "Local manifest miss, trying failover region"
+                );
+                let path = format!(
+                    "/v2/{}/{}/{}/manifests/{}",
+                    params.tenant, params.project, params.name, params.reference
+                );
+                let proxy = failover
+                    .proxy_get(&path, None)
+                    .await
+                    .map_err(|e| RegistryError::FailoverError(e.to_string()))?;
+                proxy.body
+            } else {
+                return Err(RegistryError::ManifestUnknown {
+                    reference: params.reference.clone(),
+                });
+            }
+        }
+    };
 
     let digest = sha256_digest(&data);
     let media_type = detect_manifest_media_type(&data);
@@ -439,6 +493,20 @@ async fn put_manifest(
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
     }
 
+    // Emit replication event if configured
+    if let Some(ref repl) = state.replication_handle {
+        let event = ReplicationEvent::manifest_push(
+            params.tenant.clone(),
+            params.project.clone(),
+            params.name.clone(),
+            params.reference.clone(),
+            digest.clone(),
+            body.len() as u64,
+            repl.local_region().to_string(),
+        );
+        repl.enqueue(event).await;
+    }
+
     let location = format!(
         "/v2/{}/{}/{}/manifests/{}",
         params.tenant, params.project, params.name, digest
@@ -501,6 +569,19 @@ async fn delete_manifest(
         );
         let tag_store_path = StorePath::from(tag_p);
         let _ = state.store.delete(&tag_store_path).await;
+    }
+
+    // Emit replication event if configured
+    if let Some(ref repl) = state.replication_handle {
+        let event = ReplicationEvent::manifest_delete(
+            params.tenant.clone(),
+            params.project.clone(),
+            params.name.clone(),
+            params.reference.clone(),
+            params.reference.clone(),
+            repl.local_region().to_string(),
+        );
+        repl.enqueue(event).await;
     }
 
     Ok(StatusCode::ACCEPTED.into_response())
@@ -583,18 +664,51 @@ async fn get_blob(
     );
     let store_path = StorePath::from(path);
 
-    let result = state
-        .store
-        .get(&store_path)
-        .await
-        .map_err(|_| RegistryError::BlobUnknown {
-            digest: params.digest.clone(),
-        })?;
-
-    let data = result
-        .bytes()
-        .await
-        .map_err(|e| RegistryError::Storage(e.to_string()))?;
+    let data = match state.store.get(&store_path).await {
+        Ok(result) => result
+            .bytes()
+            .await
+            .map_err(|e| RegistryError::Storage(e.to_string()))?,
+        Err(_) => {
+            // Try mirror fallback
+            if let Some(ref mirror) = state.mirror_service {
+                debug!(
+                    tenant = %params.tenant,
+                    digest = %params.digest,
+                    "Local blob miss, trying upstream mirror"
+                );
+                let result = mirror
+                    .fetch_blob(
+                        &params.tenant,
+                        &params.project,
+                        &params.name,
+                        &params.digest,
+                    )
+                    .await
+                    .map_err(|e| RegistryError::UpstreamError(e.to_string()))?;
+                result.data
+            } else if let Some(ref failover) = state.failover_manager {
+                debug!(
+                    tenant = %params.tenant,
+                    digest = %params.digest,
+                    "Local blob miss, trying failover region"
+                );
+                let path = format!(
+                    "/v2/{}/{}/{}/blobs/{}",
+                    params.tenant, params.project, params.name, params.digest
+                );
+                let proxy = failover
+                    .proxy_get(&path, None)
+                    .await
+                    .map_err(|e| RegistryError::FailoverError(e.to_string()))?;
+                proxy.body
+            } else {
+                return Err(RegistryError::BlobUnknown {
+                    digest: params.digest.clone(),
+                });
+            }
+        }
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -782,6 +896,7 @@ async fn complete_blob_upload(
     }
 
     // Store the final blob
+    let final_data_len = final_data.len() as u64;
     let final_blob_path = blob_path(
         &params.tenant,
         &params.project,
@@ -797,6 +912,19 @@ async fn complete_blob_upload(
 
     // Clean up the upload session
     let _ = state.store.delete(&up_store_path).await;
+
+    // Emit replication event if configured
+    if let Some(ref repl) = state.replication_handle {
+        let event = ReplicationEvent::blob_push(
+            params.tenant.clone(),
+            params.project.clone(),
+            params.name.clone(),
+            expected_digest.clone(),
+            final_data_len,
+            repl.local_region().to_string(),
+        );
+        repl.enqueue(event).await;
+    }
 
     let location = format!(
         "/v2/{}/{}/{}/blobs/{}",
@@ -1000,6 +1128,142 @@ fn detect_manifest_media_type(data: &[u8]) -> String {
     "application/vnd.oci.image.manifest.v1+json".to_string()
 }
 
+// ── Internal Replication Handlers ─────────────────────────────────────────────
+
+/// POST /internal/replicate/manifest - Receive a replicated manifest from another region.
+async fn internal_replicate_manifest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    let tenant = extract_header(&headers, "x-replication-tenant")?;
+    let project = extract_header(&headers, "x-replication-project")?;
+    let repo = extract_header(&headers, "x-replication-repo")?;
+    let reference = extract_header(&headers, "x-replication-reference")?;
+    let digest = extract_header(&headers, "x-replication-digest")?;
+
+    info!(
+        tenant = %tenant,
+        project = %project,
+        repo = %repo,
+        digest = %digest,
+        "Receiving replicated manifest"
+    );
+
+    // Store manifest by digest
+    let digest_path = manifest_path(&tenant, &project, &repo, &digest);
+    let digest_store_path = StorePath::from(digest_path);
+    state
+        .store
+        .put(&digest_store_path, body.clone().into())
+        .await
+        .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+    // If reference is a tag, create tag link
+    if !reference.starts_with("sha256:") {
+        let tag_p = tag_link_path(&tenant, &project, &repo, &reference);
+        let tag_store_path = StorePath::from(tag_p);
+        state
+            .store
+            .put(&tag_store_path, Bytes::from(digest.clone()).into())
+            .await
+            .map_err(|e| RegistryError::Storage(e.to_string()))?;
+    }
+
+    Ok(StatusCode::OK.into_response())
+}
+
+/// POST /internal/replicate/blob - Receive a replicated blob from another region.
+async fn internal_replicate_blob(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    let tenant = extract_header(&headers, "x-replication-tenant")?;
+    let project = extract_header(&headers, "x-replication-project")?;
+    let repo = extract_header(&headers, "x-replication-repo")?;
+    let digest = extract_header(&headers, "x-replication-digest")?;
+
+    info!(
+        tenant = %tenant,
+        project = %project,
+        repo = %repo,
+        digest = %digest,
+        "Receiving replicated blob"
+    );
+
+    let store_path = StorePath::from(blob_path(&tenant, &project, &repo, &digest));
+    state
+        .store
+        .put(&store_path, body.into())
+        .await
+        .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+    Ok(StatusCode::OK.into_response())
+}
+
+/// POST /internal/replicate/delete - Receive a replicated delete from another region.
+async fn internal_replicate_delete(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    let event: ReplicationEvent = serde_json::from_slice(&body)
+        .map_err(|e| RegistryError::Internal(format!("invalid replication event: {e}")))?;
+
+    info!(
+        tenant = %event.tenant,
+        repo = %event.repo,
+        reference = %event.reference,
+        "Receiving replicated delete"
+    );
+
+    let path = manifest_path(&event.tenant, &event.project, &event.repo, &event.digest);
+    let store_path = StorePath::from(path);
+    let _ = state.store.delete(&store_path).await;
+
+    // Delete tag link if applicable
+    if !event.reference.starts_with("sha256:") {
+        let tag_p = tag_link_path(&event.tenant, &event.project, &event.repo, &event.reference);
+        let tag_store_path = StorePath::from(tag_p);
+        let _ = state.store.delete(&tag_store_path).await;
+    }
+
+    Ok(StatusCode::OK.into_response())
+}
+
+/// GET /internal/replication/status - Get replication and failover status.
+async fn internal_replication_status(
+    State(state): State<AppState>,
+) -> Result<Response, RegistryError> {
+    let mut status = serde_json::Map::new();
+
+    if let Some(ref failover) = state.failover_manager {
+        let health = failover.all_health().await;
+        status.insert(
+            "regions".to_string(),
+            serde_json::to_value(&health).unwrap_or_default(),
+        );
+        status.insert(
+            "is_primary".to_string(),
+            serde_json::Value::Bool(failover.is_local_primary()),
+        );
+    }
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::Value::Object(status)),
+    )
+        .into_response())
+}
+
+fn extract_header(headers: &HeaderMap, name: &str) -> Result<String, RegistryError> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| RegistryError::Internal(format!("missing header: {name}")))
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -1038,7 +1302,28 @@ async fn main() -> anyhow::Result<()> {
     // Initialize object store (filesystem backend)
     let storage_root = &config.storage.root;
     std::fs::create_dir_all(storage_root)?;
-    let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(storage_root)?);
+    let raw_store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(storage_root)?);
+
+    // Wrap with resilience layer (circuit breaker + retry)
+    let store: Arc<dyn ObjectStore> = if let Some(ref resilience_cfg) = config.resilience {
+        info!("Initializing resilient storage wrapper (retry + circuit breaker)");
+        Arc::new(ResilientObjectStore::new(
+            raw_store,
+            RetryPolicy {
+                max_retries: resilience_cfg.retry.max_retries,
+                base_delay_ms: resilience_cfg.retry.base_delay_ms,
+                max_delay_ms: resilience_cfg.retry.max_delay_ms,
+                jitter: resilience_cfg.retry.jitter,
+            },
+            CircuitBreakerConfig {
+                failure_threshold: resilience_cfg.circuit_breaker.failure_threshold,
+                success_threshold: resilience_cfg.circuit_breaker.success_threshold,
+                open_duration_secs: resilience_cfg.circuit_breaker.open_duration_secs,
+            },
+        ))
+    } else {
+        raw_store
+    };
 
     info!(root = %storage_root, "Storage backend initialized (filesystem)");
 
@@ -1066,7 +1351,111 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(std::num::NonZeroU32::new(100).unwrap());
     let default_rate_limiter = Arc::new(RateLimiter::keyed(Quota::per_second(default_rps)));
 
+    // Initialize mirror service (pull-through cache)
+    let mirror_service = if let Some(ref mirror_cfg) = config.mirror {
+        if mirror_cfg.enabled && !mirror_cfg.upstreams.is_empty() {
+            info!(
+                upstreams = mirror_cfg.upstreams.len(),
+                "Initializing pull-through mirror service"
+            );
+            let svc_config = MirrorServiceConfig {
+                enabled: mirror_cfg.enabled,
+                upstreams: mirror_cfg
+                    .upstreams
+                    .iter()
+                    .map(|u| UpstreamConfig {
+                        name: u.name.clone(),
+                        url: u.url.clone(),
+                        username: u.username.clone(),
+                        password: u.password.clone(),
+                        cache_ttl_secs: u.cache_ttl_secs.unwrap_or(mirror_cfg.cache_ttl_secs),
+                        tenant_prefix: u.tenant_prefix.clone(),
+                    })
+                    .collect(),
+                cache_ttl_secs: mirror_cfg.cache_ttl_secs,
+            };
+            Some(Arc::new(MirrorService::new(&svc_config, store.clone())))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Initialize multi-region replication and failover
+    let (replication_handle, failover_manager) = if let Some(ref mr_cfg) = config.multi_region {
+        if !mr_cfg.regions.is_empty() {
+            info!(
+                local_region = %mr_cfg.local_region,
+                regions = mr_cfg.regions.len(),
+                "Initializing multi-region replication"
+            );
+
+            let repl_regions: Vec<ReplicationRegionConfig> = mr_cfg
+                .regions
+                .iter()
+                .map(|r| ReplicationRegionConfig {
+                    name: r.name.clone(),
+                    endpoint: r.endpoint.clone(),
+                    internal_endpoint: r.internal_endpoint.clone(),
+                    is_primary: r.is_primary,
+                    priority: r.priority,
+                })
+                .collect();
+
+            let repl_mode = if mr_cfg.replication.mode == "semi_sync" {
+                ReplicationMode::SemiSync
+            } else {
+                ReplicationMode::Async
+            };
+
+            let repl_config = ReplicationMultiRegionConfig {
+                local_region: mr_cfg.local_region.clone(),
+                regions: repl_regions.clone(),
+                replication: ReplicationPolicy {
+                    mode: repl_mode,
+                    max_lag_secs: mr_cfg.replication.max_lag_secs,
+                    batch_size: mr_cfg.replication.batch_size,
+                    sweep_interval_secs: mr_cfg.replication.sweep_interval_secs,
+                },
+            };
+
+            let replicator = Replicator::new(&repl_config, store.clone());
+            let repl_handle = replicator.handle();
+
+            // Start the background replication loop
+            tokio::spawn(async move {
+                replicator.run().await;
+            });
+
+            // Initialize failover manager
+            let failover_regions = repl_regions;
+            let failover = Arc::new(FailoverManager::new(
+                mr_cfg.local_region.clone(),
+                failover_regions,
+                mr_cfg.health_check_interval_secs,
+            ));
+
+            // Start the background health check loop
+            let failover_clone = failover.clone();
+            tokio::spawn(async move {
+                failover_clone.run().await;
+            });
+
+            (Some(repl_handle), Some(failover))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     let listen_addr = config.server.listen_addr.clone();
+    let internal_port = config
+        .multi_region
+        .as_ref()
+        .map(|mr| mr.internal_port)
+        .unwrap_or(5002);
 
     let state = AppState {
         store,
@@ -1075,6 +1464,9 @@ async fn main() -> anyhow::Result<()> {
         prom_handle,
         rate_limiters: Arc::new(RwLock::new(HashMap::new())),
         default_rate_limiter,
+        mirror_service,
+        replication_handle,
+        failover_manager,
     };
 
     // Build the router
@@ -1122,7 +1514,35 @@ async fn main() -> anyhow::Result<()> {
             rate_limit_middleware,
         ))
         .layer(TraceLayer::new_for_http())
+        .with_state(state.clone());
+
+    // Internal replication API (separate listener for security)
+    let internal_routes = Router::new()
+        .route(
+            "/internal/replicate/manifest",
+            post(internal_replicate_manifest),
+        )
+        .route("/internal/replicate/blob", post(internal_replicate_blob))
+        .route(
+            "/internal/replicate/delete",
+            post(internal_replicate_delete),
+        )
+        .route(
+            "/internal/replication/status",
+            get(internal_replication_status),
+        )
         .with_state(state);
+
+    let internal_addr = format!("0.0.0.0:{internal_port}");
+
+    // Start the internal replication listener in the background
+    let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
+    info!(addr = %internal_addr, "Internal replication API listening");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(internal_listener, internal_routes).await {
+            error!(error = %e, "Internal replication API error");
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, "NebulaCR Registry listening");

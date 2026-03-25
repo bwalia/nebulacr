@@ -2021,6 +2021,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-mirror"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "hex",
+ "nebula-common",
+ "nebula-resilience",
+ "object_store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nebula-registry"
 version = "0.1.0"
 dependencies = [
@@ -2036,6 +2056,9 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "nebula-common",
+ "nebula-mirror",
+ "nebula-replication",
+ "nebula-resilience",
  "object_store",
  "reqwest",
  "serde",
@@ -2048,6 +2071,42 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "nebula-replication"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "hex",
+ "nebula-common",
+ "nebula-resilience",
+ "object_store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nebula-resilience"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "object_store",
+ "rand 0.9.2",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

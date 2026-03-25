@@ -4,6 +4,9 @@ members = [
     "crates/nebula-auth",
     "crates/nebula-registry",
     "crates/nebula-controller",
+    "crates/nebula-resilience",
+    "crates/nebula-mirror",
+    "crates/nebula-replication",
 ]
 resolver = "3"
 
@@ -85,3 +88,9 @@ nebula-common = { path = "crates/nebula-common" }
 nebula-auth = { path = "crates/nebula-auth" }
 nebula-registry = { path = "crates/nebula-registry" }
 nebula-controller = { path = "crates/nebula-controller" }
+nebula-resilience = { path = "crates/nebula-resilience" }
+nebula-mirror = { path = "crates/nebula-mirror" }
+nebula-replication = { path = "crates/nebula-replication" }
+
+# Async traits
+async-trait = "0.1"
