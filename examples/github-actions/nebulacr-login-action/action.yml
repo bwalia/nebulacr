@@ -1,0 +1,268 @@
+# ============================================================================
+# NebulaCR Login - Custom Composite GitHub Action
+#
+# A composite action that handles the full NebulaCR OIDC authentication flow:
+#   1. Requests an OIDC identity token from GitHub
+#   2. Exchanges it for a short-lived NebulaCR access token
+#   3. Performs `docker login` to the NebulaCR registry
+#
+# This action can be used as a drop-in step in any workflow. It encapsulates
+# all the authentication complexity into a single step.
+#
+# Usage:
+#
+#   # In your workflow, ensure OIDC permission is granted:
+#   permissions:
+#     id-token: write
+#     contents: read
+#
+#   steps:
+#     - name: Login to NebulaCR
+#       id: nebulacr-login
+#       uses: my-org/nebulacr-actions/login@v1
+#       with:
+#         registry_url: registry.example.com:5000
+#         auth_url: https://auth.example.com:5001
+#         tenant: my-org
+#         project: my-project
+#         actions: pull,push
+#
+#     # The token and registry URL are available as outputs:
+#     - name: Use the token
+#       run: |
+#         echo "Registry: ${{ steps.nebulacr-login.outputs.registry_url }}"
+#         echo "Token available for API calls"
+#
+#     # Build and push as usual -- docker is already authenticated
+#     - name: Build and push
+#       uses: docker/build-push-action@v6
+#       with:
+#         push: true
+#         tags: ${{ steps.nebulacr-login.outputs.registry_url }}/my-org/my-project/my-app:latest
+#
+# Security:
+#   - No secrets required (zero-trust OIDC flow)
+#   - NebulaCR tokens expire after 5 minutes
+#   - Tokens are masked in all workflow logs
+#   - docker login uses --password-stdin (token never in process args)
+#
+# ============================================================================
+
+name: 'NebulaCR Login'
+description: 'Authenticate to NebulaCR using GitHub OIDC (zero-trust, no secrets required)'
+author: 'NebulaCR'
+
+branding:
+  icon: 'lock'
+  color: 'blue'
+
+# ── Inputs ──────────────────────────────────────────────────────────────────
+inputs:
+  registry_url:
+    description: 'NebulaCR registry endpoint (host:port for Docker protocol)'
+    required: true
+  auth_url:
+    description: 'NebulaCR auth API endpoint (https://...)'
+    required: true
+  tenant:
+    description: 'NebulaCR tenant name'
+    required: true
+  project:
+    description: 'NebulaCR project name'
+    required: true
+  actions:
+    description: 'Comma-separated actions to request (pull, push). Default: pull,push'
+    required: false
+    default: 'pull,push'
+  audience:
+    description: 'OIDC audience claim (must match NebulaCR OIDC provider config). Default: nebulacr'
+    required: false
+    default: 'nebulacr'
+  repository:
+    description: 'Specific image repository to scope the token to. If empty, token is scoped to the project level.'
+    required: false
+    default: ''
+  docker_login:
+    description: 'Whether to perform docker login automatically. Set to false if you only need the token. Default: true'
+    required: false
+    default: 'true'
+
+# ── Outputs ─────────────────────────────────────────────────────────────────
+outputs:
+  token:
+    description: 'Short-lived NebulaCR access token (masked in logs). Can be used for docker login or API calls.'
+    value: ${{ steps.exchange.outputs.token }}
+  registry_url:
+    description: 'NebulaCR registry URL (pass-through for convenience in downstream steps)'
+    value: ${{ inputs.registry_url }}
+  token_expires_in:
+    description: 'Token TTL in seconds'
+    value: ${{ steps.exchange.outputs.expires_in }}
+  token_id:
+    description: 'Token identifier for audit trail'
+    value: ${{ steps.exchange.outputs.token_id }}
+
+# ── Steps ───────────────────────────────────────────────────────────────────
+runs:
+  using: 'composite'
+  steps:
+    # Step 1: Request OIDC identity token from GitHub's token service
+    #
+    # GitHub injects ACTIONS_ID_TOKEN_REQUEST_URL and
+    # ACTIONS_ID_TOKEN_REQUEST_TOKEN when the workflow has
+    # `permissions: id-token: write`. We call that endpoint to get a JWT
+    # that proves this workflow's identity.
+    - name: Request GitHub OIDC token
+      id: oidc
+      shell: bash
+      run: |
+        # Validate that OIDC is available (permission must be granted by caller)
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL}" ]; then
+          echo "::error::OIDC token request URL is not available."
+          echo "::error::Ensure the calling workflow has 'permissions: id-token: write'."
+          echo "::error::For reusable workflows, the caller must also have this permission."
+          exit 1
+        fi
+
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" ]; then
+          echo "::error::OIDC token request token is not available."
+          exit 1
+        fi
+
+        echo "Requesting OIDC token with audience: ${{ inputs.audience }}"
+
+        # Request the OIDC JWT from GitHub's token service
+        OIDC_RESPONSE=$(curl -sSf \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ inputs.audience }}" \
+          2>&1) || {
+          echo "::error::Failed to request OIDC token from GitHub: ${OIDC_RESPONSE}"
+          exit 1
+        }
+
+        OIDC_TOKEN=$(echo "${OIDC_RESPONSE}" | jq -r '.value')
+
+        if [ -z "${OIDC_TOKEN}" ] || [ "${OIDC_TOKEN}" = "null" ]; then
+          echo "::error::GitHub OIDC response did not contain a token"
+          echo "::error::Response: $(echo "${OIDC_RESPONSE}" | jq -c 'del(.value)' 2>/dev/null || echo 'unparseable')"
+          exit 1
+        fi
+
+        # Mask the token so it never appears in logs
+        echo "::add-mask::${OIDC_TOKEN}"
+        echo "token=${OIDC_TOKEN}" >> "${GITHUB_OUTPUT}"
+        echo "GitHub OIDC token obtained (${#OIDC_TOKEN} chars)"
+
+    # Step 2: Exchange the GitHub OIDC token for a NebulaCR access token
+    #
+    # POST to /auth/github-actions/token with the GitHub JWT and desired scope.
+    # NebulaCR validates the JWT, checks access policies, and returns a
+    # short-lived registry token.
+    - name: Exchange for NebulaCR token
+      id: exchange
+      shell: bash
+      run: |
+        # Convert comma-separated actions to JSON array
+        # e.g., "pull,push" -> ["pull", "push"]
+        ACTIONS_JSON=$(echo "${{ inputs.actions }}" \
+          | tr ',' '\n' \
+          | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+          | jq -R . \
+          | jq -sc .)
+
+        echo "Requesting NebulaCR token..."
+        echo "  Auth URL:   ${{ inputs.auth_url }}"
+        echo "  Tenant:     ${{ inputs.tenant }}"
+        echo "  Project:    ${{ inputs.project }}"
+        echo "  Repository: ${{ inputs.repository || '(project-level)' }}"
+        echo "  Actions:    ${ACTIONS_JSON}"
+
+        # Build the scope object, conditionally including repository
+        REPO_FIELD=""
+        if [ -n "${{ inputs.repository }}" ]; then
+          REPO_FIELD="\"repository\": \"${{ inputs.repository }}\","
+        fi
+
+        RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+          "${{ inputs.auth_url }}/auth/github-actions/token" \
+          -H "Content-Type: application/json" \
+          -H "User-Agent: nebulacr-login-action/1.0" \
+          -d "{
+            \"identity_token\": \"${{ steps.oidc.outputs.token }}\",
+            \"scope\": {
+              \"tenant\": \"${{ inputs.tenant }}\",
+              \"project\": \"${{ inputs.project }}\",
+              ${REPO_FIELD}
+              \"actions\": ${ACTIONS_JSON}
+            }
+          }")
+
+        HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+        BODY=$(echo "${RESPONSE}" | sed '$d')
+
+        if [ "${HTTP_CODE}" != "200" ]; then
+          echo "::error::NebulaCR authentication failed (HTTP ${HTTP_CODE})"
+
+          # Parse and display the error without leaking sensitive details
+          ERROR_TYPE=$(echo "${BODY}" | jq -r '.error // "unknown"' 2>/dev/null)
+          ERROR_MSG=$(echo "${BODY}" | jq -r '.message // "No details"' 2>/dev/null)
+          echo "::error::${ERROR_TYPE}: ${ERROR_MSG}"
+
+          # Troubleshooting hints
+          case "${HTTP_CODE}" in
+            401)
+              echo "::error::Troubleshooting: Verify that NebulaCR trusts GitHub's OIDC issuer"
+              echo "::error::  issuer_url = https://token.actions.githubusercontent.com"
+              echo "::error::  audience   = ${{ inputs.audience }}"
+              ;;
+            403)
+              echo "::error::Troubleshooting: Verify access policy binds this repo to a role"
+              echo "::error::  subject = repo:${GITHUB_REPOSITORY}:ref:${GITHUB_REF}"
+              ;;
+            404)
+              echo "::error::Troubleshooting: Verify auth_url is correct: ${{ inputs.auth_url }}"
+              ;;
+            422)
+              echo "::error::Troubleshooting: Verify tenant/project/repository exist in NebulaCR"
+              ;;
+          esac
+          exit 1
+        fi
+
+        # Extract token and metadata
+        ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+        EXPIRES_IN=$(echo "${BODY}" | jq -r '.expires_in // "300"')
+        TOKEN_ID=$(echo "${BODY}" | jq -r '.token_id // "unknown"')
+
+        if [ -z "${ACCESS_TOKEN}" ] || [ "${ACCESS_TOKEN}" = "null" ]; then
+          echo "::error::NebulaCR returned 200 but response contained no token"
+          exit 1
+        fi
+
+        # Mask the access token in all subsequent log output
+        echo "::add-mask::${ACCESS_TOKEN}"
+
+        # Set outputs
+        echo "token=${ACCESS_TOKEN}" >> "${GITHUB_OUTPUT}"
+        echo "expires_in=${EXPIRES_IN}" >> "${GITHUB_OUTPUT}"
+        echo "token_id=${TOKEN_ID}" >> "${GITHUB_OUTPUT}"
+
+        echo "NebulaCR token obtained successfully"
+        echo "  Token ID:   ${TOKEN_ID}"
+        echo "  Expires in: ${EXPIRES_IN}s"
+
+    # Step 3: Docker login using the NebulaCR token
+    #
+    # This step is optional (controlled by the docker_login input).
+    # It performs `docker login` so subsequent docker build/push commands
+    # can access the NebulaCR registry transparently.
+    - name: Docker login to NebulaCR
+      if: inputs.docker_login == 'true'
+      shell: bash
+      run: |
+        echo "${{ steps.exchange.outputs.token }}" | \
+          docker login "${{ inputs.registry_url }}" \
+            --username "github-actions" \
+            --password-stdin
+
+        echo "Docker login to ${{ inputs.registry_url }} successful"

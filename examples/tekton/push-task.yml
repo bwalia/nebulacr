@@ -1,0 +1,559 @@
+# ============================================================================
+# Tekton Task: Build and Push to NebulaCR
+#
+# This Tekton Task builds a container image with Kaniko and pushes it to
+# NebulaCR, using SPIFFE/SPIRE workload identity for zero-trust authentication.
+#
+# Authentication flow:
+#   1. The Task pod receives a SPIFFE SVID (X.509 or JWT) from the SPIRE agent
+#   2. The SVID is exchanged for a NebulaCR short-lived access token
+#   3. The access token is used for Kaniko registry authentication
+#   4. Credentials are cleaned up after the push
+#
+# SPIFFE/SPIRE provides:
+#   - Cryptographic workload identity (no static secrets)
+#   - Automatic certificate rotation
+#   - Platform-agnostic identity attestation
+#   - Fine-grained identity based on Kubernetes namespace/serviceaccount
+#
+# Alternative: If SPIRE is not available, the Task can use Kubernetes
+# ServiceAccount Token Volume Projection (see the k8s-oidc variant below).
+#
+# Prerequisites:
+#   - Tekton Pipelines v0.50+ installed
+#   - SPIRE agent running as a DaemonSet on cluster nodes
+#   - SPIRE server configured with:
+#       - Kubernetes workload registrar
+#       - Entry for this task's service account
+#   - NebulaCR auth service configured to trust the SPIRE server as an
+#     OIDC issuer (SPIRE can expose an OIDC discovery endpoint)
+#
+# Usage in a Pipeline:
+#
+#   tasks:
+#     - name: build-and-push
+#       taskRef:
+#         name: nebulacr-build-push
+#       params:
+#         - name: IMAGE
+#           value: registry.example.com:5000/my-org/my-project/my-app
+#         - name: DOCKERFILE
+#           value: ./Dockerfile
+#         - name: CONTEXT
+#           value: .
+#       workspaces:
+#         - name: source
+#           workspace: shared-workspace
+#
+# ============================================================================
+
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: nebulacr-build-push
+  namespace: tekton-pipelines
+  labels:
+    app.kubernetes.io/name: nebulacr-build-push
+    app.kubernetes.io/version: "1.0"
+    tekton.dev/categories: Image Build
+    tekton.dev/tags: image-build,nebulacr,kaniko,spiffe
+  annotations:
+    tekton.dev/displayName: "NebulaCR Build and Push (SPIFFE/SPIRE)"
+    tekton.dev/pipelines.minVersion: "0.50.0"
+spec:
+  # ── Description ───────────────────────────────────────────────────────────
+  description: >-
+    Build a container image with Kaniko and push to NebulaCR using
+    SPIFFE/SPIRE workload identity for zero-trust authentication.
+    No static credentials required.
+
+  # ── Parameters ────────────────────────────────────────────────────────────
+  params:
+    - name: IMAGE
+      type: string
+      description: >-
+        Full image reference to push to (e.g.,
+        registry.example.com:5000/tenant/project/image).
+        Tags will be appended by the task.
+
+    - name: TAG
+      type: string
+      description: Image tag
+      default: "latest"
+
+    - name: DOCKERFILE
+      type: string
+      description: Path to the Dockerfile (relative to the workspace)
+      default: "./Dockerfile"
+
+    - name: CONTEXT
+      type: string
+      description: Docker build context (relative to the workspace)
+      default: "."
+
+    - name: BUILD_ARGS
+      type: array
+      description: >-
+        Additional build arguments (e.g., ["--build-arg=VERSION=1.0",
+        "--build-arg=ENV=prod"])
+      default: []
+
+    - name: NEBULACR_AUTH_URL
+      type: string
+      description: NebulaCR auth API endpoint
+      default: "https://auth.example.com:5001"
+
+    - name: NEBULACR_TENANT
+      type: string
+      description: NebulaCR tenant name
+      default: "my-org"
+
+    - name: NEBULACR_PROJECT
+      type: string
+      description: NebulaCR project name
+      default: "my-project"
+
+    - name: NEBULACR_REGISTRY
+      type: string
+      description: NebulaCR registry host:port
+      default: "registry.example.com:5000"
+
+    - name: EXTRA_ARGS
+      type: array
+      description: Extra arguments passed to Kaniko executor
+      default: []
+
+    - name: TRIVY_ENABLED
+      type: string
+      description: "Enable Trivy vulnerability scan (true/false)"
+      default: "true"
+
+    - name: TRIVY_SEVERITY
+      type: string
+      description: "Trivy severity threshold"
+      default: "CRITICAL,HIGH"
+
+  # ── Workspaces ────────────────────────────────────────────────────────────
+  workspaces:
+    - name: source
+      description: >-
+        Workspace containing the source code and Dockerfile.
+        Typically populated by a git-clone task.
+
+    - name: dockerconfig
+      description: >-
+        Workspace for Docker config (auto-populated by the authenticate step).
+        Use an emptyDir volume.
+      optional: true
+
+  # ── Results ───────────────────────────────────────────────────────────────
+  results:
+    - name: IMAGE_DIGEST
+      type: string
+      description: Digest (sha256:...) of the pushed image
+    - name: IMAGE_REF
+      type: string
+      description: Full image reference with tag
+    - name: IMAGE_URL
+      type: string
+      description: Full image reference with digest
+
+  # ── Steps ─────────────────────────────────────────────────────────────────
+  steps:
+    # ── Step 1: Authenticate ────────────────────────────────────────────────
+    # Obtain a NebulaCR access token using SPIFFE/SPIRE workload identity.
+    #
+    # The SPIRE agent runs as a DaemonSet and provides identity to pods
+    # via the SPIFFE Workload API (Unix domain socket). The spire-agent
+    # CLI fetches a JWT-SVID (SPIFFE Verifiable Identity Document) that
+    # NebulaCR can validate against the SPIRE server's OIDC endpoint.
+    #
+    # If SPIRE is not available, this step falls back to Kubernetes
+    # ServiceAccount Token Volume Projection.
+    - name: authenticate
+      image: curlimages/curl:8.7.1
+      env:
+        - name: NEBULACR_AUTH_URL
+          value: "$(params.NEBULACR_AUTH_URL)"
+        - name: NEBULACR_TENANT
+          value: "$(params.NEBULACR_TENANT)"
+        - name: NEBULACR_PROJECT
+          value: "$(params.NEBULACR_PROJECT)"
+        - name: NEBULACR_REGISTRY
+          value: "$(params.NEBULACR_REGISTRY)"
+        - name: IMAGE_NAME
+          # Extract image name from the full IMAGE parameter
+          # e.g., "registry.example.com:5000/tenant/project/my-app" -> "my-app"
+          value: "$(params.IMAGE)"
+      script: |
+        #!/bin/sh
+        set -eu
+
+        echo "=== NebulaCR Authentication ==="
+
+        # ── Strategy 1: SPIFFE/SPIRE JWT-SVID ──────────────────────────
+        # The SPIRE agent socket is mounted at /run/spire/sockets/agent.sock
+        # If available, fetch a JWT-SVID with the "nebulacr" audience.
+        IDENTITY_TOKEN=""
+        if [ -S "/run/spire/sockets/agent.sock" ]; then
+          echo "SPIRE agent detected, fetching JWT-SVID..."
+
+          # Use the SPIRE agent CLI to fetch a JWT-SVID
+          # The SVID will contain:
+          #   iss: "https://spire.example.com"
+          #   sub: "spiffe://example.com/ns/tekton-pipelines/sa/nebulacr-builder"
+          #   aud: "nebulacr"
+          IDENTITY_TOKEN=$(/opt/spire/bin/spire-agent api fetch jwt \
+            -audience nebulacr \
+            -socketPath /run/spire/sockets/agent.sock \
+            -timeout 10s 2>/dev/null | head -1)
+
+          if [ -n "${IDENTITY_TOKEN}" ]; then
+            echo "JWT-SVID obtained from SPIRE agent"
+          else
+            echo "WARNING: Failed to fetch JWT-SVID from SPIRE, falling back to K8s SA token"
+          fi
+        fi
+
+        # ── Strategy 2: Kubernetes ServiceAccount Token ────────────────
+        # If SPIRE is not available, use the projected SA token with
+        # the "nebulacr" audience (mounted via the volume below).
+        if [ -z "${IDENTITY_TOKEN}" ]; then
+          SA_TOKEN_PATH="/var/run/secrets/nebulacr/token"
+          if [ -f "${SA_TOKEN_PATH}" ]; then
+            IDENTITY_TOKEN=$(cat "${SA_TOKEN_PATH}")
+            echo "Using Kubernetes ServiceAccount projected token"
+          else
+            echo "ERROR: No identity token available (no SPIRE agent, no projected SA token)"
+            echo "Ensure either SPIRE is running or a projected SA token volume is mounted"
+            exit 1
+          fi
+        fi
+
+        # ── Exchange identity token for NebulaCR access token ──────────
+        # Extract just the image name from the full reference for scoping
+        REPO_NAME=$(echo "${IMAGE_NAME}" | awk -F'/' '{print $NF}')
+
+        echo "Exchanging identity token for NebulaCR access token..."
+        echo "  Registry: ${NEBULACR_REGISTRY}"
+        echo "  Tenant:   ${NEBULACR_TENANT}"
+        echo "  Project:  ${NEBULACR_PROJECT}"
+        echo "  Repo:     ${REPO_NAME}"
+
+        RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+          "${NEBULACR_AUTH_URL}/auth/token" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"identity_token\": \"${IDENTITY_TOKEN}\",
+            \"scope\": {
+              \"tenant\": \"${NEBULACR_TENANT}\",
+              \"project\": \"${NEBULACR_PROJECT}\",
+              \"repository\": \"${REPO_NAME}\",
+              \"actions\": [\"pull\", \"push\"]
+            }
+          }")
+
+        HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+        BODY=$(echo "${RESPONSE}" | sed '$d')
+
+        if [ "${HTTP_CODE}" != "200" ]; then
+          echo "ERROR: NebulaCR authentication failed (HTTP ${HTTP_CODE})"
+          echo "${BODY}" | jq -r '.error // "unknown"' 2>/dev/null || true
+          echo "${BODY}" | jq -r '.message // ""' 2>/dev/null || true
+          exit 1
+        fi
+
+        ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+        EXPIRES_IN=$(echo "${BODY}" | jq -r '.expires_in // "unknown"')
+        echo "NebulaCR token obtained (expires in ${EXPIRES_IN}s)"
+
+        # ── Write Docker config for Kaniko ─────────────────────────────
+        # Kaniko reads /kaniko/.docker/config.json for authentication.
+        AUTH_B64=$(printf "tekton:%s" "${ACCESS_TOKEN}" | base64 | tr -d '\n')
+        mkdir -p /kaniko/.docker
+        cat > /kaniko/.docker/config.json <<ENDCONFIG
+        {
+          "auths": {
+            "${NEBULACR_REGISTRY}": {
+              "auth": "${AUTH_B64}"
+            }
+          }
+        }
+        ENDCONFIG
+
+        # Also write to the shared workspace so the verify step can use it
+        mkdir -p "$(workspaces.source.path)/.docker"
+        cp /kaniko/.docker/config.json "$(workspaces.source.path)/.docker/config.json"
+
+        echo "Docker config written for Kaniko"
+
+      volumeMounts:
+        # SPIRE agent socket (optional -- only if SPIRE is deployed)
+        - name: spire-agent-socket
+          mountPath: /run/spire/sockets
+          readOnly: true
+        # Kubernetes projected ServiceAccount token (fallback)
+        - name: nebulacr-token
+          mountPath: /var/run/secrets/nebulacr
+          readOnly: true
+        # Kaniko Docker config directory
+        - name: kaniko-docker-config
+          mountPath: /kaniko/.docker
+
+    # ── Step 2: Build with Kaniko ───────────────────────────────────────────
+    # Kaniko builds container images in userspace without requiring a Docker
+    # daemon. This makes it safe to run in unprivileged pods (no DinD needed).
+    - name: build
+      image: gcr.io/kaniko-project/executor:v1.23.2
+      args:
+        - --dockerfile=$(params.DOCKERFILE)
+        - --context=$(workspaces.source.path)/$(params.CONTEXT)
+        - --destination=$(params.IMAGE):$(params.TAG)
+        - --digest-file=$(results.IMAGE_DIGEST.path)
+        - --cache=true
+        - --cache-repo=$(params.NEBULACR_REGISTRY)/$(params.NEBULACR_TENANT)/$(params.NEBULACR_PROJECT)/cache
+        - --reproducible
+        - --snapshot-mode=redo
+        - --label=org.opencontainers.image.revision=$(params.TAG)
+        - --label=tekton.dev/task=nebulacr-build-push
+        - $(params.BUILD_ARGS[*])
+        - $(params.EXTRA_ARGS[*])
+      volumeMounts:
+        - name: kaniko-docker-config
+          mountPath: /kaniko/.docker
+          readOnly: true
+
+    # ── Step 3: Write results ───────────────────────────────────────────────
+    # Capture build outputs for downstream tasks in the pipeline.
+    - name: write-results
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        set -eu
+
+        DIGEST=$(cat "$(results.IMAGE_DIGEST.path)")
+        IMAGE_REF="$(params.IMAGE):$(params.TAG)"
+        IMAGE_URL="$(params.IMAGE)@${DIGEST}"
+
+        # Write results for pipeline consumption
+        printf "%s" "${IMAGE_REF}" > "$(results.IMAGE_REF.path)"
+        printf "%s" "${IMAGE_URL}" > "$(results.IMAGE_URL.path)"
+
+        echo "=== Build Results ==="
+        echo "Image Ref:    ${IMAGE_REF}"
+        echo "Image Digest: ${DIGEST}"
+        echo "Image URL:    ${IMAGE_URL}"
+
+    # ── Step 4: Vulnerability Scan (optional) ───────────────────────────────
+    # Scan the pushed image for vulnerabilities using Trivy.
+    - name: scan
+      image: aquasec/trivy:latest
+      env:
+        - name: TRIVY_ENABLED
+          value: "$(params.TRIVY_ENABLED)"
+        - name: TRIVY_SEVERITY
+          value: "$(params.TRIVY_SEVERITY)"
+      script: |
+        #!/bin/sh
+        set -eu
+
+        if [ "${TRIVY_ENABLED}" != "true" ]; then
+          echo "Vulnerability scanning disabled, skipping."
+          exit 0
+        fi
+
+        echo "=== Vulnerability Scan ==="
+        IMAGE="$(params.IMAGE):$(params.TAG)"
+        echo "Scanning: ${IMAGE}"
+
+        # Configure Trivy to use the NebulaCR credentials
+        export DOCKER_CONFIG="$(workspaces.source.path)/.docker"
+
+        # Run scan
+        trivy image \
+          --severity "${TRIVY_SEVERITY}" \
+          --format table \
+          --exit-code 0 \
+          "${IMAGE}" || true
+
+        # Count critical vulnerabilities
+        CRITICAL=$(trivy image \
+          --severity CRITICAL \
+          --format json \
+          --quiet \
+          "${IMAGE}" 2>/dev/null | jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' 2>/dev/null || echo "0")
+
+        echo "Critical vulnerabilities: ${CRITICAL}"
+        if [ "${CRITICAL}" -gt 0 ]; then
+          echo "WARNING: Critical vulnerabilities found in the image"
+          # Uncomment to fail the task on critical vulns:
+          # exit 1
+        fi
+
+    # ── Step 5: Verify ──────────────────────────────────────────────────────
+    # Verify the image was pushed successfully by querying the registry.
+    - name: verify
+      image: curlimages/curl:8.7.1
+      env:
+        - name: NEBULACR_REGISTRY
+          value: "$(params.NEBULACR_REGISTRY)"
+      script: |
+        #!/bin/sh
+        set -eu
+
+        echo "=== Verify Pushed Image ==="
+
+        DIGEST=$(cat "$(results.IMAGE_DIGEST.path)")
+        IMAGE="$(params.IMAGE)"
+        TAG="$(params.TAG)"
+
+        echo "Image:  ${IMAGE}:${TAG}"
+        echo "Digest: ${DIGEST}"
+
+        # Use the Docker config from the authenticate step
+        DOCKER_CONFIG="$(workspaces.source.path)/.docker"
+
+        # Verify the manifest exists in the registry via the OCI Distribution API
+        AUTH_HEADER=$(cat "${DOCKER_CONFIG}/config.json" | jq -r ".auths[\"${NEBULACR_REGISTRY}\"].auth" | base64 -d)
+        USERNAME=$(echo "${AUTH_HEADER}" | cut -d: -f1)
+        PASSWORD=$(echo "${AUTH_HEADER}" | cut -d: -f2-)
+
+        # Extract the repository path from the full image reference
+        REPO_PATH=$(echo "${IMAGE}" | sed "s|${NEBULACR_REGISTRY}/||")
+
+        HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+          -u "${USERNAME}:${PASSWORD}" \
+          "https://${NEBULACR_REGISTRY}/v2/${REPO_PATH}/manifests/${TAG}" \
+          -H "Accept: application/vnd.oci.image.manifest.v1+json")
+
+        if [ "${HTTP_CODE}" = "200" ]; then
+          echo "Image verified: manifest exists in registry"
+        else
+          echo "WARNING: Could not verify image (HTTP ${HTTP_CODE})"
+          echo "The image may still be accessible via docker pull"
+        fi
+
+    # ── Step 6: Cleanup ─────────────────────────────────────────────────────
+    # Remove all credential files to prevent token leakage.
+    - name: cleanup
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        # Remove Docker config files containing tokens
+        rm -rf "$(workspaces.source.path)/.docker" 2>/dev/null || true
+        rm -rf /kaniko/.docker 2>/dev/null || true
+        echo "Credentials cleaned up"
+      volumeMounts:
+        - name: kaniko-docker-config
+          mountPath: /kaniko/.docker
+
+  # ── Volumes ───────────────────────────────────────────────────────────────
+  # Volumes used by the task steps for authentication and build artifacts.
+  volumes:
+    # SPIRE agent Unix domain socket for fetching JWT-SVIDs.
+    # The SPIRE agent DaemonSet must expose this socket via a hostPath volume.
+    # If SPIRE is not deployed, this volume will be empty and the task
+    # falls back to Kubernetes SA tokens.
+    - name: spire-agent-socket
+      hostPath:
+        path: /run/spire/sockets
+        type: DirectoryOrCreate
+
+    # Projected ServiceAccount token with "nebulacr" audience.
+    # Kubernetes automatically mints and rotates this token.
+    # Used as a fallback when SPIRE is not available.
+    - name: nebulacr-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: nebulacr
+              expirationSeconds: 600
+              path: token
+
+    # Ephemeral volume for Kaniko Docker config (credentials).
+    # Using emptyDir ensures credentials don't persist after the pod exits.
+    - name: kaniko-docker-config
+      emptyDir:
+        medium: Memory    # Store in RAM, not on disk
+        sizeLimit: 1Mi
+
+---
+# ============================================================================
+# Pipeline: Full NebulaCR Build, Scan, and Push
+#
+# A complete Tekton Pipeline that uses the nebulacr-build-push Task above.
+# ============================================================================
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: nebulacr-pipeline
+  namespace: tekton-pipelines
+spec:
+  description: >-
+    Clone source code, build a container image, scan for vulnerabilities,
+    and push to NebulaCR using SPIFFE/SPIRE workload identity.
+
+  params:
+    - name: repo-url
+      type: string
+      description: Git repository URL
+    - name: revision
+      type: string
+      description: Git revision (branch, tag, or SHA)
+      default: main
+    - name: image
+      type: string
+      description: Full image reference (without tag)
+    - name: tag
+      type: string
+      description: Image tag
+      default: latest
+    - name: dockerfile
+      type: string
+      default: ./Dockerfile
+    - name: context
+      type: string
+      default: "."
+
+  workspaces:
+    - name: shared-workspace
+      description: Workspace shared between tasks
+
+  tasks:
+    # Clone the source repository
+    - name: fetch-source
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+
+    # Build and push to NebulaCR
+    - name: build-and-push
+      taskRef:
+        name: nebulacr-build-push
+      runAfter:
+        - fetch-source
+      params:
+        - name: IMAGE
+          value: $(params.image)
+        - name: TAG
+          value: $(params.tag)
+        - name: DOCKERFILE
+          value: $(params.dockerfile)
+        - name: CONTEXT
+          value: $(params.context)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+  results:
+    - name: image-digest
+      value: $(tasks.build-and-push.results.IMAGE_DIGEST)
+    - name: image-ref
+      value: $(tasks.build-and-push.results.IMAGE_REF)

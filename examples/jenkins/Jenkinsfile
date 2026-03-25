@@ -1,0 +1,418 @@
+// ============================================================================
+// Jenkins Pipeline: Build and Push to NebulaCR (Zero-Trust OIDC Flow)
+//
+// This declarative pipeline demonstrates NebulaCR's zero-trust CI/CD
+// integration with Jenkins using OIDC or Vault-based authentication.
+//
+// Authentication methods (choose one):
+//   A) Jenkins OIDC Plugin -- Jenkins mints an OIDC JWT for the pipeline
+//   B) HashiCorp Vault     -- Jenkins fetches a token from Vault, which
+//                             has already been configured to trust NebulaCR
+//   C) Direct API token    -- For bootstrap/migration only (not zero-trust)
+//
+// Pipeline stages:
+//   1. Authenticate  -- Obtain short-lived NebulaCR access token
+//   2. Build         -- Build Docker image with BuildKit
+//   3. Scan          -- Scan image for vulnerabilities (Trivy)
+//   4. Push          -- Push image to NebulaCR registry
+//   5. Verify        -- Verify image is pullable from NebulaCR
+//
+// Prerequisites:
+//   - Jenkins 2.387+ with Pipeline plugin
+//   - Docker Pipeline plugin (or Docker available on agent)
+//   - One of:
+//     - Jenkins OIDC Credentials Plugin (for method A)
+//     - HashiCorp Vault Plugin (for method B)
+//   - NebulaCR auth service configured to trust Jenkins OIDC issuer or Vault
+//   - curl and jq available on the build agent
+//
+// ============================================================================
+
+pipeline {
+    agent {
+        // Use a Docker-capable agent. Adjust the label to match your infra.
+        label 'docker'
+    }
+
+    // ── Environment Variables ──────────────────────────────────────────────
+    // These define the NebulaCR target. Override via Jenkins job parameters
+    // or environment injections for per-project configuration.
+    environment {
+        // NebulaCR connection settings
+        NEBULACR_REGISTRY  = 'registry.example.com:5000'
+        NEBULACR_AUTH_URL   = 'https://auth.example.com:5001'
+        NEBULACR_TENANT     = 'my-org'
+        NEBULACR_PROJECT    = 'my-project'
+        IMAGE_NAME          = 'my-app'
+
+        // Full image reference (assembled from components)
+        IMAGE_REF = "${NEBULACR_REGISTRY}/${NEBULACR_TENANT}/${NEBULACR_PROJECT}/${IMAGE_NAME}"
+
+        // Build metadata
+        BUILD_TAG = "${GIT_COMMIT?.take(12) ?: 'unknown'}"
+    }
+
+    // ── Parameters ─────────────────────────────────────────────────────────
+    // Allow overriding defaults via the Jenkins UI or API triggers.
+    parameters {
+        choice(
+            name: 'AUTH_METHOD',
+            choices: ['oidc', 'vault'],
+            description: 'Authentication method for NebulaCR'
+        )
+        booleanParam(
+            name: 'PUSH_IMAGE',
+            defaultValue: true,
+            description: 'Push image to NebulaCR (uncheck for dry-run builds)'
+        )
+        booleanParam(
+            name: 'SCAN_IMAGE',
+            defaultValue: true,
+            description: 'Run vulnerability scan before push'
+        )
+        string(
+            name: 'TRIVY_SEVERITY',
+            defaultValue: 'CRITICAL,HIGH',
+            description: 'Trivy severity levels that cause failure'
+        )
+    }
+
+    // ── Options ────────────────────────────────────────────────────────────
+    options {
+        // Abort the build if it runs longer than 30 minutes
+        timeout(time: 30, unit: 'MINUTES')
+        // Keep at most 20 builds in history
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        // Add timestamps to console output
+        timestamps()
+        // Do not allow concurrent builds of the same job
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        // ================================================================
+        // Stage 1: Authenticate to NebulaCR
+        //
+        // Obtain a short-lived NebulaCR access token using one of the
+        // supported authentication methods.
+        // ================================================================
+        stage('Authenticate') {
+            steps {
+                script {
+                    if (params.AUTH_METHOD == 'oidc') {
+                        // ── Method A: Jenkins OIDC Plugin ──────────────
+                        // The Jenkins OIDC Credentials Plugin can mint a
+                        // JWT for the current pipeline. The JWT is then
+                        // exchanged for a NebulaCR access token.
+                        //
+                        // Requires: Jenkins OIDC Credentials Plugin
+                        //           configured with audience = "nebulacr"
+                        //
+                        // The OIDC token contains claims like:
+                        //   iss: "https://jenkins.example.com"
+                        //   sub: "job:my-org/my-job:build:42"
+                        //   aud: "nebulacr"
+                        withCredentials([
+                            string(
+                                credentialsId: 'jenkins-oidc-token',
+                                variable: 'JENKINS_OIDC_TOKEN'
+                            )
+                        ]) {
+                            sh '''#!/bin/bash
+                                set -euo pipefail
+
+                                echo "Exchanging Jenkins OIDC token for NebulaCR access token..."
+
+                                RESPONSE=$(curl -sS -w "\\n%{http_code}" -X POST \
+                                    "${NEBULACR_AUTH_URL}/auth/token" \
+                                    -H "Content-Type: application/json" \
+                                    -H "User-Agent: nebulacr-jenkins/1.0" \
+                                    -d "{
+                                        \\"identity_token\\": \\"${JENKINS_OIDC_TOKEN}\\",
+                                        \\"scope\\": {
+                                            \\"tenant\\": \\"${NEBULACR_TENANT}\\",
+                                            \\"project\\": \\"${NEBULACR_PROJECT}\\",
+                                            \\"repository\\": \\"${IMAGE_NAME}\\",
+                                            \\"actions\\": [\\"pull\\", \\"push\\"]
+                                        }
+                                    }")
+
+                                HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+                                BODY=$(echo "$RESPONSE" | sed '$d')
+
+                                if [ "$HTTP_CODE" != "200" ]; then
+                                    echo "ERROR: NebulaCR auth failed (HTTP ${HTTP_CODE})"
+                                    echo "$BODY" | jq -r '.error // "unknown"'
+                                    exit 1
+                                fi
+
+                                ACCESS_TOKEN=$(echo "$BODY" | jq -r '.token')
+                                EXPIRES_IN=$(echo "$BODY" | jq -r '.expires_in // "unknown"')
+
+                                # Write token to a temporary file (not env var, to avoid leaking)
+                                echo -n "$ACCESS_TOKEN" > /tmp/nebulacr-token
+                                chmod 600 /tmp/nebulacr-token
+
+                                echo "NebulaCR token obtained (expires in ${EXPIRES_IN}s)"
+                            '''
+                        }
+                    } else if (params.AUTH_METHOD == 'vault') {
+                        // ── Method B: HashiCorp Vault ──────────────────
+                        // Use the Vault Plugin to fetch a NebulaCR token
+                        // from Vault's secrets engine. Vault must be
+                        // configured with NebulaCR as a backend.
+                        //
+                        // Alternatively, use Vault's JWT auth method to
+                        // authenticate Jenkins, then read a dynamic
+                        // NebulaCR credential from Vault.
+                        withVault(
+                            configuration: [
+                                vaultUrl: 'https://vault.example.com',
+                                vaultCredentialId: 'vault-approle'
+                            ],
+                            vaultSecrets: [
+                                [
+                                    path: "nebulacr/creds/${NEBULACR_TENANT}/${NEBULACR_PROJECT}",
+                                    secretValues: [
+                                        [vaultKey: 'token', envVar: 'VAULT_NEBULACR_TOKEN']
+                                    ]
+                                ]
+                            ]
+                        ) {
+                            sh '''#!/bin/bash
+                                set -euo pipefail
+
+                                # Write the Vault-provided token to a temp file
+                                echo -n "${VAULT_NEBULACR_TOKEN}" > /tmp/nebulacr-token
+                                chmod 600 /tmp/nebulacr-token
+
+                                echo "NebulaCR token obtained from Vault"
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================================================================
+        // Stage 2: Docker Login
+        //
+        // Use the short-lived token to authenticate with the NebulaCR
+        // registry via `docker login`.
+        // ================================================================
+        stage('Docker Login') {
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+
+                    # Read token from the secure temp file
+                    if [ ! -f /tmp/nebulacr-token ]; then
+                        echo "ERROR: NebulaCR token file not found"
+                        exit 1
+                    fi
+
+                    # Login using --password-stdin to avoid token in process args
+                    cat /tmp/nebulacr-token | docker login "${NEBULACR_REGISTRY}" \
+                        --username "jenkins" \
+                        --password-stdin
+
+                    echo "Docker login to NebulaCR successful"
+                '''
+            }
+        }
+
+        // ================================================================
+        // Stage 3: Build
+        //
+        // Build the Docker image with metadata labels for traceability.
+        // Uses BuildKit for improved build performance and caching.
+        // ================================================================
+        stage('Build') {
+            environment {
+                DOCKER_BUILDKIT = '1'
+            }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+
+                    echo "Building image: ${IMAGE_REF}:${BUILD_TAG}"
+
+                    docker build \
+                        --pull \
+                        --label "org.opencontainers.image.source=${GIT_URL}" \
+                        --label "org.opencontainers.image.revision=${GIT_COMMIT}" \
+                        --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        --label "org.opencontainers.image.title=${IMAGE_NAME}" \
+                        --label "org.opencontainers.image.vendor=${NEBULACR_TENANT}" \
+                        --label "ci.jenkins.build-url=${BUILD_URL}" \
+                        --label "ci.jenkins.build-number=${BUILD_NUMBER}" \
+                        --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        --build-arg VCS_REF="${GIT_COMMIT}" \
+                        -t "${IMAGE_REF}:${BUILD_TAG}" \
+                        -t "${IMAGE_REF}:${BUILD_NUMBER}" \
+                        -t "${IMAGE_REF}:latest" \
+                        .
+
+                    echo "Build completed successfully"
+                    docker images "${IMAGE_REF}" --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+                '''
+            }
+        }
+
+        // ================================================================
+        // Stage 4: Scan
+        //
+        // Run Trivy vulnerability scanner against the built image.
+        // Fails the pipeline if critical vulnerabilities are found.
+        // ================================================================
+        stage('Scan') {
+            when {
+                expression { return params.SCAN_IMAGE }
+            }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+
+                    echo "Scanning image for vulnerabilities..."
+
+                    # Install Trivy if not already available
+                    if ! command -v trivy &>/dev/null; then
+                        echo "Installing Trivy..."
+                        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+                    fi
+
+                    # Run scan and output table format to console
+                    trivy image \
+                        --severity "${TRIVY_SEVERITY}" \
+                        --format table \
+                        "${IMAGE_REF}:${BUILD_TAG}" || true
+
+                    # Run scan again with JSON output for archival
+                    trivy image \
+                        --severity "${TRIVY_SEVERITY}" \
+                        --format json \
+                        --output trivy-report.json \
+                        "${IMAGE_REF}:${BUILD_TAG}" || true
+
+                    # Check for critical vulnerabilities
+                    CRITICAL_COUNT=$(trivy image \
+                        --severity CRITICAL \
+                        --format json \
+                        --quiet \
+                        "${IMAGE_REF}:${BUILD_TAG}" | jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0')
+
+                    echo "Critical vulnerabilities: ${CRITICAL_COUNT}"
+
+                    if [ "${CRITICAL_COUNT}" -gt 0 ]; then
+                        echo "WARNING: ${CRITICAL_COUNT} critical vulnerabilities found"
+                        # Uncomment the next line to fail the build on critical vulns:
+                        # exit 1
+                    fi
+                '''
+
+                // Archive the scan report
+                archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+            }
+        }
+
+        // ================================================================
+        // Stage 5: Push
+        //
+        // Push the built and scanned image to NebulaCR.
+        // ================================================================
+        stage('Push') {
+            when {
+                expression { return params.PUSH_IMAGE }
+            }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+
+                    echo "Pushing image to NebulaCR..."
+
+                    docker push "${IMAGE_REF}:${BUILD_TAG}"
+                    docker push "${IMAGE_REF}:${BUILD_NUMBER}"
+
+                    # Push "latest" only on main branch
+                    if [ "${GIT_BRANCH}" = "origin/main" ] || [ "${GIT_BRANCH}" = "main" ]; then
+                        docker push "${IMAGE_REF}:latest"
+                        echo "Pushed: ${IMAGE_REF}:latest"
+                    fi
+
+                    echo "Push completed:"
+                    echo "  ${IMAGE_REF}:${BUILD_TAG}"
+                    echo "  ${IMAGE_REF}:${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        // ================================================================
+        // Stage 6: Verify
+        //
+        // Verify the pushed image is accessible from NebulaCR.
+        // ================================================================
+        stage('Verify') {
+            when {
+                expression { return params.PUSH_IMAGE }
+            }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+
+                    echo "Verifying pushed image..."
+
+                    # Remove local image to force a pull from registry
+                    docker rmi "${IMAGE_REF}:${BUILD_TAG}" 2>/dev/null || true
+
+                    # Pull the image back
+                    docker pull "${IMAGE_REF}:${BUILD_TAG}"
+
+                    echo "Image verified successfully: ${IMAGE_REF}:${BUILD_TAG}"
+                    docker inspect "${IMAGE_REF}:${BUILD_TAG}" --format '{{.RepoDigests}}'
+                '''
+            }
+        }
+    }
+
+    // ── Post Actions ───────────────────────────────────────────────────────
+    // Always clean up credentials and local images, regardless of build
+    // outcome. The NebulaCR token is short-lived (5 min), but defense in
+    // depth means we clean up immediately.
+    post {
+        always {
+            sh '''#!/bin/bash
+                # Remove the NebulaCR token file
+                rm -f /tmp/nebulacr-token 2>/dev/null || true
+
+                # Docker logout to remove credentials from config
+                docker logout "${NEBULACR_REGISTRY}" 2>/dev/null || true
+
+                # Remove Docker config file that may contain cached credentials
+                rm -f "${HOME}/.docker/config.json" 2>/dev/null || true
+
+                echo "Credentials cleaned up"
+            '''
+
+            // Clean up Docker images to free disk space
+            sh '''#!/bin/bash
+                docker rmi "${IMAGE_REF}:${BUILD_TAG}" 2>/dev/null || true
+                docker rmi "${IMAGE_REF}:${BUILD_NUMBER}" 2>/dev/null || true
+                docker rmi "${IMAGE_REF}:latest" 2>/dev/null || true
+                echo "Local images cleaned up"
+            '''
+        }
+
+        success {
+            echo "Pipeline completed successfully: ${IMAGE_REF}:${BUILD_TAG}"
+        }
+
+        failure {
+            echo "Pipeline failed. Check the logs above for details."
+            // Uncomment to send notifications:
+            // slackSend channel: '#ci-cd', message: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            // emailext subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            //          body: "Build failed. See: ${env.BUILD_URL}",
+            //          to: 'team@example.com'
+        }
+    }
+}

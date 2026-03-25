@@ -1,0 +1,303 @@
+# ============================================================================
+# ArgoCD Image Updater: NebulaCR Integration
+#
+# This configuration enables ArgoCD Image Updater to automatically detect
+# new image versions pushed to NebulaCR and update Kubernetes deployments.
+#
+# Flow:
+#   1. ArgoCD Image Updater polls NebulaCR for new image tags
+#   2. Authentication uses Kubernetes ServiceAccount OIDC tokens
+#   3. When a new tag is found, ArgoCD updates the Application manifest
+#   4. ArgoCD syncs the updated manifest to the cluster
+#
+# This file contains:
+#   A) ArgoCD Image Updater ConfigMap (registry configuration)
+#   B) ArgoCD Application with image update annotations
+#   C) ServiceAccount + RBAC for workload identity
+#
+# Prerequisites:
+#   - ArgoCD installed in the cluster
+#   - ArgoCD Image Updater installed (v0.12+)
+#   - NebulaCR auth service configured to trust the cluster's OIDC issuer
+#   - Kubernetes cluster with ServiceAccount token projection enabled
+#
+# ============================================================================
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Part A: ArgoCD Image Updater Registry Configuration
+#
+# Configure the Image Updater to authenticate with NebulaCR using
+# Kubernetes ServiceAccount OIDC tokens. This avoids storing any static
+# credentials in the cluster.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-image-updater-config
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-image-updater
+    app.kubernetes.io/part-of: argocd
+data:
+  # ---------------------------------------------------------------------------
+  # Registry configuration
+  #
+  # The registries.conf key defines how Image Updater connects to container
+  # registries. For NebulaCR, we use a custom credential script that
+  # exchanges a Kubernetes ServiceAccount token for a NebulaCR access token.
+  # ---------------------------------------------------------------------------
+  registries.conf: |
+    registries:
+      - name: NebulaCR
+        # Prefix must match the image references in your Application manifests
+        prefix: registry.example.com:5000
+        api_url: https://registry.example.com:5000
+        # Use the external script for credential retrieval
+        credentials: ext:/scripts/nebulacr-creds.sh
+        # Default pull interval (can be overridden per-application)
+        default_ns: ""
+        # Enable insecure TLS if using self-signed certs (not recommended for production)
+        # insecure: false
+
+  # ---------------------------------------------------------------------------
+  # Log level for debugging (set to "debug" when troubleshooting)
+  # ---------------------------------------------------------------------------
+  log.level: info
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# Part A.1: Credential Script ConfigMap
+#
+# This script is mounted into the Image Updater pod. It exchanges a
+# Kubernetes ServiceAccount projected OIDC token for a NebulaCR access
+# token, then outputs it in the format expected by Image Updater.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-image-updater-nebulacr-scripts
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-image-updater
+data:
+  nebulacr-creds.sh: |
+    #!/bin/bash
+    # =========================================================================
+    # NebulaCR Credential Helper for ArgoCD Image Updater
+    #
+    # This script is called by the Image Updater when it needs credentials
+    # to access a NebulaCR registry. It:
+    #   1. Reads the projected ServiceAccount OIDC token
+    #   2. Exchanges it for a NebulaCR short-lived access token
+    #   3. Outputs credentials in the Image Updater expected format
+    #
+    # The script receives the registry URL as $1.
+    # Output format: "username:password" on stdout
+    # =========================================================================
+    set -euo pipefail
+
+    # Configuration -- these can be overridden via environment variables
+    NEBULACR_AUTH_URL="${NEBULACR_AUTH_URL:-https://auth.example.com:5001}"
+    NEBULACR_TENANT="${NEBULACR_TENANT:-my-org}"
+    NEBULACR_PROJECT="${NEBULACR_PROJECT:-my-project}"
+
+    # Path to the projected ServiceAccount token with NebulaCR audience.
+    # This is mounted via the pod spec's projected volume (see below).
+    SA_TOKEN_PATH="/var/run/secrets/nebulacr/token"
+
+    # Read the ServiceAccount OIDC token
+    if [ ! -f "${SA_TOKEN_PATH}" ]; then
+      echo "ERROR: ServiceAccount token not found at ${SA_TOKEN_PATH}" >&2
+      exit 1
+    fi
+    SA_TOKEN=$(cat "${SA_TOKEN_PATH}")
+
+    # Exchange the ServiceAccount token for a NebulaCR access token
+    RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+      "${NEBULACR_AUTH_URL}/auth/token" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"identity_token\": \"${SA_TOKEN}\",
+        \"scope\": {
+          \"tenant\": \"${NEBULACR_TENANT}\",
+          \"project\": \"${NEBULACR_PROJECT}\",
+          \"actions\": [\"pull\"]
+        }
+      }")
+
+    HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+    BODY=$(echo "${RESPONSE}" | sed '$d')
+
+    if [ "${HTTP_CODE}" != "200" ]; then
+      echo "ERROR: NebulaCR auth failed (HTTP ${HTTP_CODE})" >&2
+      echo "${BODY}" | jq -r '.error // "unknown"' >&2
+      exit 1
+    fi
+
+    ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+
+    # Output in the format expected by ArgoCD Image Updater
+    echo "argocd:${ACCESS_TOKEN}"
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# Part B: ArgoCD Application with Image Updater Annotations
+#
+# This Application manifest shows how to annotate an ArgoCD Application
+# so that Image Updater automatically updates the image tag when new
+# versions are pushed to NebulaCR.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/managed-by: argocd
+
+  annotations:
+    # ── Image Updater annotations ──────────────────────────────────────────
+    #
+    # argocd-image-updater.argoproj.io/image-list
+    #   Defines which images to watch for updates.
+    #   Format: <alias>=<image-ref>
+    #   The alias is used in other annotations to reference this image.
+    argocd-image-updater.argoproj.io/image-list: >-
+      myapp=registry.example.com:5000/my-org/my-project/my-app
+
+    # argocd-image-updater.argoproj.io/<alias>.update-strategy
+    #   How to determine the "latest" version:
+    #   - semver:    Use semantic versioning (v1.2.3)
+    #   - latest:    Use the most recently pushed tag
+    #   - digest:    Update whenever the digest changes for a tag
+    #   - name:      Alphabetically latest tag
+    argocd-image-updater.argoproj.io/myapp.update-strategy: semver
+
+    # argocd-image-updater.argoproj.io/<alias>.allow-tags
+    #   Regular expression to filter which tags are considered.
+    #   Only tags matching this regex will be evaluated.
+    argocd-image-updater.argoproj.io/myapp.allow-tags: "regexp:^[0-9]+\\.[0-9]+\\.[0-9]+$"
+
+    # argocd-image-updater.argoproj.io/<alias>.ignore-tags
+    #   Tags to exclude (e.g., pre-release, RC builds)
+    argocd-image-updater.argoproj.io/myapp.ignore-tags: "latest, *-rc*, *-alpha*, *-beta*"
+
+    # argocd-image-updater.argoproj.io/<alias>.pull-secret
+    #   Reference to the credential source for this image.
+    #   "ext:" prefix means use the external script configured in registries.conf
+    argocd-image-updater.argoproj.io/myapp.pull-secret: "ext:/scripts/nebulacr-creds.sh"
+
+    # argocd-image-updater.argoproj.io/write-back-method
+    #   How to write back the updated image tag:
+    #   - argocd:  Update the Application resource directly (default)
+    #   - git:     Commit the change to the Git repository
+    argocd-image-updater.argoproj.io/write-back-method: git
+
+    # argocd-image-updater.argoproj.io/git-branch
+    #   Branch to commit to when using git write-back method
+    argocd-image-updater.argoproj.io/git-branch: main
+
+    # argocd-image-updater.argoproj.io/write-back-target
+    #   Where to write the updated image reference:
+    #   - kustomization: Update kustomization.yaml
+    #   - helmvalues:    Update Helm values file
+    argocd-image-updater.argoproj.io/write-back-target: "kustomization:../../base"
+
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/my-org/my-app-deploy.git
+    targetRevision: main
+    path: overlays/staging
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: my-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# Part C: ServiceAccount and RBAC for Image Updater
+#
+# The Image Updater needs a ServiceAccount with a projected OIDC token
+# that NebulaCR trusts. This uses Kubernetes' ServiceAccount Token
+# Volume Projection (GA since K8s 1.22) to mint a token with a custom
+# audience that NebulaCR recognizes.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ServiceAccount for ArgoCD Image Updater
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-image-updater
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-image-updater
+  annotations:
+    # Optional: annotate with the NebulaCR tenant for documentation
+    nebulacr.io/tenant: my-org
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# Part C.1: Image Updater Deployment Patch
+#
+# Patch the ArgoCD Image Updater Deployment to:
+#   1. Mount the credential script from the ConfigMap
+#   2. Mount a projected ServiceAccount token with the "nebulacr" audience
+#   3. Set environment variables for the credential script
+#
+# Apply this as a strategic merge patch or Kustomize overlay.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-image-updater
+  namespace: argocd
+spec:
+  template:
+    spec:
+      serviceAccountName: argocd-image-updater
+      containers:
+        - name: argocd-image-updater
+          env:
+            # NebulaCR configuration for the credential script
+            - name: NEBULACR_AUTH_URL
+              value: "https://auth.example.com:5001"
+            - name: NEBULACR_TENANT
+              value: "my-org"
+            - name: NEBULACR_PROJECT
+              value: "my-project"
+          volumeMounts:
+            # Mount the credential script
+            - name: nebulacr-scripts
+              mountPath: /scripts
+              readOnly: true
+            # Mount the projected ServiceAccount token with NebulaCR audience
+            - name: nebulacr-token
+              mountPath: /var/run/secrets/nebulacr
+              readOnly: true
+      volumes:
+        # ConfigMap containing the credential helper script
+        - name: nebulacr-scripts
+          configMap:
+            name: argocd-image-updater-nebulacr-scripts
+            defaultMode: 0755    # Make the script executable
+        # Projected ServiceAccount token with custom audience
+        # Kubernetes will automatically rotate this token and mint it with
+        # the "nebulacr" audience claim, which NebulaCR requires for
+        # OIDC validation.
+        - name: nebulacr-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  # Audience must match NebulaCR's OIDC provider client_id
+                  audience: nebulacr
+                  # Token expiry (seconds) -- Kubernetes auto-rotates before expiry
+                  expirationSeconds: 3600
+                  path: token

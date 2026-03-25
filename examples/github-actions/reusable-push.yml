@@ -1,0 +1,253 @@
+# ============================================================================
+# NebulaCR Reusable Workflow: Build and Push Image
+#
+# A reusable workflow that encapsulates the entire NebulaCR zero-trust OIDC
+# flow. Other repositories can call this workflow without duplicating the
+# authentication and push logic.
+#
+# Usage in a calling workflow:
+#
+#   jobs:
+#     push-image:
+#       uses: my-org/nebulacr-workflows/.github/workflows/reusable-push.yml@main
+#       permissions:
+#         id-token: write      # Required -- delegates OIDC to this workflow
+#         contents: read
+#       with:
+#         registry_url: registry.example.com:5000
+#         auth_url: https://auth.example.com:5001
+#         tenant: my-org
+#         project: my-project
+#         image_name: my-app
+#         # Optional overrides:
+#         # dockerfile_path: ./docker/Dockerfile.prod
+#         # context: ./src
+#         # platforms: linux/amd64,linux/arm64
+#         # push: true
+#
+# Security notes:
+#   - No secrets are required. Authentication uses GitHub OIDC tokens.
+#   - The calling workflow MUST have `permissions: id-token: write` for the
+#     OIDC token request to succeed (permissions are inherited).
+#   - Each invocation gets its own short-lived NebulaCR token (5 min TTL).
+#   - The token is scoped to exactly the tenant/project/image specified.
+#
+# ============================================================================
+
+name: NebulaCR Build and Push (Reusable)
+
+on:
+  workflow_call:
+    # ── Inputs ──────────────────────────────────────────────────────────────
+    # All configuration is passed as inputs. No secrets needed for OIDC.
+    inputs:
+      registry_url:
+        description: 'NebulaCR registry endpoint (host:port)'
+        required: true
+        type: string
+      auth_url:
+        description: 'NebulaCR auth API endpoint (https://...)'
+        required: true
+        type: string
+      tenant:
+        description: 'NebulaCR tenant name'
+        required: true
+        type: string
+      project:
+        description: 'NebulaCR project name'
+        required: true
+        type: string
+      image_name:
+        description: 'Image name (without registry prefix)'
+        required: true
+        type: string
+      dockerfile_path:
+        description: 'Path to Dockerfile (relative to context)'
+        required: false
+        type: string
+        default: './Dockerfile'
+      context:
+        description: 'Docker build context path'
+        required: false
+        type: string
+        default: '.'
+      platforms:
+        description: 'Target platforms (comma-separated, e.g., linux/amd64,linux/arm64)'
+        required: false
+        type: string
+        default: 'linux/amd64'
+      push:
+        description: 'Whether to push the image (set false for dry-run builds)'
+        required: false
+        type: boolean
+        default: true
+      scan:
+        description: 'Run vulnerability scan after push'
+        required: false
+        type: boolean
+        default: true
+      trivy_severity:
+        description: 'Trivy severity levels that cause failure'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+      build_args:
+        description: 'Additional Docker build arguments (newline-separated KEY=VALUE)'
+        required: false
+        type: string
+        default: ''
+      extra_tags:
+        description: 'Additional tags to apply (newline-separated)'
+        required: false
+        type: string
+        default: ''
+
+    # ── Outputs ─────────────────────────────────────────────────────────────
+    # Expose key results to the calling workflow for downstream jobs.
+    outputs:
+      image_ref:
+        description: 'Full image reference with SHA tag (registry/tenant/project/image:sha)'
+        value: ${{ jobs.build-and-push.outputs.image_ref }}
+      image_digest:
+        description: 'Image digest (sha256:...)'
+        value: ${{ jobs.build-and-push.outputs.image_digest }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.refs.outputs.image_ref }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Compute image references ─────────────────────────────────────────
+      - name: Compute image references
+        id: refs
+        run: |
+          IMAGE_BASE="${{ inputs.registry_url }}/${{ inputs.tenant }}/${{ inputs.project }}/${{ inputs.image_name }}"
+          echo "image_base=${IMAGE_BASE}" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${IMAGE_BASE}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+      # ── Generate Docker metadata (tags and labels) ───────────────────────
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.refs.outputs.image_base }}
+          tags: |
+            type=sha,prefix=,format=long
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            ${{ inputs.extra_tags }}
+
+      # ── OIDC: Get GitHub identity token ──────────────────────────────────
+      - name: Get GitHub OIDC token
+        id: github-oidc
+        run: |
+          OIDC_TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=nebulacr" \
+            | jq -r '.value')
+
+          if [ -z "${OIDC_TOKEN}" ] || [ "${OIDC_TOKEN}" = "null" ]; then
+            echo "::error::Failed to obtain GitHub OIDC token. Ensure the calling workflow has 'permissions: id-token: write'."
+            exit 1
+          fi
+
+          echo "::add-mask::${OIDC_TOKEN}"
+          echo "token=${OIDC_TOKEN}" >> "${GITHUB_OUTPUT}"
+
+      # ── OIDC: Exchange for NebulaCR token ────────────────────────────────
+      - name: Authenticate to NebulaCR
+        id: nebulacr-auth
+        run: |
+          ACTIONS='["pull", "push"]'
+          if [ "${{ inputs.push }}" != "true" ]; then
+            ACTIONS='["pull"]'
+          fi
+
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ inputs.auth_url }}/auth/github-actions/token" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identity_token\": \"${{ steps.github-oidc.outputs.token }}\",
+              \"scope\": {
+                \"tenant\": \"${{ inputs.tenant }}\",
+                \"project\": \"${{ inputs.project }}\",
+                \"repository\": \"${{ inputs.image_name }}\",
+                \"actions\": ${ACTIONS}
+              }
+            }")
+
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::NebulaCR authentication failed (HTTP ${HTTP_CODE})"
+            echo "${BODY}" | jq -r '.message // .error // "Unknown error"' >&2
+            exit 1
+          fi
+
+          ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "${GITHUB_OUTPUT}"
+          echo "NebulaCR token obtained (expires in $(echo "${BODY}" | jq -r '.expires_in')s)"
+
+      # ── Docker login ─────────────────────────────────────────────────────
+      - name: Docker login to NebulaCR
+        run: |
+          echo "${{ steps.nebulacr-auth.outputs.token }}" | \
+            docker login "${{ inputs.registry_url }}" \
+              --username "github-actions" \
+              --password-stdin
+
+      # ── Build setup ──────────────────────────────────────────────────────
+      - name: Set up QEMU
+        if: contains(inputs.platforms, ',')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build and push ───────────────────────────────────────────────────
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile_path }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            ${{ inputs.build_args }}
+          provenance: true
+          sbom: true
+
+      # ── Vulnerability scan ───────────────────────────────────────────────
+      - name: Run Trivy vulnerability scanner
+        if: inputs.push && inputs.scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.refs.outputs.image_ref }}
+          format: 'table'
+          severity: ${{ inputs.trivy_severity }}
+          exit-code: '1'
+
+      # ── Cleanup ──────────────────────────────────────────────────────────
+      - name: Docker logout (cleanup)
+        if: always()
+        run: |
+          docker logout "${{ inputs.registry_url }}" 2>/dev/null || true
+          rm -f "${HOME}/.docker/config.json" 2>/dev/null || true

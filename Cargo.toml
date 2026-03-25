@@ -3,6 +3,7 @@ members = [
     "crates/nebula-common",
     "crates/nebula-auth",
     "crates/nebula-registry",
+    "crates/nebula-controller",
 ]
 resolver = "3"
 
@@ -74,7 +75,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # Rate limiting
 governor = "0.8"
 
+# Kubernetes
+kube = { version = "0.98", features = ["runtime", "derive", "client"] }
+k8s-openapi = { version = "0.24", features = ["latest"] }
+schemars = "0.8"
+
 # Internal crates
 nebula-common = { path = "crates/nebula-common" }
 nebula-auth = { path = "crates/nebula-auth" }
 nebula-registry = { path = "crates/nebula-registry" }
+nebula-controller = { path = "crates/nebula-controller" }

@@ -1,20 +1,50 @@
 # ============================================================================
-# GitHub Actions: Build and Push to NebulaCR
+# GitHub Actions: Build and Push to NebulaCR (Zero-Trust OIDC Flow)
 #
-# This workflow demonstrates the zero-trust CI/CD flow:
-#   1. Request an OIDC identity token from GitHub's token service
-#   2. Exchange it for a short-lived NebulaCR access token
-#   3. Use the access token to docker login + push
+# This workflow demonstrates NebulaCR's zero-trust CI/CD integration:
 #
-# No long-lived secrets are stored -- GitHub's OIDC identity is the only
-# credential, and the NebulaCR token expires after 5 minutes.
+#   1. GitHub mints a short-lived OIDC identity token (JWT) for this workflow
+#   2. The workflow exchanges that JWT for a NebulaCR short-lived access token
+#      via POST /auth/github-actions/token
+#   3. The NebulaCR token is used for `docker login` and image push
+#   4. Credentials are cleaned up regardless of success or failure
+#
+# Security properties:
+#   - No long-lived secrets stored in GitHub (zero static credentials)
+#   - NebulaCR access tokens expire after 5 minutes
+#   - GitHub OIDC tokens are audience-bound and single-use
+#   - Subject binding ensures only specific repos/branches can push
+#   - Least-privilege: tokens are scoped to specific tenant/project/actions
 #
 # Prerequisites:
-#   - Configure your NebulaCR auth service to trust GitHub's OIDC issuer:
+#   - Configure NebulaCR auth service to trust GitHub's OIDC issuer:
 #       issuer_url = "https://token.actions.githubusercontent.com"
 #       client_id  = "nebulacr"
 #   - Create a tenant and project in NebulaCR
-#   - Bind the GitHub subject (repo:org/repo:ref:refs/heads/main) to a role
+#   - Create an access policy binding the GitHub subject to a role:
+#       subject = "repo:my-org/my-repo:ref:refs/heads/main"
+#       role    = "push"    (or a custom role with pull+push)
+#   - Ensure your NebulaCR auth endpoint is reachable from GitHub runners
+#
+# Token flow diagram:
+#
+#   GitHub Runner           GitHub OIDC Provider         NebulaCR Auth
+#   ─────────────           ────────────────────         ─────────────
+#        │                         │                          │
+#        │──── Request OIDC JWT ──>│                          │
+#        │<─── OIDC JWT ──────────│                          │
+#        │                         │                          │
+#        │──── POST /auth/github-actions/token ──────────────>│
+#        │     (with OIDC JWT)     │                          │
+#        │                         │     Validate JWT against │
+#        │                         │<──── JWKS endpoint ─────│
+#        │                         │──── Public keys ────────>│
+#        │                         │                          │
+#        │<──── Short-lived NebulaCR token ──────────────────│
+#        │                         │                          │
+#        │──── docker login (with NebulaCR token) ──────────>│
+#        │──── docker push ─────────────────────────────────>│
+#
 # ============================================================================
 
 name: Build and Push to NebulaCR
@@ -22,98 +52,364 @@ name: Build and Push to NebulaCR
 on:
   push:
     branches: [main]
+    tags: ['v*']            # Also trigger on version tags
   pull_request:
     branches: [main]
 
-# Required: request OIDC token permissions from GitHub
+# ---------------------------------------------------------------------------
+# OIDC Permissions
+# ---------------------------------------------------------------------------
+# id-token: write   -- Required to request an OIDC JWT from GitHub's token
+#                       service. Without this, the ACTIONS_ID_TOKEN_REQUEST_URL
+#                       and ACTIONS_ID_TOKEN_REQUEST_TOKEN env vars are unset.
+# contents: read     -- Required to check out the repository code.
+# packages: none     -- We do NOT use GHCR; all images go to NebulaCR.
+# ---------------------------------------------------------------------------
 permissions:
-  id-token: write    # Needed to request the OIDC JWT from GitHub
-  contents: read     # Needed to check out the repository
+  id-token: write
+  contents: read
 
+# ---------------------------------------------------------------------------
+# Environment Variables
+# ---------------------------------------------------------------------------
+# These define the NebulaCR target. Override them in GitHub repository
+# settings (Settings > Secrets and variables > Actions > Variables) for
+# per-repo configuration without modifying the workflow file.
+# ---------------------------------------------------------------------------
 env:
-  # NebulaCR connection settings -- adjust for your deployment
+  # NebulaCR registry endpoint (host:port for Docker protocol)
   NEBULACR_REGISTRY: registry.example.com:5000
+  # NebulaCR auth API endpoint (HTTPS for token exchange)
   NEBULACR_AUTH_URL: https://auth.example.com:5001
+  # Tenant and project scoping -- maps to NebulaCR's multi-tenancy model
   NEBULACR_TENANT: my-org
   NEBULACR_PROJECT: my-project
+  # Image name (without registry prefix -- assembled in steps below)
   IMAGE_NAME: my-app
 
 jobs:
+  # ==========================================================================
+  # Job: build-and-push
+  #
+  # Builds a multi-architecture Docker image and pushes it to NebulaCR.
+  # Uses a matrix strategy to build linux/amd64 and linux/arm64 in parallel,
+  # then creates a manifest list combining both architectures.
+  # ==========================================================================
   build-and-push:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # Don't cancel other arch builds if one fails
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
 
     steps:
-      # ── Step 1: Check out source code ──────────────────────────────────
+      # ── Step 1: Check out source code ─────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── Step 2: Request OIDC identity token from GitHub ────────────────
-      # GitHub provides a short-lived JWT that proves this workflow's
-      # identity. The token contains claims like:
-      #   sub: "repo:my-org/my-repo:ref:refs/heads/main"
+      # ── Step 2: Prepare build metadata ────────────────────────────────────
+      # Generate Docker tags and labels based on Git metadata.
+      # This ensures consistent tagging across all architectures.
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag with full SHA for immutable reference
+            type=sha,prefix=,format=long
+            # Tag with short SHA for convenience
+            type=sha,prefix=,format=short
+            # Tag with branch name (e.g., "main")
+            type=ref,event=branch
+            # Tag with semver from Git tags (e.g., "v1.2.3" -> "1.2.3")
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Tag "latest" only on main branch pushes
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # ── Step 3: Request OIDC identity token from GitHub ───────────────────
+      # GitHub's OIDC provider mints a short-lived JWT that attests to the
+      # identity of this workflow run. The JWT includes claims such as:
+      #
       #   iss: "https://token.actions.githubusercontent.com"
+      #   sub: "repo:my-org/my-repo:ref:refs/heads/main"
       #   aud: "nebulacr"
-      # NebulaCR validates this token against GitHub's JWKS endpoint.
+      #   repository: "my-org/my-repo"
+      #   ref: "refs/heads/main"
+      #   sha: "<commit-sha>"
+      #   workflow: "Build and Push to NebulaCR"
+      #   run_id: "12345678"
+      #
+      # The audience ("nebulacr") must match the client_id configured in the
+      # NebulaCR OIDC provider settings. This prevents token misuse -- a JWT
+      # minted for a different audience will be rejected.
+      #
+      # The ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN
+      # environment variables are injected by GitHub when id-token: write
+      # permission is granted. They point to GitHub's internal token endpoint.
       - name: Get GitHub OIDC token
         id: github-oidc
         run: |
-          # Request an OIDC token from GitHub's token service.
-          # The audience must match what NebulaCR expects (configured in OIDC provider).
-          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nebulacr" | jq -r '.value')
+          echo "Requesting OIDC token from GitHub..."
 
-          if [ -z "$OIDC_TOKEN" ] || [ "$OIDC_TOKEN" = "null" ]; then
-            echo "::error::Failed to obtain OIDC token from GitHub"
+          # Request the OIDC token with the "nebulacr" audience.
+          # The audience parameter is appended as a query parameter.
+          OIDC_TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=nebulacr" \
+            | jq -r '.value')
+
+          # Validate that we received a token
+          if [ -z "${OIDC_TOKEN}" ] || [ "${OIDC_TOKEN}" = "null" ]; then
+            echo "::error::Failed to obtain OIDC token from GitHub. Ensure 'permissions: id-token: write' is set."
             exit 1
           fi
 
-          # Mask the token so it does not appear in logs
-          echo "::add-mask::$OIDC_TOKEN"
-          echo "token=$OIDC_TOKEN" >> "$GITHUB_OUTPUT"
+          # Mask the token in all subsequent log output. GitHub Actions will
+          # replace any occurrence of this value with '***' in logs.
+          echo "::add-mask::${OIDC_TOKEN}"
+          echo "token=${OIDC_TOKEN}" >> "${GITHUB_OUTPUT}"
 
-      # ── Step 3: Exchange OIDC token for NebulaCR access token ──────────
-      # POST the GitHub OIDC token to NebulaCR's auth service.
-      # The auth service:
-      #   a) Validates the GitHub JWT against the JWKS endpoint
-      #   b) Maps the subject claim to a tenant role via access policies
-      #   c) Returns a short-lived (5 min) registry access token
+          # Log non-sensitive metadata for debugging
+          echo "OIDC token obtained successfully (length: ${#OIDC_TOKEN} chars)"
+
+      # ── Step 4: Exchange GitHub OIDC token for NebulaCR access token ──────
+      # This is the core of the zero-trust flow. We POST the GitHub OIDC JWT
+      # to NebulaCR's dedicated GitHub Actions token endpoint:
+      #
+      #   POST /auth/github-actions/token
+      #
+      # NebulaCR's auth service performs the following validation:
+      #   1. Decodes the JWT header to find the key ID (kid)
+      #   2. Fetches GitHub's JWKS from:
+      #      https://token.actions.githubusercontent.com/.well-known/jwks
+      #   3. Validates the JWT signature using the matching public key
+      #   4. Checks token expiry, audience, and issuer claims
+      #   5. Matches the "sub" claim against configured access policies
+      #   6. Issues a short-lived (default: 5 min) NebulaCR access token
+      #      scoped to the requested tenant/project/repository/actions
+      #
+      # The scope block follows the principle of least privilege:
+      #   - tenant:     organizational boundary
+      #   - project:    logical grouping within a tenant
+      #   - repository: specific image repository
+      #   - actions:    "pull" and/or "push" (never "admin" in CI)
+      - name: Authenticate to NebulaCR
+        id: nebulacr-auth
+        run: |
+          echo "Exchanging GitHub OIDC token for NebulaCR access token..."
+
+          # Determine the required actions based on the event type.
+          # PRs only need pull (for build cache); pushes need pull+push.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ACTIONS='["pull"]'
+          else
+            ACTIONS='["pull", "push"]'
+          fi
+
+          # POST to the GitHub Actions-specific token endpoint.
+          # This endpoint is optimized for GitHub's OIDC token format and
+          # automatically extracts the repository, ref, and workflow claims.
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ env.NEBULACR_AUTH_URL }}/auth/github-actions/token" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: nebulacr-github-actions/1.0" \
+            -d "{
+              \"identity_token\": \"${{ steps.github-oidc.outputs.token }}\",
+              \"scope\": {
+                \"tenant\": \"${{ env.NEBULACR_TENANT }}\",
+                \"project\": \"${{ env.NEBULACR_PROJECT }}\",
+                \"repository\": \"${{ env.IMAGE_NAME }}\",
+                \"actions\": ${ACTIONS}
+              }
+            }")
+
+          # Separate HTTP status code from the response body
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+
+          # Handle errors with actionable messages
+          if [ "${HTTP_CODE}" != "200" ]; then
+            ERROR_TYPE=$(echo "${BODY}" | jq -r '.error // "unknown"')
+            ERROR_MSG=$(echo "${BODY}" | jq -r '.message // "No details available"')
+            echo "::error::NebulaCR authentication failed (HTTP ${HTTP_CODE})"
+            echo "::error::Error: ${ERROR_TYPE} - ${ERROR_MSG}"
+
+            # Provide troubleshooting hints based on common error codes
+            case "${HTTP_CODE}" in
+              401) echo "::error::Hint: Check that the OIDC issuer is trusted in NebulaCR" ;;
+              403) echo "::error::Hint: Check that this repo/branch is authorized in NebulaCR access policies" ;;
+              404) echo "::error::Hint: Check NEBULACR_AUTH_URL -- the /auth/github-actions/token endpoint may not exist" ;;
+              422) echo "::error::Hint: Check scope parameters (tenant, project, repository)" ;;
+            esac
+            exit 1
+          fi
+
+          # Extract the short-lived access token
+          ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+          if [ -z "${ACCESS_TOKEN}" ] || [ "${ACCESS_TOKEN}" = "null" ]; then
+            echo "::error::NebulaCR returned 200 but no token in response body"
+            exit 1
+          fi
+
+          # Mask the token so it never appears in workflow logs
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "${GITHUB_OUTPUT}"
+
+          # Log non-sensitive response metadata
+          EXPIRES_IN=$(echo "${BODY}" | jq -r '.expires_in // "unknown"')
+          TOKEN_ID=$(echo "${BODY}" | jq -r '.token_id // "unknown"')
+          echo "NebulaCR token obtained successfully"
+          echo "  Token ID:    ${TOKEN_ID}"
+          echo "  Expires in:  ${EXPIRES_IN}s"
+          echo "  Scope:       ${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}"
+
+      # ── Step 5: Docker login using the short-lived token ──────────────────
+      # The NebulaCR access token is used as the password for `docker login`.
+      # The username field is ignored by NebulaCR (the identity is embedded
+      # in the JWT itself), but Docker requires a non-empty value, so we use
+      # "github-actions" as a descriptive placeholder.
+      #
+      # The token is piped via stdin (--password-stdin) rather than passed as
+      # a command-line argument. This prevents the token from appearing in
+      # process listings (ps aux) or shell history.
+      - name: Docker login to NebulaCR
+        run: |
+          echo "${{ steps.nebulacr-auth.outputs.token }}" | \
+            docker login "${{ env.NEBULACR_REGISTRY }}" \
+              --username "github-actions" \
+              --password-stdin
+          echo "Docker login to NebulaCR successful"
+
+      # ── Step 6: Set up Docker Buildx for multi-arch builds ────────────────
+      # Buildx is Docker's extended build tool that supports:
+      #   - Multi-platform builds via QEMU emulation
+      #   - Build cache import/export (GitHub Actions cache)
+      #   - Provenance attestations and SBOMs
+      - name: Set up QEMU (for multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.platform }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Step 7: Build and push the Docker image ───────────────────────────
+      # Build for the matrix platform and push to NebulaCR. Each platform
+      # build runs in parallel; the manifest-create job (below) combines them.
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          # Push on main branch and version tags only; PRs only build
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions cache for Docker layers -- dramatically speeds up
+          # subsequent builds by caching unchanged layers.
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+          # Supply build arguments for provenance metadata
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+          # OCI provenance attestation -- records build inputs and environment
+          provenance: true
+          # Software Bill of Materials -- lists all packages in the image
+          sbom: true
+
+      # ── Step 8: Export the image digest for the manifest job ──────────────
+      - name: Export digest
+        if: github.event_name == 'push'
+        run: |
+          echo "Platform: ${{ matrix.platform }}"
+          echo "Digest:   ${{ steps.build.outputs.digest }}"
+          # Save digest to a file for the manifest job to consume
+          mkdir -p /tmp/digests
+          PLATFORM_SAFE=$(echo "${{ matrix.platform }}" | tr '/' '-')
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${PLATFORM_SAFE}"
+
+      - name: Upload digest artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+      # ── Step 9: Docker logout (cleanup) ───────────────────────────────────
+      # Always remove credentials from the runner, even if previous steps
+      # failed. The token is short-lived (5 min), but defense in depth means
+      # we clean up regardless.
+      - name: Docker logout (cleanup)
+        if: always()
+        run: |
+          docker logout "${{ env.NEBULACR_REGISTRY }}" 2>/dev/null || true
+          # Also remove any Docker config files that may contain the token
+          rm -f "${HOME}/.docker/config.json" 2>/dev/null || true
+          echo "Credentials cleaned up"
+
+  # ==========================================================================
+  # Job: create-manifest
+  #
+  # After all platform builds complete, create a multi-arch manifest list
+  # that allows `docker pull` to automatically select the right architecture.
+  # ==========================================================================
+  create-manifest:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Download all digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Get GitHub OIDC token
+        id: github-oidc
+        run: |
+          OIDC_TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=nebulacr" \
+            | jq -r '.value')
+          echo "::add-mask::${OIDC_TOKEN}"
+          echo "token=${OIDC_TOKEN}" >> "${GITHUB_OUTPUT}"
+
       - name: Authenticate to NebulaCR
         id: nebulacr-auth
         run: |
           RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
-            "${{ env.NEBULACR_AUTH_URL }}/auth/token" \
+            "${{ env.NEBULACR_AUTH_URL }}/auth/github-actions/token" \
             -H "Content-Type: application/json" \
-            -d '{
-              "identity_token": "${{ steps.github-oidc.outputs.token }}",
-              "scope": {
-                "tenant": "${{ env.NEBULACR_TENANT }}",
-                "project": "${{ env.NEBULACR_PROJECT }}",
-                "repository": "${{ env.IMAGE_NAME }}",
-                "actions": ["pull", "push"]
+            -d "{
+              \"identity_token\": \"${{ steps.github-oidc.outputs.token }}\",
+              \"scope\": {
+                \"tenant\": \"${{ env.NEBULACR_TENANT }}\",
+                \"project\": \"${{ env.NEBULACR_PROJECT }}\",
+                \"repository\": \"${{ env.IMAGE_NAME }}\",
+                \"actions\": [\"pull\", \"push\"]
               }
-            }')
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::NebulaCR auth failed (HTTP $HTTP_CODE): $BODY"
+            }")
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::NebulaCR auth failed (HTTP ${HTTP_CODE})"
             exit 1
           fi
+          ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "${GITHUB_OUTPUT}"
 
-          # Extract the access token and mask it in logs
-          ACCESS_TOKEN=$(echo "$BODY" | jq -r '.token')
-          echo "::add-mask::$ACCESS_TOKEN"
-          echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
-
-          # Log the token expiry for debugging (safe -- not the token itself)
-          EXPIRES_IN=$(echo "$BODY" | jq -r '.expires_in')
-          echo "NebulaCR token obtained, expires in ${EXPIRES_IN}s"
-
-      # ── Step 4: Docker login using the short-lived token ───────────────
-      # The access token is used as the password for docker login.
-      # Username can be any non-empty string; NebulaCR ignores it (the
-      # subject is embedded in the JWT).
       - name: Docker login to NebulaCR
         run: |
           echo "${{ steps.nebulacr-auth.outputs.token }}" | \
@@ -121,37 +417,176 @@ jobs:
               --username "github-actions" \
               --password-stdin
 
-      # ── Step 5: Build the Docker image ─────────────────────────────────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          # Only push on main branch, not on PRs
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:latest
-          # Layer caching for faster builds
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Provenance and SBOM attestations
-          provenance: true
-          sbom: true
-
-      # ── Step 6: Docker logout (cleanup) ────────────────────────────────
-      # Always remove credentials from the runner, even if previous steps
-      # failed. The token is short-lived, but defense in depth applies.
-      - name: Docker logout
-        if: always()
-        run: docker logout "${{ env.NEBULACR_REGISTRY }}"
-
-      # ── Step 7: Verify the pushed image (optional) ─────────────────────
-      - name: Verify image exists in registry
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Create and push manifest list
         run: |
-          # Pull the image by digest to confirm it was pushed successfully
-          docker pull "${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "Image successfully pushed and verified."
+          IMAGE_BASE="${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}"
+
+          # Read digests from all platform builds
+          DIGESTS=""
+          for f in /tmp/digests/*; do
+            DIGEST=$(cat "$f")
+            DIGESTS="${DIGESTS} ${IMAGE_BASE}@${DIGEST}"
+          done
+
+          # Create manifest list for each tag
+          for TAG in "${{ github.sha }}" "latest"; do
+            docker manifest create "${IMAGE_BASE}:${TAG}" ${DIGESTS}
+            docker manifest push "${IMAGE_BASE}:${TAG}"
+            echo "Manifest pushed: ${IMAGE_BASE}:${TAG}"
+          done
+
+      - name: Docker logout (cleanup)
+        if: always()
+        run: |
+          docker logout "${{ env.NEBULACR_REGISTRY }}" 2>/dev/null || true
+          rm -f "${HOME}/.docker/config.json" 2>/dev/null || true
+
+  # ==========================================================================
+  # Job: scan
+  #
+  # Scan the pushed image for known vulnerabilities using Trivy.
+  # This runs after the image is pushed to ensure we scan the exact image
+  # that will be deployed (not just a local build artifact).
+  # ==========================================================================
+  scan:
+    runs-on: ubuntu-latest
+    needs: create-manifest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Get GitHub OIDC token
+        id: github-oidc
+        run: |
+          OIDC_TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=nebulacr" \
+            | jq -r '.value')
+          echo "::add-mask::${OIDC_TOKEN}"
+          echo "token=${OIDC_TOKEN}" >> "${GITHUB_OUTPUT}"
+
+      # Authenticate with pull-only scope for scanning -- least privilege
+      - name: Authenticate to NebulaCR (pull-only)
+        id: nebulacr-auth
+        run: |
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ env.NEBULACR_AUTH_URL }}/auth/github-actions/token" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identity_token\": \"${{ steps.github-oidc.outputs.token }}\",
+              \"scope\": {
+                \"tenant\": \"${{ env.NEBULACR_TENANT }}\",
+                \"project\": \"${{ env.NEBULACR_PROJECT }}\",
+                \"repository\": \"${{ env.IMAGE_NAME }}\",
+                \"actions\": [\"pull\"]
+              }
+            }")
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::NebulaCR auth failed (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+          ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Docker login to NebulaCR
+        run: |
+          echo "${{ steps.nebulacr-auth.outputs.token }}" | \
+            docker login "${{ env.NEBULACR_REGISTRY }}" \
+              --username "github-actions" \
+              --password-stdin
+
+      # Run Trivy vulnerability scanner against the pushed image
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          # Fail the pipeline on CRITICAL or HIGH vulnerabilities
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      # Upload results to GitHub Security tab (requires security-events: write)
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Docker logout (cleanup)
+        if: always()
+        run: |
+          docker logout "${{ env.NEBULACR_REGISTRY }}" 2>/dev/null || true
+          rm -f "${HOME}/.docker/config.json" 2>/dev/null || true
+
+  # ==========================================================================
+  # Job: verify
+  #
+  # Final verification that the image is pullable from NebulaCR.
+  # Uses a separate OIDC token exchange with pull-only scope.
+  # ==========================================================================
+  verify:
+    runs-on: ubuntu-latest
+    needs: create-manifest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Get GitHub OIDC token
+        id: github-oidc
+        run: |
+          OIDC_TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=nebulacr" \
+            | jq -r '.value')
+          echo "::add-mask::${OIDC_TOKEN}"
+          echo "token=${OIDC_TOKEN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate to NebulaCR (pull-only)
+        id: nebulacr-auth
+        run: |
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ env.NEBULACR_AUTH_URL }}/auth/github-actions/token" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identity_token\": \"${{ steps.github-oidc.outputs.token }}\",
+              \"scope\": {
+                \"tenant\": \"${{ env.NEBULACR_TENANT }}\",
+                \"project\": \"${{ env.NEBULACR_PROJECT }}\",
+                \"repository\": \"${{ env.IMAGE_NAME }}\",
+                \"actions\": [\"pull\"]
+              }
+            }")
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::NebulaCR auth failed"
+            exit 1
+          fi
+          ACCESS_TOKEN=$(echo "${BODY}" | jq -r '.token')
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Docker login to NebulaCR
+        run: |
+          echo "${{ steps.nebulacr-auth.outputs.token }}" | \
+            docker login "${{ env.NEBULACR_REGISTRY }}" \
+              --username "github-actions" \
+              --password-stdin
+
+      - name: Verify image is pullable
+        run: |
+          IMAGE="${{ env.NEBULACR_REGISTRY }}/${{ env.NEBULACR_TENANT }}/${{ env.NEBULACR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Pulling image: ${IMAGE}"
+          docker pull "${IMAGE}"
+          echo "Image verified successfully: ${IMAGE}"
+
+          # Print image details
+          docker inspect "${IMAGE}" --format '{{.RepoDigests}}'
+
+      - name: Docker logout (cleanup)
+        if: always()
+        run: |
+          docker logout "${{ env.NEBULACR_REGISTRY }}" 2>/dev/null || true
+          rm -f "${HOME}/.docker/config.json" 2>/dev/null || true

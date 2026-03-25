@@ -10,6 +10,8 @@ pub struct RegistryConfig {
     pub storage: StorageConfig,
     pub observability: ObservabilityConfig,
     pub rate_limit: RateLimitConfig,
+    pub vault: Option<VaultConfig>,
+    pub github_oidc: Option<GitHubOidcConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +83,65 @@ pub struct RateLimitConfig {
     pub token_issue_rpm: u32,
 }
 
+// ── Vault configuration ───────────────────────────────────────────
+
+/// Configuration for HashiCorp Vault integration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultConfig {
+    /// Vault server address (e.g. "https://vault.example.com:8200").
+    /// Also read from VAULT_ADDR env var.
+    pub addr: String,
+    /// Environment variable name holding the Vault token (default: "VAULT_TOKEN").
+    pub token_env_var: String,
+    /// Transit secrets engine key name for JWT signing.
+    pub transit_key_name: String,
+    /// KV v2 mount path (e.g. "secret").
+    pub kv_mount_path: String,
+    /// KV v2 secret path for JWT keys (e.g. "nebulacr/jwt-keys").
+    pub kv_secret_path: String,
+    /// Whether Vault integration is enabled.
+    pub enabled: bool,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            addr: "http://127.0.0.1:8200".into(),
+            token_env_var: "VAULT_TOKEN".into(),
+            transit_key_name: "nebulacr-signing-key".into(),
+            kv_mount_path: "secret".into(),
+            kv_secret_path: "nebulacr/jwt-keys".into(),
+            enabled: false,
+        }
+    }
+}
+
+// ── GitHub OIDC configuration ─────────────────────────────────────
+
+/// Configuration for GitHub Actions OIDC token exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubOidcConfig {
+    /// GitHub OIDC issuer URL (default: "https://token.actions.githubusercontent.com").
+    pub issuer_url: String,
+    /// List of allowed GitHub organizations. Empty = allow all.
+    pub allowed_orgs: Vec<String>,
+    /// List of allowed repositories (e.g. "org/repo"). Empty = allow all.
+    pub allowed_repos: Vec<String>,
+    /// Default role assigned to GitHub Actions tokens.
+    pub default_role: String,
+}
+
+impl Default for GitHubOidcConfig {
+    fn default() -> Self {
+        Self {
+            issuer_url: "https://token.actions.githubusercontent.com".into(),
+            allowed_orgs: vec![],
+            allowed_repos: vec![],
+            default_role: "maintainer".into(),
+        }
+    }
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +178,8 @@ impl Default for RegistryConfig {
                 ip_rps: 50,
                 token_issue_rpm: 60,
             },
+            vault: None,
+            github_oidc: None,
         }
     }
 }
