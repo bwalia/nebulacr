@@ -36,6 +36,8 @@ use nebula_common::storage::{
 
 // ── Application State ────────────────────────────────────────────────────────
 
+type KeyedRateLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>;
+
 /// Shared application state available to all handlers.
 #[derive(Clone)]
 struct AppState {
@@ -44,12 +46,8 @@ struct AppState {
     decoding_key: Arc<DecodingKey>,
     prom_handle: PrometheusHandle,
     #[allow(dead_code)]
-    rate_limiters: Arc<
-        RwLock<
-            HashMap<String, Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>>,
-        >,
-    >,
-    default_rate_limiter: Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>,
+    rate_limiters: Arc<RwLock<HashMap<String, Arc<KeyedRateLimiter>>>>,
+    default_rate_limiter: Arc<KeyedRateLimiter>,
 }
 
 // ── JWT Auth Extractor ───────────────────────────────────────────────────────
@@ -850,10 +848,10 @@ async fn list_tags(
 
     for meta in &list_result {
         let full_path = meta.location.to_string();
-        if let Some(tag) = full_path.strip_prefix(&prefix) {
-            if !tag.is_empty() {
-                tags.push(tag.to_string());
-            }
+        if let Some(tag) = full_path.strip_prefix(&prefix)
+            && !tag.is_empty()
+        {
+            tags.push(tag.to_string());
         }
     }
 
@@ -990,13 +988,13 @@ fn detect_manifest_media_type(data: &[u8]) -> String {
         if let Some(mt) = val.get("mediaType").and_then(|v| v.as_str()) {
             return mt.to_string();
         }
-        if let Some(sv) = val.get("schemaVersion").and_then(|v| v.as_u64()) {
-            if sv == 2 {
-                if val.get("manifests").is_some() {
-                    return "application/vnd.oci.image.index.v1+json".to_string();
-                }
-                return "application/vnd.oci.image.manifest.v1+json".to_string();
+        if let Some(sv) = val.get("schemaVersion").and_then(|v| v.as_u64())
+            && sv == 2
+        {
+            if val.get("manifests").is_some() {
+                return "application/vnd.oci.image.index.v1+json".to_string();
             }
+            return "application/vnd.oci.image.manifest.v1+json".to_string();
         }
     }
     "application/vnd.oci.image.manifest.v1+json".to_string()

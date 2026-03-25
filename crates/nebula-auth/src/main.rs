@@ -154,10 +154,10 @@ fn validate_identity_token(token: &str) -> Result<IdentityTokenClaims, RegistryE
         })?;
 
     // Check expiry if present
-    if let Some(exp) = claims.exp {
-        if Utc::now().timestamp() > exp {
-            return Err(RegistryError::TokenExpired);
-        }
+    if let Some(exp) = claims.exp
+        && Utc::now().timestamp() > exp
+    {
+        return Err(RegistryError::TokenExpired);
     }
 
     if claims.sub.is_empty() {
@@ -237,10 +237,10 @@ async fn authenticate_request(
     identity_token: &str,
 ) -> Result<String, RegistryError> {
     // Try Basic auth for bootstrap admin
-    if let Some((ref username, ref password)) = extract_basic_auth(headers) {
-        if let Ok(subject) = authenticate_basic(state, username, password) {
-            return Ok(subject);
-        }
+    if let Some((username, password)) = extract_basic_auth(headers)
+        && let Ok(subject) = authenticate_basic(state, &username, &password)
+    {
+        return Ok(subject);
     }
 
     // Validate the OIDC/identity JWT
@@ -254,11 +254,12 @@ fn authenticate_basic(
     username: &str,
     password: &str,
 ) -> Result<String, RegistryError> {
-    if let Some(ref admin) = state.config.auth.bootstrap_admin {
-        if username == admin.username && verify_bootstrap_password(password, &admin.password_hash) {
-            info!(username = %username, "bootstrap admin authenticated");
-            return Ok(username.to_string());
-        }
+    if let Some(ref admin) = state.config.auth.bootstrap_admin
+        && username == admin.username
+        && verify_bootstrap_password(password, &admin.password_hash)
+    {
+        info!(username = %username, "bootstrap admin authenticated");
+        return Ok(username.to_string());
     }
     increment_auth_failures("invalid_credentials");
     Err(RegistryError::Unauthorized)
@@ -272,10 +273,10 @@ async fn resolve_role(
     project_id: Option<Uuid>,
 ) -> Role {
     // Bootstrap admin always gets Admin role
-    if let Some(ref admin) = state.config.auth.bootstrap_admin {
-        if subject == admin.username {
-            return Role::Admin;
-        }
+    if let Some(ref admin) = state.config.auth.bootstrap_admin
+        && subject == admin.username
+    {
+        return Role::Admin;
     }
 
     let policies = state.access_policies.read().await;
@@ -287,10 +288,10 @@ async fn resolve_role(
         }
 
         // Project-scoped policy takes precedence over tenant-wide
-        if let Some(pid) = project_id {
-            if policy.project_id == Some(pid) {
-                return policy.role;
-            }
+        if let Some(pid) = project_id
+            && policy.project_id == Some(pid)
+        {
+            return policy.role;
         }
 
         // Tenant-wide policy (project_id is None)
@@ -446,8 +447,8 @@ async fn get_token(
     let _guard = span.enter();
 
     // Docker sends credentials via Basic auth
-    let subject = if let Some((ref username, ref password)) = extract_basic_auth(&headers) {
-        authenticate_basic(&state, username, password).unwrap_or_else(|_| "anonymous".to_string())
+    let subject = if let Some((username, password)) = extract_basic_auth(&headers) {
+        authenticate_basic(&state, &username, &password).unwrap_or_else(|_| "anonymous".to_string())
     } else if let Some(ref account) = query.account {
         account.clone()
     } else {
@@ -542,15 +543,13 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
 /// Load RSA keys from disk, falling back to embedded development keys.
 fn load_jwt_keys(config: &RegistryConfig) -> (EncodingKey, DecodingKey) {
     // Try configured file paths first
-    if let Ok(priv_pem) = std::fs::read(&config.auth.signing_key_path) {
-        if let Ok(pub_pem) = std::fs::read(&config.auth.verification_key_path) {
-            if let Ok(enc) = EncodingKey::from_rsa_pem(&priv_pem) {
-                if let Ok(dec) = DecodingKey::from_rsa_pem(&pub_pem) {
-                    info!("loaded JWT signing keys from configured paths");
-                    return (enc, dec);
-                }
-            }
-        }
+    if let Ok(priv_pem) = std::fs::read(&config.auth.signing_key_path)
+        && let Ok(pub_pem) = std::fs::read(&config.auth.verification_key_path)
+        && let Ok(enc) = EncodingKey::from_rsa_pem(&priv_pem)
+        && let Ok(dec) = DecodingKey::from_rsa_pem(&pub_pem)
+    {
+        info!("loaded JWT signing keys from configured paths");
+        return (enc, dec);
     }
 
     // Fall back to embedded development keys
@@ -566,11 +565,10 @@ fn load_jwt_keys(config: &RegistryConfig) -> (EncodingKey, DecodingKey) {
 
 // ── Seed data ────────────────────────────────────────────────────────
 
-fn seed_demo_data() -> (
-    HashMap<String, Tenant>,
-    HashMap<(Uuid, String), Project>,
-    Vec<AccessPolicy>,
-) {
+type TenantMap = HashMap<String, Tenant>;
+type ProjectMap = HashMap<(Uuid, String), Project>;
+
+fn seed_demo_data() -> (TenantMap, ProjectMap, Vec<AccessPolicy>) {
     let now = Utc::now();
 
     let tenant_id = Uuid::new_v4();
