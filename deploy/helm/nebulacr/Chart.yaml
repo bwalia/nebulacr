@@ -14,3 +14,10 @@ keywords:
 maintainers:
   - name: NebulaCR Maintainers
 kubeVersion: ">=1.25.0-0"
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/signKey: ""
+  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial Helm chart release

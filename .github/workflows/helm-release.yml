@@ -1,0 +1,55 @@
+name: Helm Chart Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/helm/nebulacr/**"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Release Helm Chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Add Helm repos (if chart has dependencies)
+        run: |
+          helm dependency update deploy/helm/nebulacr || true
+
+      # --- GitHub Pages via chart-releaser ---
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.6.0
+        with:
+          charts_dir: deploy/helm
+          config: .github/cr-config.yml
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      # --- OCI push to GHCR ---
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Package chart
+        run: |
+          helm package deploy/helm/nebulacr -d /tmp/helm-packages
+
+      - name: Push chart to GHCR (OCI)
+        run: |
+          helm push /tmp/helm-packages/nebulacr-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
