@@ -3,10 +3,13 @@
 //! Implements the Docker Registry HTTP API V2 / OCI Distribution Specification
 //! with multi-tenant isolation, JWT authentication, and filesystem-backed storage.
 
+mod audit;
+mod dashboard;
 mod webhook;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     Router,
@@ -20,7 +23,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use governor::{Quota, RateLimiter, clock::DefaultClock, state::keyed::DefaultKeyedStateStore};
 use jsonwebtoken::{DecodingKey, TokenData, Validation};
-use metrics::counter;
+use metrics::{counter, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
@@ -73,6 +76,11 @@ struct AppState {
     failover_manager: Option<Arc<FailoverManager>>,
     /// Webhook notifier handle for external event notifications (optional).
     webhook_handle: Option<webhook::WebhookHandle>,
+    /// Registry audit log for tracking who pushed/pulled what.
+    audit_log: Arc<audit::RegistryAuditLog>,
+    /// Process start time for uptime tracking.
+    #[allow(dead_code)]
+    start_time: Instant,
 }
 
 // ── JWT Auth Extractor ───────────────────────────────────────────────────────
@@ -349,6 +357,8 @@ async fn get_manifest(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
 ) -> Result<Response, RegistryError> {
+    let op_start = Instant::now();
+
     authorize(
         &claims,
         &params.tenant,
@@ -362,6 +372,7 @@ async fn get_manifest(
         "project" => params.project.clone()
     )
     .increment(1);
+    counter!("registry_manifest_pull_total").increment(1);
 
     let path = resolve_manifest_path(
         &state,
@@ -441,6 +452,26 @@ async fn get_manifest(
         HeaderValue::from_static("registry/2.0"),
     );
 
+    let duration = op_start.elapsed();
+    histogram!("registry_request_duration_seconds", "operation" => "manifest.pull")
+        .record(duration.as_secs_f64());
+    state
+        .audit_log
+        .record(audit::RegistryAuditEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: "manifest.pull".into(),
+            subject: claims.sub.clone(),
+            tenant: params.tenant.clone(),
+            project: params.project.clone(),
+            repository: params.name.clone(),
+            reference: params.reference.clone(),
+            digest: digest.clone(),
+            size_bytes: data.len() as u64,
+            status_code: 200,
+            duration_ms: duration.as_millis() as u64,
+        })
+        .await;
+
     Ok((StatusCode::OK, headers, data).into_response())
 }
 
@@ -452,6 +483,8 @@ async fn put_manifest(
     Path(params): Path<ManifestRef>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
+    let op_start = Instant::now();
+
     authorize(
         &claims,
         &params.tenant,
@@ -465,6 +498,8 @@ async fn put_manifest(
         "project" => params.project.clone()
     )
     .increment(1);
+    counter!("registry_manifest_push_total").increment(1);
+    counter!("registry_push_bytes_total").increment(body.len() as u64);
 
     // Validate JSON
     serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| {
@@ -548,6 +583,26 @@ async fn put_manifest(
         HeaderValue::from_static("registry/2.0"),
     );
 
+    let duration = op_start.elapsed();
+    histogram!("registry_request_duration_seconds", "operation" => "manifest.push")
+        .record(duration.as_secs_f64());
+    state
+        .audit_log
+        .record(audit::RegistryAuditEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: "manifest.push".into(),
+            subject: claims.sub.clone(),
+            tenant: params.tenant.clone(),
+            project: params.project.clone(),
+            repository: params.name.clone(),
+            reference: params.reference.clone(),
+            digest: digest.clone(),
+            size_bytes: body.len() as u64,
+            status_code: 201,
+            duration_ms: duration.as_millis() as u64,
+        })
+        .await;
+
     Ok((StatusCode::CREATED, headers).into_response())
 }
 
@@ -558,6 +613,8 @@ async fn delete_manifest(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
 ) -> Result<Response, RegistryError> {
+    let op_start = Instant::now();
+
     authorize(
         &claims,
         &params.tenant,
@@ -565,6 +622,12 @@ async fn delete_manifest(
         &params.name,
         Action::Delete,
     )?;
+
+    counter!("registry_delete_total",
+        "tenant" => params.tenant.clone(),
+        "project" => params.project.clone()
+    )
+    .increment(1);
 
     let path = resolve_manifest_path(
         &state,
@@ -626,6 +689,26 @@ async fn delete_manifest(
         .await;
     }
 
+    let duration = op_start.elapsed();
+    histogram!("registry_request_duration_seconds", "operation" => "manifest.delete")
+        .record(duration.as_secs_f64());
+    state
+        .audit_log
+        .record(audit::RegistryAuditEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: "manifest.delete".into(),
+            subject: claims.sub.clone(),
+            tenant: params.tenant.clone(),
+            project: params.project.clone(),
+            repository: params.name.clone(),
+            reference: params.reference.clone(),
+            digest: params.reference.clone(),
+            size_bytes: 0,
+            status_code: 202,
+            duration_ms: duration.as_millis() as u64,
+        })
+        .await;
+
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
@@ -684,6 +767,8 @@ async fn get_blob(
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<BlobRef>,
 ) -> Result<Response, RegistryError> {
+    let op_start = Instant::now();
+
     authorize(
         &claims,
         &params.tenant,
@@ -697,6 +782,7 @@ async fn get_blob(
         "project" => params.project.clone()
     )
     .increment(1);
+    counter!("registry_blob_pull_total").increment(1);
 
     let path = blob_path(
         &params.tenant,
@@ -765,6 +851,27 @@ async fn get_blob(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
+
+    let duration = op_start.elapsed();
+    histogram!("registry_request_duration_seconds", "operation" => "blob.pull")
+        .record(duration.as_secs_f64());
+    counter!("registry_pull_bytes_total").increment(data.len() as u64);
+    state
+        .audit_log
+        .record(audit::RegistryAuditEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: "blob.pull".into(),
+            subject: claims.sub.clone(),
+            tenant: params.tenant.clone(),
+            project: params.project.clone(),
+            repository: params.name.clone(),
+            reference: String::new(),
+            digest: params.digest.clone(),
+            size_bytes: data.len() as u64,
+            status_code: 200,
+            duration_ms: duration.as_millis() as u64,
+        })
+        .await;
 
     Ok((StatusCode::OK, headers, data).into_response())
 }
@@ -891,6 +998,8 @@ async fn complete_blob_upload(
     Query(query): Query<DigestQuery>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
+    let op_start = Instant::now();
+
     authorize(
         &claims,
         &params.tenant,
@@ -1001,6 +1110,26 @@ async fn complete_blob_upload(
         "Docker-Distribution-API-Version",
         HeaderValue::from_static("registry/2.0"),
     );
+
+    let duration = op_start.elapsed();
+    histogram!("registry_request_duration_seconds", "operation" => "blob.push")
+        .record(duration.as_secs_f64());
+    state
+        .audit_log
+        .record(audit::RegistryAuditEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: "blob.push".into(),
+            subject: claims.sub.clone(),
+            tenant: params.tenant.clone(),
+            project: params.project.clone(),
+            repository: params.name.clone(),
+            reference: String::new(),
+            digest: expected_digest.clone(),
+            size_bytes: final_data_len,
+            status_code: 201,
+            duration_ms: duration.as_millis() as u64,
+        })
+        .await;
 
     Ok((StatusCode::CREATED, headers).into_response())
 }
@@ -1358,6 +1487,22 @@ async fn main() -> anyhow::Result<()> {
         .install_recorder()
         .expect("failed to install Prometheus recorder");
 
+    // Pre-register all metrics so they appear in /metrics from startup
+    counter!("registry_manifest_push_total").increment(0);
+    counter!("registry_manifest_pull_total").increment(0);
+    counter!("registry_blob_pull_total").increment(0);
+    counter!("registry_delete_total", "tenant" => "", "project" => "").increment(0);
+    counter!("registry_push_bytes_total").increment(0);
+    counter!("registry_pull_bytes_total").increment(0);
+    counter!("registry_errors_total", "type" => "storage").increment(0);
+    counter!("registry_errors_total", "type" => "auth").increment(0);
+    counter!("registry_errors_total", "type" => "validation").increment(0);
+    histogram!("registry_request_duration_seconds", "operation" => "manifest.pull").record(0.0);
+    histogram!("registry_request_duration_seconds", "operation" => "manifest.push").record(0.0);
+    histogram!("registry_request_duration_seconds", "operation" => "manifest.delete").record(0.0);
+    histogram!("registry_request_duration_seconds", "operation" => "blob.pull").record(0.0);
+    histogram!("registry_request_duration_seconds", "operation" => "blob.push").record(0.0);
+
     // Initialize object store based on configured backend
     let storage_backend = config.storage.backend.as_str();
     let storage_root = &config.storage.root;
@@ -1600,17 +1745,28 @@ async fn main() -> anyhow::Result<()> {
         .map(|mr| mr.internal_port)
         .unwrap_or(5002);
 
+    let audit_log = Arc::new(audit::RegistryAuditLog::new());
+    let start_time = Instant::now();
+
     let state = AppState {
         store,
         config: Arc::new(config),
         decoding_key: Arc::new(decoding_key),
-        prom_handle,
+        prom_handle: prom_handle.clone(),
         rate_limiters: Arc::new(RwLock::new(HashMap::new())),
         default_rate_limiter,
         mirror_service,
         replication_handle,
         failover_manager,
         webhook_handle,
+        audit_log: audit_log.clone(),
+        start_time,
+    };
+
+    // Dashboard state (shared with dashboard handlers)
+    let dashboard_state = dashboard::DashboardState {
+        audit_log: audit_log.clone(),
+        start_time,
     };
 
     // Build the router
@@ -1619,6 +1775,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/v2/", get(v2_check))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler));
+
+    // Dashboard and API routes (no auth - internal use)
+    let dashboard_routes = Router::new()
+        .route("/dashboard", get(dashboard::dashboard_html))
+        .route("/api/stats", get(dashboard::api_stats))
+        .route("/api/activity", get(dashboard::api_activity))
+        .route("/api/audit", get(dashboard::api_audit))
+        .with_state(dashboard_state);
 
     // Authenticated registry routes
     let registry_routes = Router::new()
@@ -1651,6 +1815,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .merge(public_routes)
+        .merge(dashboard_routes)
         .merge(registry_routes)
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn_with_state(
