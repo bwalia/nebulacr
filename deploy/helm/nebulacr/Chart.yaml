@@ -2,8 +2,8 @@ apiVersion: v2
 name: nebulacr
 description: A cloud-native Docker/OCI container registry with multi-tenancy and zero-trust authentication
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 home: https://github.com/nebulacr/nebulacr
 keywords:
   - container-registry
@@ -20,4 +20,6 @@ annotations:
   artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/changes: |
     - kind: added
-      description: Initial Helm chart release
+      description: Pull-through cache with pre-configured upstream registries
+    - kind: added
+      description: Helm chart publishing to GitHub Pages and GHCR OCI
