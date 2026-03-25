@@ -35,6 +35,10 @@ services:
       NEBULACR_STORAGE__ROOT: "/var/lib/nebulacr/data"
       NEBULACR_RATE_LIMIT__DEFAULT_RPS: "100"
       NEBULACR_RATE_LIMIT__IP_RPS: "50"
+      # Webhook notifications to OpsAPI (uncomment to enable)
+      # NEBULACR_WEBHOOKS__ENABLED: "true"
+      # NEBULACR_WEBHOOKS__TIMEOUT_MS: "5000"
+      # NEBULACR_WEBHOOKS__MAX_RETRIES: "3"
     volumes:
       - registry-data:/var/lib/nebulacr/data
       - jwt-keys:/etc/nebulacr/keys:ro
@@ -84,6 +88,50 @@ services:
     networks:
       - nebulacr
 
+  # ── MinIO Object Storage ─────────────────────────────────────────────────
+  # S3-compatible object storage for production-like setups.
+  # Access the MinIO console at http://localhost:9001
+  # To use: set NEBULACR_STORAGE__BACKEND=minio and NEBULACR_STORAGE__ROOT=nebulacr
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - nebulacr
+    profiles:
+      - minio
+
+  # Creates the default bucket in MinIO on first startup.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set nebulacr http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing nebulacr/nebulacr;
+      echo 'Bucket ready.';
+      "
+    networks:
+      - nebulacr
+    profiles:
+      - minio
+
   # ── Key Generator (init container) ────────────────────────────────────────
   # Generates RSA key pair for JWT signing on first run.
   keygen:
@@ -111,6 +159,8 @@ volumes:
   registry-data:
     driver: local
   jwt-keys:
+    driver: local
+  minio-data:
     driver: local
 
 networks:

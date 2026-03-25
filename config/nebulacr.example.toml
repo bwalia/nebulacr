@@ -131,9 +131,13 @@ audience = "nebulacr-registry"
 
 # Storage backend type. Supported values:
 #   "filesystem" - Local filesystem (development, single-node)
-#   "s3"         - Amazon S3 or S3-compatible (MinIO, Ceph RGW)
+#   "s3"         - Amazon S3 or S3-compatible (Ceph RGW)
+#   "minio"      - MinIO (sets path-style access and allows HTTP automatically)
 #   "gcs"        - Google Cloud Storage
 #   "azure"      - Azure Blob Storage
+#
+# Note: "s3" also works with MinIO if you set the endpoint, but "minio" is
+# a convenience that enables path-style addressing and HTTP by default.
 backend = "filesystem"
 
 # Root path (filesystem) or bucket name (cloud storage).
@@ -303,3 +307,39 @@ token_issue_rpm = 60
 # internal_endpoint = "http://registry-ap-internal:5002"
 # is_primary = false
 # priority = 3
+
+
+# ── Webhooks (External Notifications) ──────────────────────────────────
+# Send HTTP POST notifications to external systems (e.g. OpsAPI) when
+# images are pushed or deleted. Useful for maintaining metadata catalogs,
+# triggering CI/CD pipelines, or auditing registry activity.
+
+# [webhooks]
+# # Enable webhook notifications.
+# enabled = true
+# # Timeout in milliseconds for webhook HTTP requests.
+# timeout_ms = 5000
+# # Maximum number of retry attempts for failed deliveries.
+# max_retries = 3
+
+# # OpsAPI endpoint for storing image metadata, categories, and tags.
+# [[webhooks.endpoints]]
+# name = "opsapi"
+# url = "http://opsapi:8080/api/v2/registry/events"
+# # HMAC-SHA256 shared secret for verifying webhook signatures.
+# # The signature is sent in the X-NebulaCR-Signature header.
+# secret = "your-webhook-secret-here"
+# # Event types to deliver. Empty list = all events.
+# # Supported: "manifest.push", "manifest.delete", "blob.push"
+# events = ["manifest.push", "manifest.delete"]
+# # Optional extra headers (e.g. namespace or API key).
+# # [webhooks.endpoints.headers]
+# # X-Namespace-Id = "your-namespace-id"
+# # Authorization = "Bearer your-api-key"
+
+# # Example: CI/CD trigger on image push
+# [[webhooks.endpoints]]
+# name = "ci-trigger"
+# url = "https://ci.example.com/webhooks/registry"
+# secret = "ci-webhook-secret"
+# events = ["manifest.push"]

@@ -15,6 +15,7 @@ pub struct RegistryConfig {
     pub resilience: Option<ResilienceConfig>,
     pub mirror: Option<MirrorConfig>,
     pub multi_region: Option<MultiRegionConfig>,
+    pub webhooks: Option<WebhookConfig>,
 }
 
 // ── Resilience configuration ─────────────────────────────────────
@@ -292,6 +293,49 @@ impl Default for GitHubOidcConfig {
     }
 }
 
+// ── Webhook configuration ────────────────────────────────────────
+
+/// Configuration for webhook notifications to external systems (e.g. OpsAPI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    /// Whether webhook notifications are enabled.
+    pub enabled: bool,
+    /// Webhook endpoints to notify on registry events.
+    pub endpoints: Vec<WebhookEndpoint>,
+    /// Timeout in milliseconds for webhook HTTP requests.
+    pub timeout_ms: u64,
+    /// Maximum number of retry attempts for failed webhook deliveries.
+    pub max_retries: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEndpoint {
+    /// Unique name for this endpoint (e.g. "opsapi").
+    pub name: String,
+    /// URL to POST event payloads to.
+    pub url: String,
+    /// Optional shared secret for HMAC-SHA256 signature verification.
+    /// The signature is sent in the X-NebulaCR-Signature header.
+    pub secret: Option<String>,
+    /// Event types to send to this endpoint.
+    /// Supported: "manifest.push", "manifest.delete", "blob.push".
+    /// Empty list means all events.
+    pub events: Vec<String>,
+    /// Optional extra headers to include in webhook requests.
+    pub headers: Option<std::collections::HashMap<String, String>>,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoints: vec![],
+            timeout_ms: 5000,
+            max_retries: 3,
+        }
+    }
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
@@ -333,6 +377,7 @@ impl Default for RegistryConfig {
             resilience: None,
             mirror: None,
             multi_region: None,
+            webhooks: None,
         }
     }
 }

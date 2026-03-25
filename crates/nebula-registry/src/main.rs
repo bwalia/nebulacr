@@ -3,6 +3,8 @@
 //! Implements the Docker Registry HTTP API V2 / OCI Distribution Specification
 //! with multi-tenant isolation, JWT authentication, and filesystem-backed storage.
 
+mod webhook;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,6 +22,9 @@ use governor::{Quota, RateLimiter, clock::DefaultClock, state::keyed::DefaultKey
 use jsonwebtoken::{DecodingKey, TokenData, Validation};
 use metrics::counter;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use object_store::aws::AmazonS3Builder;
+use object_store::azure::MicrosoftAzureBuilder;
+use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::{ObjectStore, local::LocalFileSystem, path::Path as StorePath};
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
@@ -66,6 +71,8 @@ struct AppState {
     replication_handle: Option<ReplicationHandle>,
     /// Failover manager for multi-region read failover (optional).
     failover_manager: Option<Arc<FailoverManager>>,
+    /// Webhook notifier handle for external event notifications (optional).
+    webhook_handle: Option<webhook::WebhookHandle>,
 }
 
 // ── JWT Auth Extractor ───────────────────────────────────────────────────────
@@ -507,6 +514,24 @@ async fn put_manifest(
         repl.enqueue(event).await;
     }
 
+    // Notify webhook endpoints
+    if let Some(ref wh) = state.webhook_handle {
+        let source_region = state
+            .replication_handle
+            .as_ref()
+            .map(|r| r.local_region().to_string());
+        wh.notify(webhook::WebhookPayload::manifest_push(
+            params.tenant.clone(),
+            params.project.clone(),
+            params.name.clone(),
+            params.reference.clone(),
+            digest.clone(),
+            body.len() as u64,
+            source_region,
+        ))
+        .await;
+    }
+
     let location = format!(
         "/v2/{}/{}/{}/manifests/{}",
         params.tenant, params.project, params.name, digest
@@ -582,6 +607,23 @@ async fn delete_manifest(
             repl.local_region().to_string(),
         );
         repl.enqueue(event).await;
+    }
+
+    // Notify webhook endpoints
+    if let Some(ref wh) = state.webhook_handle {
+        let source_region = state
+            .replication_handle
+            .as_ref()
+            .map(|r| r.local_region().to_string());
+        wh.notify(webhook::WebhookPayload::manifest_delete(
+            params.tenant.clone(),
+            params.project.clone(),
+            params.name.clone(),
+            params.reference.clone(),
+            params.reference.clone(),
+            source_region,
+        ))
+        .await;
     }
 
     Ok(StatusCode::ACCEPTED.into_response())
@@ -924,6 +966,23 @@ async fn complete_blob_upload(
             repl.local_region().to_string(),
         );
         repl.enqueue(event).await;
+    }
+
+    // Notify webhook endpoints
+    if let Some(ref wh) = state.webhook_handle {
+        let source_region = state
+            .replication_handle
+            .as_ref()
+            .map(|r| r.local_region().to_string());
+        wh.notify(webhook::WebhookPayload::blob_push(
+            params.tenant.clone(),
+            params.project.clone(),
+            params.name.clone(),
+            expected_digest.clone(),
+            final_data_len,
+            source_region,
+        ))
+        .await;
     }
 
     let location = format!(
@@ -1299,10 +1358,77 @@ async fn main() -> anyhow::Result<()> {
         .install_recorder()
         .expect("failed to install Prometheus recorder");
 
-    // Initialize object store (filesystem backend)
+    // Initialize object store based on configured backend
+    let storage_backend = config.storage.backend.as_str();
     let storage_root = &config.storage.root;
-    std::fs::create_dir_all(storage_root)?;
-    let raw_store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(storage_root)?);
+
+    let raw_store: Arc<dyn ObjectStore> = match storage_backend {
+        "filesystem" => {
+            std::fs::create_dir_all(storage_root)?;
+            info!(root = %storage_root, "Initializing filesystem storage backend");
+            Arc::new(LocalFileSystem::new_with_prefix(storage_root)?)
+        }
+        "s3" | "minio" => {
+            let mut builder = AmazonS3Builder::new().with_bucket_name(storage_root);
+
+            if let Some(ref endpoint) = config.storage.endpoint {
+                builder = builder.with_endpoint(endpoint);
+                // MinIO and S3-compatible stores require virtual-hosted-style to be disabled
+                builder = builder.with_virtual_hosted_style_request(false);
+            }
+            if let Some(ref region) = config.storage.region {
+                builder = builder.with_region(region);
+            }
+            if let Some(ref access_key) = config.storage.access_key {
+                builder = builder.with_access_key_id(access_key);
+            }
+            if let Some(ref secret_key) = config.storage.secret_key {
+                builder = builder.with_secret_access_key(secret_key);
+            }
+
+            // MinIO requires path-style access and may use HTTP
+            if storage_backend == "minio" {
+                builder = builder.with_virtual_hosted_style_request(false);
+                builder = builder.with_allow_http(true);
+            }
+
+            let store = builder.build()?;
+            info!(
+                bucket = %storage_root,
+                endpoint = config.storage.endpoint.as_deref().unwrap_or("default"),
+                backend = %storage_backend,
+                "Initializing S3-compatible storage backend"
+            );
+            Arc::new(store)
+        }
+        "gcs" => {
+            let builder = GoogleCloudStorageBuilder::new().with_bucket_name(storage_root);
+
+            let store = builder.build()?;
+            info!(bucket = %storage_root, "Initializing GCS storage backend");
+            Arc::new(store)
+        }
+        "azure" => {
+            let mut builder = MicrosoftAzureBuilder::new().with_container_name(storage_root);
+
+            if let Some(ref access_key) = config.storage.access_key {
+                builder = builder.with_account(access_key);
+            }
+            if let Some(ref secret_key) = config.storage.secret_key {
+                builder = builder.with_access_key(secret_key);
+            }
+
+            let store = builder.build()?;
+            info!(container = %storage_root, "Initializing Azure Blob storage backend");
+            Arc::new(store)
+        }
+        other => {
+            anyhow::bail!(
+                "Unsupported storage backend: '{}'. Supported: filesystem, s3, minio, gcs, azure",
+                other
+            );
+        }
+    };
 
     // Wrap with resilience layer (circuit breaker + retry)
     let store: Arc<dyn ObjectStore> = if let Some(ref resilience_cfg) = config.resilience {
@@ -1325,7 +1451,7 @@ async fn main() -> anyhow::Result<()> {
         raw_store
     };
 
-    info!(root = %storage_root, "Storage backend initialized (filesystem)");
+    info!(backend = %storage_backend, root = %storage_root, "Storage backend initialized");
 
     // Load JWT verification key
     let verification_key_pem =
@@ -1450,6 +1576,23 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Initialize webhook notifier (optional)
+    let webhook_handle = if let Some(ref wh_cfg) = config.webhooks {
+        if wh_cfg.enabled && !wh_cfg.endpoints.is_empty() {
+            info!(
+                endpoints = wh_cfg.endpoints.len(),
+                "Initializing webhook notifier"
+            );
+            let (notifier, handle) = webhook::WebhookNotifier::new(wh_cfg.clone());
+            tokio::spawn(notifier.run());
+            Some(handle)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let listen_addr = config.server.listen_addr.clone();
     let internal_port = config
         .multi_region
@@ -1467,6 +1610,7 @@ async fn main() -> anyhow::Result<()> {
         mirror_service,
         replication_handle,
         failover_manager,
+        webhook_handle,
     };
 
     // Build the router

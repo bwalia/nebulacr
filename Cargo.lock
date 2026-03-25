@@ -2052,6 +2052,7 @@ dependencies = [
  "futures",
  "governor",
  "hex",
+ "hmac",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

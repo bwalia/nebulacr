@@ -23,6 +23,7 @@ tracing-subscriber = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
