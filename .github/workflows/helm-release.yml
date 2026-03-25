@@ -11,8 +11,8 @@ permissions:
   packages: write
 
 jobs:
-  release:
-    name: Release Helm Chart
+  release-gh-pages:
+    name: Release to GitHub Pages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,27 +29,33 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: Add Helm repos (if chart has dependencies)
-        run: |
-          helm dependency update deploy/helm/nebulacr || true
+        run: helm dependency update deploy/helm/nebulacr || true
 
-      # --- GitHub Pages via chart-releaser ---
       - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.6.0
+        uses: helm/chart-releaser-action@v1.7.0
         with:
           charts_dir: deploy/helm
+          pages_branch: gh-pages
           config: .github/cr-config.yml
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
-      # --- OCI push to GHCR ---
+  release-oci:
+    name: Release to GHCR (OCI)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
       - name: Login to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Package chart
-        run: |
-          helm package deploy/helm/nebulacr -d /tmp/helm-packages
+        run: helm package deploy/helm/nebulacr -d /tmp/helm-packages
 
       - name: Push chart to GHCR (OCI)
-        run: |
-          helm push /tmp/helm-packages/nebulacr-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+        run: helm push /tmp/helm-packages/nebulacr-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
