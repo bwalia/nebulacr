@@ -32,3 +32,4 @@ metrics-exporter-prometheus = { workspace = true }
 reqwest = { workspace = true }
 governor = { workspace = true }
 futures = { workspace = true }
+sysinfo = { workspace = true }

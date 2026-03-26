@@ -5,6 +5,8 @@
 //!   GET /api/stats         - Summary statistics JSON
 //!   GET /api/activity      - Recent activity feed JSON
 //!   GET /api/audit         - Audit log with filtering JSON
+//!   GET /api/system        - System metrics (CPU, RAM, disk) JSON
+//!   GET /api/ha-status     - HA peer region health status JSON
 
 use std::sync::Arc;
 
@@ -15,14 +17,17 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use sysinfo::{Disks, System};
 
 use crate::audit::{AuditStats, RegistryAuditLog};
+use nebula_replication::failover::FailoverManager;
 
 /// State shared with dashboard handlers.
 #[derive(Clone)]
 pub struct DashboardState {
     pub audit_log: Arc<RegistryAuditLog>,
     pub start_time: std::time::Instant,
+    pub failover_manager: Option<Arc<FailoverManager>>,
 }
 
 // ── JSON API ────────────────────────────────────────────────────────────
@@ -90,12 +95,153 @@ pub async fn api_audit(
     }))
 }
 
+// ── System Metrics API ──────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SystemMetrics {
+    cpu_usage_percent: f32,
+    cpu_count: usize,
+    memory_total_bytes: u64,
+    memory_used_bytes: u64,
+    memory_available_bytes: u64,
+    memory_usage_percent: f32,
+    disks: Vec<DiskInfo>,
+}
+
+#[derive(Serialize)]
+pub struct DiskInfo {
+    mount_point: String,
+    total_bytes: u64,
+    available_bytes: u64,
+    usage_percent: f32,
+}
+
+pub async fn api_system(_state: State<DashboardState>) -> Json<SystemMetrics> {
+    let metrics = collect_system_metrics();
+    Json(metrics)
+}
+
+fn collect_system_metrics() -> SystemMetrics {
+    let mut sys = System::new();
+    sys.refresh_cpu_all();
+    sys.refresh_memory();
+
+    // Brief pause for CPU measurement accuracy
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    sys.refresh_cpu_all();
+
+    let cpu_usage = sys.global_cpu_usage();
+    let cpu_count = sys.cpus().len();
+    let memory_total = sys.total_memory();
+    let memory_used = sys.used_memory();
+    let memory_available = sys.available_memory();
+    let memory_usage_pct = if memory_total > 0 {
+        (memory_used as f32 / memory_total as f32) * 100.0
+    } else {
+        0.0
+    };
+
+    let disk_list = Disks::new_with_refreshed_list();
+    let disks: Vec<DiskInfo> = disk_list
+        .iter()
+        .filter(|d| {
+            let mp = d.mount_point().to_string_lossy();
+            // Filter to meaningful mount points
+            mp == "/" || mp.starts_with("/var") || mp.starts_with("/data") || mp.starts_with("/home")
+        })
+        .map(|d| {
+            let total = d.total_space();
+            let available = d.available_space();
+            let used = total.saturating_sub(available);
+            let usage_pct = if total > 0 {
+                (used as f32 / total as f32) * 100.0
+            } else {
+                0.0
+            };
+            DiskInfo {
+                mount_point: d.mount_point().to_string_lossy().to_string(),
+                total_bytes: total,
+                available_bytes: available,
+                usage_percent: usage_pct,
+            }
+        })
+        .collect();
+
+    SystemMetrics {
+        cpu_usage_percent: cpu_usage,
+        cpu_count,
+        memory_total_bytes: memory_total,
+        memory_used_bytes: memory_used,
+        memory_available_bytes: memory_available,
+        memory_usage_percent: memory_usage_pct,
+        disks,
+    }
+}
+
+// ── HA Status API ───────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct HaStatusResponse {
+    ha_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_is_primary: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regions: Option<Vec<RegionStatus>>,
+}
+
+#[derive(Serialize)]
+pub struct RegionStatus {
+    region: String,
+    healthy: bool,
+    last_check: String,
+    consecutive_failures: u32,
+    response_time_ms: Option<u64>,
+}
+
+pub async fn api_ha_status(State(state): State<DashboardState>) -> Json<HaStatusResponse> {
+    match &state.failover_manager {
+        Some(fm) => {
+            let health = fm.all_health().await;
+            let regions: Vec<RegionStatus> = health
+                .into_iter()
+                .map(|h| RegionStatus {
+                    region: h.region,
+                    healthy: h.healthy,
+                    last_check: h.last_check.to_rfc3339(),
+                    consecutive_failures: h.consecutive_failures,
+                    response_time_ms: h.response_time_ms,
+                })
+                .collect();
+            Json(HaStatusResponse {
+                ha_enabled: true,
+                local_is_primary: Some(fm.is_local_primary()),
+                regions: Some(regions),
+            })
+        }
+        None => Json(HaStatusResponse {
+            ha_enabled: false,
+            local_is_primary: None,
+            regions: None,
+        }),
+    }
+}
+
 // ── HTML Dashboard ──────────────────────────────────────────────────────
 
 pub async fn dashboard_html(State(state): State<DashboardState>) -> Response {
     let stats = state.audit_log.stats().await;
     let recent = state.audit_log.recent(20).await;
     let uptime = state.start_time.elapsed().as_secs();
+    let sys_metrics = collect_system_metrics();
+
+    // Collect HA status
+    let (ha_enabled, ha_local_primary, ha_regions) = match &state.failover_manager {
+        Some(fm) => {
+            let health = fm.all_health().await;
+            (true, fm.is_local_primary(), health)
+        }
+        None => (false, false, vec![]),
+    };
 
     // Build recent activity rows
     let mut rows = String::new();
@@ -118,6 +264,73 @@ pub async fn dashboard_html(State(state): State<DashboardState>) -> Response {
         ));
     }
 
+    // Build disk info for the primary disk
+    let primary_disk = sys_metrics.disks.first();
+    let disk_avail_display = primary_disk
+        .map(|d| format_bytes(d.available_bytes))
+        .unwrap_or_else(|| "N/A".to_string());
+    let disk_usage_pct = primary_disk.map(|d| d.usage_percent).unwrap_or(0.0);
+
+    // Build HA status section
+    let ha_section = if ha_enabled {
+        let mut region_rows = String::new();
+        for r in &ha_regions {
+            let status_class = if r.healthy { "green" } else { "red" };
+            let status_label = if r.healthy { "Healthy" } else { "Unhealthy" };
+            let latency = r
+                .response_time_ms
+                .map(|ms| format!("{ms}ms"))
+                .unwrap_or_else(|| "-".to_string());
+            region_rows.push_str(&format!(
+                "<tr><td>{region}</td><td><span class=\"badge badge-{status_class}\">{status_label}</span></td><td>{latency}</td><td>{failures}</td><td>{last_check}</td></tr>\n",
+                region = r.region,
+                status_class = status_class,
+                status_label = status_label,
+                latency = latency,
+                failures = r.consecutive_failures,
+                last_check = r.last_check.format("%Y-%m-%d %H:%M:%S UTC"),
+            ));
+        }
+
+        let role = if ha_local_primary { "Primary" } else { "Secondary" };
+        let healthy_count = ha_regions.iter().filter(|r| r.healthy).count();
+        let total_count = ha_regions.len();
+
+        format!(
+            r#"<div class="section">
+        <div class="section-header">
+            <h2>HA Multi-Region Status</h2>
+            <div class="controls">
+                <span class="badge badge-green" style="font-size:13px;">Local Role: {role}</span>
+                <span style="color:var(--text-muted);font-size:13px;">{healthy_count}/{total_count} regions healthy</span>
+            </div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Region</th>
+                    <th>Status</th>
+                    <th>Latency</th>
+                    <th>Failures</th>
+                    <th>Last Check</th>
+                </tr>
+            </thead>
+            <tbody>
+                {region_rows}
+            </tbody>
+        </table>
+    </div>"#,
+        )
+    } else {
+        r#"<div class="section">
+        <div class="section-header">
+            <h2>HA Multi-Region Status</h2>
+        </div>
+        <div class="empty">Multi-region HA is not configured. Enable it in <code>[multi_region]</code> config to see peer status.</div>
+    </div>"#
+            .to_string()
+    };
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -138,6 +351,8 @@ pub async fn dashboard_html(State(state): State<DashboardState>) -> Response {
     --yellow: #fbbf24;
     --red: #f87171;
     --purple: #a78bfa;
+    --orange: #fb923c;
+    --teal: #2dd4bf;
 }}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: var(--bg); color: var(--text); min-height:100vh; }}
@@ -146,19 +361,29 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, mono
 .header h1 span {{ color: var(--accent); }}
 .header .status {{ color: var(--green); font-size: 14px; }}
 .container {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
-.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }}
 .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }}
 .card .label {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px; }}
 .card .value {{ font-size: 28px; font-weight: 700; }}
+.card .sub {{ font-size: 11px; color: var(--text-muted); margin-top: 4px; }}
 .card .value.green {{ color: var(--green); }}
 .card .value.accent {{ color: var(--accent); }}
 .card .value.yellow {{ color: var(--yellow); }}
 .card .value.red {{ color: var(--red); }}
 .card .value.purple {{ color: var(--purple); }}
+.card .value.orange {{ color: var(--orange); }}
+.card .value.teal {{ color: var(--teal); }}
+.progress-bar {{ height: 6px; background: var(--surface2); border-radius: 3px; margin-top: 8px; overflow: hidden; }}
+.progress-bar .fill {{ height: 100%; border-radius: 3px; transition: width 0.3s; }}
+.fill-green {{ background: var(--green); }}
+.fill-yellow {{ background: var(--yellow); }}
+.fill-red {{ background: var(--red); }}
+.fill-accent {{ background: var(--accent); }}
+.fill-orange {{ background: var(--orange); }}
 .section {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 24px; }}
 .section-header {{ padding: 16px 20px; border-bottom: 1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }}
 .section-header h2 {{ font-size: 16px; font-weight: 600; }}
-.section-header .controls {{ display:flex; gap:8px; }}
+.section-header .controls {{ display:flex; gap:8px; align-items:center; }}
 .section-header select, .section-header input {{ background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 4px; font-size: 13px; }}
 table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
 th {{ text-align: left; padding: 10px 16px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }}
@@ -169,6 +394,8 @@ tr:hover {{ background: var(--surface2); }}
 .badge-pull {{ background: rgba(56,189,248,0.15); color: var(--accent); }}
 .badge-delete {{ background: rgba(248,113,113,0.15); color: var(--red); }}
 .badge-other {{ background: rgba(167,139,250,0.15); color: var(--purple); }}
+.badge-green {{ background: rgba(74,222,128,0.15); color: var(--green); }}
+.badge-red {{ background: rgba(248,113,113,0.15); color: var(--red); }}
 .footer {{ text-align: center; color: var(--text-muted); font-size: 12px; padding: 16px; }}
 .refresh-btn {{ background: var(--accent); color: var(--bg); border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 600; }}
 .refresh-btn:hover {{ opacity: 0.8; }}
@@ -184,6 +411,29 @@ tr:hover {{ background: var(--surface2); }}
 
 <div class="container">
     <div class="grid">
+        <div class="card">
+            <div class="label">CPU Usage</div>
+            <div class="value {cpu_color}">{cpu_usage:.1}%</div>
+            <div class="sub">{cpu_count} cores</div>
+            <div class="progress-bar"><div class="fill {cpu_bar_color}" style="width:{cpu_usage:.0}%"></div></div>
+        </div>
+        <div class="card">
+            <div class="label">RAM Usage</div>
+            <div class="value {ram_color}">{ram_used}</div>
+            <div class="sub">{ram_usage_pct:.1}% of {ram_total}</div>
+            <div class="progress-bar"><div class="fill {ram_bar_color}" style="width:{ram_usage_pct:.0}%"></div></div>
+        </div>
+        <div class="card">
+            <div class="label">Disk Available</div>
+            <div class="value {disk_color}">{disk_avail}</div>
+            <div class="sub">{disk_usage_pct:.1}% used</div>
+            <div class="progress-bar"><div class="fill {disk_bar_color}" style="width:{disk_usage_pct:.0}%"></div></div>
+        </div>
+        <div class="card">
+            <div class="label">HA Status</div>
+            <div class="value {ha_color}">{ha_display}</div>
+            <div class="sub">{ha_sub}</div>
+        </div>
         <div class="card">
             <div class="label">Total Pushes</div>
             <div class="value green">{total_pushes}</div>
@@ -209,6 +459,8 @@ tr:hover {{ background: var(--surface2); }}
             <div class="value">{total_events}</div>
         </div>
     </div>
+
+    {ha_section}
 
     <div class="section">
         <div class="section-header">
@@ -254,6 +506,8 @@ tr:hover {{ background: var(--surface2); }}
             <tbody>
                 <tr><td><code>/metrics</code></td><td>Prometheus metrics (scrape target)</td></tr>
                 <tr><td><code>/api/stats</code></td><td>Summary statistics JSON</td></tr>
+                <tr><td><code>/api/system</code></td><td>System metrics (CPU, RAM, disk) JSON</td></tr>
+                <tr><td><code>/api/ha-status</code></td><td>HA multi-region peer health JSON</td></tr>
                 <tr><td><code>/api/activity?limit=50&amp;type=manifest.push</code></td><td>Recent activity feed (filterable)</td></tr>
                 <tr><td><code>/api/audit?limit=100&amp;subject=user</code></td><td>Full audit log (filterable)</td></tr>
                 <tr><td><code>/dashboard</code></td><td>This dashboard</td></tr>
@@ -297,6 +551,46 @@ function filterTable() {{
 </body>
 </html>"#,
         uptime_display = format_uptime(uptime),
+        // System metrics
+        cpu_usage = sys_metrics.cpu_usage_percent,
+        cpu_count = sys_metrics.cpu_count,
+        cpu_color = usage_color_class(sys_metrics.cpu_usage_percent),
+        cpu_bar_color = usage_bar_color(sys_metrics.cpu_usage_percent),
+        ram_used = format_bytes(sys_metrics.memory_used_bytes),
+        ram_total = format_bytes(sys_metrics.memory_total_bytes),
+        ram_usage_pct = sys_metrics.memory_usage_percent,
+        ram_color = usage_color_class(sys_metrics.memory_usage_percent),
+        ram_bar_color = usage_bar_color(sys_metrics.memory_usage_percent),
+        disk_avail = disk_avail_display,
+        disk_usage_pct = disk_usage_pct,
+        disk_color = usage_color_class(disk_usage_pct),
+        disk_bar_color = usage_bar_color(disk_usage_pct),
+        // HA status
+        ha_color = if !ha_enabled {
+            "text-muted"
+        } else if ha_regions.iter().all(|r| r.healthy) {
+            "green"
+        } else if ha_regions.iter().any(|r| r.healthy) {
+            "yellow"
+        } else {
+            "red"
+        },
+        ha_display = if !ha_enabled {
+            "N/A".to_string()
+        } else {
+            let healthy = ha_regions.iter().filter(|r| r.healthy).count();
+            let total = ha_regions.len();
+            format!("{healthy}/{total}")
+        },
+        ha_sub = if !ha_enabled {
+            "Not configured".to_string()
+        } else if ha_local_primary {
+            "Primary node".to_string()
+        } else {
+            "Secondary node".to_string()
+        },
+        ha_section = ha_section,
+        // Registry stats
         total_pushes = stats.total_pushes,
         total_pulls = stats.total_pulls,
         total_deletes = stats.total_deletes,
@@ -320,6 +614,26 @@ function filterTable() {{
         Html(html),
     )
         .into_response()
+}
+
+fn usage_color_class(pct: f32) -> &'static str {
+    if pct >= 90.0 {
+        "red"
+    } else if pct >= 70.0 {
+        "yellow"
+    } else {
+        "green"
+    }
+}
+
+fn usage_bar_color(pct: f32) -> &'static str {
+    if pct >= 90.0 {
+        "fill-red"
+    } else if pct >= 70.0 {
+        "fill-yellow"
+    } else {
+        "fill-green"
+    }
 }
 
 fn event_badge_class(event_type: &str) -> &'static str {

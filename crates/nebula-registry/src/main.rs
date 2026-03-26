@@ -1757,7 +1757,7 @@ async fn main() -> anyhow::Result<()> {
         default_rate_limiter,
         mirror_service,
         replication_handle,
-        failover_manager,
+        failover_manager: failover_manager.clone(),
         webhook_handle,
         audit_log: audit_log.clone(),
         start_time,
@@ -1767,6 +1767,7 @@ async fn main() -> anyhow::Result<()> {
     let dashboard_state = dashboard::DashboardState {
         audit_log: audit_log.clone(),
         start_time,
+        failover_manager,
     };
 
     // Build the router
@@ -1782,6 +1783,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/stats", get(dashboard::api_stats))
         .route("/api/activity", get(dashboard::api_activity))
         .route("/api/audit", get(dashboard::api_audit))
+        .route("/api/system", get(dashboard::api_system))
+        .route("/api/ha-status", get(dashboard::api_ha_status))
         .with_state(dashboard_state);
 
     // Authenticated registry routes

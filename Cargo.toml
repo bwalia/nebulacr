@@ -95,3 +95,6 @@ nebula-replication = { path = "crates/nebula-replication" }
 
 # Async traits
 async-trait = "0.1"
+
+# System metrics
+sysinfo = "0.33"
