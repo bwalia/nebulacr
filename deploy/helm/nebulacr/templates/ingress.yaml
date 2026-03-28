@@ -1,4 +1,15 @@
 {{- if .Values.ingress.enabled }}
+{{- /*
+  Ingress for NebulaCR.
+
+  Secure mode (default): Only /v2 (registry) and /auth/token (Docker auth)
+  are exposed publicly. /auth/audit, /auth/introspect, /health, and /metrics
+  remain cluster-internal. The /auth/.well-known/jwks.json endpoint is available
+  internally for token verification by peer services.
+
+  Legacy mode (exposeAllAuthPaths: true): Entire /auth prefix is exposed.
+  NOT recommended for production.
+*/}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -6,10 +17,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nebulacr.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
   annotations:
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
@@ -33,6 +44,7 @@ spec:
                 name: {{ include "nebulacr.fullname" . }}-registry
                 port:
                   name: http
+          {{- if .Values.ingress.security.exposeAllAuthPaths }}
           - path: {{ .Values.ingress.authPath }}
             pathType: Prefix
             backend:
@@ -40,4 +52,22 @@ spec:
                 name: {{ include "nebulacr.fullname" . }}-auth
                 port:
                   name: http
+          {{- else }}
+          - path: /auth/token
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nebulacr.fullname" . }}-auth
+                port:
+                  name: http
+          {{- if .Values.ingress.security.exposeGitHubActions }}
+          - path: /auth/github-actions
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nebulacr.fullname" . }}-auth
+                port:
+                  name: http
+          {{- end }}
+          {{- end }}
 {{- end }}

@@ -1,0 +1,76 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.auth.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nebulacr.auth.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from the ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - port: {{ .Values.auth.port }}
+          protocol: TCP
+    # Allow from registry pods (internal token validation)
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "nebulacr.registry.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.auth.port }}
+          protocol: TCP
+    # Allow metrics scraping from monitoring namespace
+    {{- if .Values.networkPolicy.monitoringNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - port: {{ .Values.auth.metricsPort }}
+          protocol: TCP
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-registry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.registry.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nebulacr.registry.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from the ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - port: {{ .Values.registry.port }}
+          protocol: TCP
+    # Allow metrics scraping from monitoring namespace
+    {{- if .Values.networkPolicy.monitoringNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - port: {{ .Values.registry.metricsPort }}
+          protocol: TCP
+    {{- end }}
+{{- end }}

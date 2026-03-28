@@ -155,6 +155,19 @@ ConfigMap name
 {{/*
 Upstream registry secret name
 */}}
+{{/*
+Validate JWT signing key configuration.
+Fails the render if no signing key source is configured in production.
+*/}}
+{{- define "nebulacr.jwt.validate" -}}
+{{- if and (not .Values.jwt.existingSecret) (not .Values.jwt.signingKey) }}
+{{- fail "SECURITY: jwt.existingSecret or jwt.signingKey must be set. Running with embedded dev keys is not supported. Generate keys with: openssl genrsa -out signing.pem 2048 && openssl rsa -in signing.pem -pubout -out verification.pem" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Upstream registry secret name
+*/}}
 {{- define "nebulacr.upstream.secretName" -}}
 {{- $fullname := index . 0 -}}
 {{- $name := index . 1 -}}

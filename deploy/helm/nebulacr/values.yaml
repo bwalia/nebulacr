@@ -319,6 +319,16 @@ ingress:
   registryPath: /v2
   authPath: /auth
 
+  # Security controls for auth endpoint exposure
+  security:
+    # When false (default), only /auth/token and /auth/.well-known/jwks.json
+    # are exposed via ingress. /auth/audit, /auth/introspect, /health, and
+    # /metrics remain cluster-internal only.
+    # Set to true to expose the entire /auth prefix (NOT recommended).
+    exposeAllAuthPaths: false
+    # Expose /auth/github-actions/token for CI/CD OIDC token exchange
+    exposeGitHubActions: false
+
 ## -- Prometheus ServiceMonitor --
 serviceMonitor:
   enabled: false
@@ -352,3 +362,7 @@ podDisruptionBudget:
 ## -- Network policy --
 networkPolicy:
   enabled: false
+  # Namespace where the ingress controller runs
+  ingressNamespace: "wslproxy-system"
+  # Namespace for Prometheus metrics scraping (leave empty to disable)
+  monitoringNamespace: "monitoring"
