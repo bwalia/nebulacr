@@ -2,8 +2,8 @@ apiVersion: v2
 name: nebulacr
 description: A cloud-native Docker/OCI container registry with multi-tenancy and zero-trust authentication
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
 home: https://github.com/bwalia/nebulacr
 keywords:
   - container-registry

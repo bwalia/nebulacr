@@ -37,6 +37,7 @@ jobs:
           charts_dir: deploy/helm
           pages_branch: gh-pages
           config: .github/cr-config.yml
+          skip_existing: true
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
