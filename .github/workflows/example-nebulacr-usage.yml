@@ -7,8 +7,11 @@ name: "Example: Build, Push & Pull with NebulaCR"
 # Required GitHub Secrets:
 #   NEBULACR_USERNAME  - Registry username (e.g. "admin")
 #   NEBULACR_PASSWORD  - Registry password
+#   NEBULACR_REGISTRY  - Registry hostname (e.g. "acc-nebulacr.diytaxreturn.co.uk")
 #
-# The registry URL is set below. Adjust to match your deployment.
+# NOTE: If your registry is behind a CDN that blocks POST/PUT methods,
+# use a self-hosted runner with direct access to the registry, or set
+# NEBULACR_REGISTRY to the direct ingress IP/hostname.
 
 on:
   workflow_dispatch:
@@ -19,7 +22,7 @@ on:
         default: "latest"
 
 env:
-  REGISTRY: acc-nebulacr.diytaxreturn.co.uk
+  REGISTRY: ${{ secrets.NEBULACR_REGISTRY }}
   # Tenant/project/repo path — must match your NebulaCR tenant structure
   IMAGE_NAME: demo/default/hello-world
   IMAGE_TAG: ${{ github.event.inputs.image_tag || 'latest' }}
