@@ -67,6 +67,7 @@ spec:
           securityContext:
             {{- toYaml .Values.registry.containerSecurityContext | nindent 12 }}
           args:
+            - nebula-registry
             - serve
             - --config=/etc/nebulacr/config/registry.yaml
           ports:

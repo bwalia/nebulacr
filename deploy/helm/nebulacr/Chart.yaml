@@ -4,7 +4,7 @@ description: A cloud-native Docker/OCI container registry with multi-tenancy and
 type: application
 version: 0.2.0
 appVersion: "0.2.0"
-home: https://github.com/nebulacr/nebulacr
+home: https://github.com/bwalia/nebulacr
 keywords:
   - container-registry
   - oci

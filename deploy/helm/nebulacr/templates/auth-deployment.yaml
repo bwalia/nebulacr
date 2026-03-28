@@ -67,6 +67,7 @@ spec:
           securityContext:
             {{- toYaml .Values.auth.containerSecurityContext | nindent 12 }}
           args:
+            - nebula-auth
             - serve
             - --config=/etc/nebulacr/config/auth.yaml
           ports:
