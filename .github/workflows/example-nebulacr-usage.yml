@@ -1,0 +1,120 @@
+name: "Example: Build, Push & Pull with NebulaCR"
+
+# This is an example workflow demonstrating how to use NebulaCR as a
+# private container registry. It builds a test image, pushes it to
+# NebulaCR, then pulls it back to verify the round-trip.
+#
+# Required GitHub Secrets:
+#   NEBULACR_USERNAME  - Registry username (e.g. "admin")
+#   NEBULACR_PASSWORD  - Registry password
+#
+# The registry URL is set below. Adjust to match your deployment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag for the test image"
+        required: false
+        default: "latest"
+
+env:
+  REGISTRY: acc-nebulacr.diytaxreturn.co.uk
+  # Tenant/project/repo path — must match your NebulaCR tenant structure
+  IMAGE_NAME: demo/default/hello-world
+  IMAGE_TAG: ${{ github.event.inputs.image_tag || 'latest' }}
+
+jobs:
+  build-push-pull:
+    name: Build, Push & Pull Test Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Step 1: Create a minimal test Dockerfile ──────────────────────
+      - name: Create test Dockerfile
+        run: |
+          cat > /tmp/Dockerfile <<'DOCKERFILE'
+          FROM alpine:3.20
+          RUN echo "Built by NebulaCR CI at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /BUILD_INFO
+          CMD ["cat", "/BUILD_INFO"]
+          DOCKERFILE
+
+      # ── Step 2: Obtain a token from the NebulaCR auth service ────────
+      - name: Authenticate to NebulaCR
+        id: auth
+        run: |
+          echo "Requesting push/pull token from NebulaCR auth service..."
+          RESPONSE=$(curl -sf -u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}" \
+            "https://${REGISTRY}/auth/token?service=nebulacr-registry&scope=repository:${IMAGE_NAME}:pull,push")
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::Failed to obtain auth token"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "Token obtained successfully (role: $(echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq -r .role))"
+
+      # ── Step 3: Log in to NebulaCR with Docker ──────────────────────
+      - name: Docker login to NebulaCR
+        run: |
+          echo "${{ secrets.NEBULACR_PASSWORD }}" | \
+            docker login "https://${REGISTRY}" \
+              -u "${{ secrets.NEBULACR_USERNAME }}" \
+              --password-stdin
+
+      # ── Step 4: Build the test image ────────────────────────────────
+      - name: Build test image
+        run: |
+          docker build -t "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" /tmp/
+          echo "Image built: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker images "${REGISTRY}/${IMAGE_NAME}"
+
+      # ── Step 5: Push to NebulaCR ────────────────────────────────────
+      - name: Push image to NebulaCR
+        run: |
+          echo "Pushing image to NebulaCR..."
+          docker push "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Push successful!"
+
+      # ── Step 6: Remove local image ──────────────────────────────────
+      - name: Remove local image
+        run: |
+          docker rmi "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Local image removed"
+
+      # ── Step 7: Pull from NebulaCR ──────────────────────────────────
+      - name: Pull image from NebulaCR
+        run: |
+          echo "Pulling image back from NebulaCR..."
+          docker pull "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Pull successful!"
+
+      # ── Step 8: Verify the pulled image ─────────────────────────────
+      - name: Verify pulled image
+        run: |
+          echo "Running pulled image..."
+          docker run --rm "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo ""
+          echo "=== Round-trip test PASSED ==="
+          echo "Image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+      # ── Step 9: Verify via API ──────────────────────────────────────
+      - name: Verify image in registry catalog
+        run: |
+          echo "Checking registry catalog..."
+          curl -sf -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "https://${REGISTRY}/v2/_catalog" | jq .
+          echo ""
+          echo "Checking tags..."
+          curl -sf -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "https://${REGISTRY}/v2/${IMAGE_NAME}/tags/list" | jq .
+
+      # ── Cleanup ─────────────────────────────────────────────────────
+      - name: Docker logout
+        if: always()
+        run: docker logout "${REGISTRY}" 2>/dev/null || true
