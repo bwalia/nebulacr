@@ -147,7 +147,10 @@ fn collect_system_metrics() -> SystemMetrics {
         .filter(|d| {
             let mp = d.mount_point().to_string_lossy();
             // Filter to meaningful mount points
-            mp == "/" || mp.starts_with("/var") || mp.starts_with("/data") || mp.starts_with("/home")
+            mp == "/"
+                || mp.starts_with("/var")
+                || mp.starts_with("/data")
+                || mp.starts_with("/home")
         })
         .map(|d| {
             let total = d.total_space();
@@ -292,7 +295,11 @@ pub async fn dashboard_html(State(state): State<DashboardState>) -> Response {
             ));
         }
 
-        let role = if ha_local_primary { "Primary" } else { "Secondary" };
+        let role = if ha_local_primary {
+            "Primary"
+        } else {
+            "Secondary"
+        };
         let healthy_count = ha_regions.iter().filter(|r| r.healthy).count();
         let total_count = ha_regions.len();
 
