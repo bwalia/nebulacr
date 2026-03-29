@@ -1,0 +1,99 @@
+auth:
+  image:
+    tag: "latest"
+  replicas: 2
+  resources:
+    limits:
+      cpu: "1"
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+autoscaling:
+  auth:
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 60
+    enabled: false
+    maxReplicas: 8
+    minReplicas: 2
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  registry:
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 30
+    enabled: false
+    maxReplicas: 15
+    minReplicas: 3
+    targetCPUUtilizationPercentage: 65
+    targetMemoryUtilizationPercentage: 75
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: main-issuer
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  authPath: /auth
+  className: wslproxy
+  enabled: true
+  host: acc-nebulacr.diytaxreturn.co.uk
+  registryPath: /v2
+  tls:
+    enabled: true
+    secretName: nebulacr-tls
+  security:
+    exposeAllAuthPaths: false
+    exposeGitHubActions: false
+  dashboard:
+    enabled: true
+jwt:
+  existingSecret: nebulacr-jwt-keys
+networkPolicy:
+  enabled: true
+  ingressNamespace: wslproxy-system
+  monitoringNamespace: monitoring
+observability:
+  logFormat: json
+  logLevel: info
+podDisruptionBudget:
+  auth:
+    enabled: true
+    minAvailable: 1
+  registry:
+    enabled: true
+    minAvailable: 1
+rateLimiting:
+  burst: 500
+  enabled: true
+  pullRatePerTenant: 2000
+  pushRatePerTenant: 1000
+  requestsPerSecond: 200
+registry:
+  image:
+    tag: "latest"
+  replicas: 1
+  resources:
+    limits:
+      cpu: "2"
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+serviceAccount:
+  create: true
+  name: nebulacr
+storage:
+  backend: filesystem
+  filesystem:
+    persistence:
+      accessMode: ReadWriteOnce
+      enabled: true
+      size: 50Gi
+      storageClass: local-path
+    rootDirectory: /var/lib/nebulacr/data

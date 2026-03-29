@@ -329,6 +329,10 @@ ingress:
     # Expose /auth/github-actions/token for CI/CD OIDC token exchange
     exposeGitHubActions: false
 
+  # Dashboard UI served by the registry at /dashboard
+  dashboard:
+    enabled: false
+
 ## -- Prometheus ServiceMonitor --
 serviceMonitor:
   enabled: false

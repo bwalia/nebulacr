@@ -70,4 +70,20 @@ spec:
                   name: http
           {{- end }}
           {{- end }}
+          {{- if .Values.ingress.dashboard.enabled }}
+          - path: /dashboard
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nebulacr.fullname" . }}-registry
+                port:
+                  name: http
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nebulacr.fullname" . }}-registry
+                port:
+                  name: http
+          {{- end }}
 {{- end }}
