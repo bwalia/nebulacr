@@ -1363,6 +1363,27 @@ async fn internal_replicate_manifest(
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
     }
 
+    // Record metrics and audit for replicated manifest
+    let source_region = extract_header(&headers, "x-replication-source-region").unwrap_or_default();
+    counter!("registry_manifest_push_total",
+        "tenant" => tenant.clone(),
+        "project" => project.clone()
+    ).increment(1);
+    counter!("registry_push_bytes_total").increment(body.len() as u64);
+    state.audit_log.record(audit::RegistryAuditEvent {
+        event_type: "manifest.replicated".into(),
+        subject: format!("replication:{source_region}"),
+        tenant: tenant.clone(),
+        project: project.clone(),
+        repository: repo.clone(),
+        reference: reference.clone(),
+        digest: digest.clone(),
+        size_bytes: body.len() as u64,
+        status_code: 200,
+        duration_ms: 0,
+        timestamp: chrono::Utc::now(),
+    }).await;
+
     Ok(StatusCode::OK.into_response())
 }
 
@@ -1376,6 +1397,7 @@ async fn internal_replicate_blob(
     let project = extract_header(&headers, "x-replication-project")?;
     let repo = extract_header(&headers, "x-replication-repo")?;
     let digest = extract_header(&headers, "x-replication-digest")?;
+    let blob_size = body.len() as u64;
 
     info!(
         tenant = %tenant,
@@ -1391,6 +1413,13 @@ async fn internal_replicate_blob(
         .put(&store_path, body.into())
         .await
         .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+    // Record metrics for replicated blob
+    counter!("registry_blob_upload_bytes_total",
+        "tenant" => tenant.clone(),
+        "project" => project.clone()
+    ).increment(blob_size);
+    counter!("registry_push_bytes_total").increment(blob_size);
 
     Ok(StatusCode::OK.into_response())
 }

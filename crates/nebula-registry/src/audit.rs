@@ -102,7 +102,7 @@ impl RegistryAuditLog {
 
         for event in events.iter() {
             match event.event_type.as_str() {
-                "manifest.push" => {
+                "manifest.push" | "manifest.replicated" => {
                     stats.total_pushes += 1;
                     stats.total_push_bytes += event.size_bytes;
                 }
