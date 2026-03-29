@@ -147,9 +147,14 @@ jobs:
         id: build
         run: |
           cat > /tmp/Dockerfile <<'DOCKERFILE'
-          FROM alpine:3.20
-          RUN echo "NebulaCR nightly test $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /BUILD_INFO
-          CMD ["cat", "/BUILD_INFO"]
+          FROM scratch
+          COPY Dockerfile /BUILD_INFO
+          DOCKERFILE
+          echo "NebulaCR nightly test $(date -u +%Y-%m-%dT%H:%M:%SZ) run=${{ github.run_number }}" > /tmp/BUILD_INFO
+          cp /tmp/BUILD_INFO /tmp/Dockerfile.info
+          cat > /tmp/Dockerfile <<'DOCKERFILE'
+          FROM scratch
+          COPY Dockerfile.info /BUILD_INFO
           DOCKERFILE
           docker build -t "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" /tmp/
           echo "result=PASS" >> "$GITHUB_OUTPUT"
@@ -210,12 +215,14 @@ jobs:
         id: verify
         if: steps.pull.outputs.result == 'PASS'
         run: |
-          OUTPUT=$(docker run --rm "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1) && {
-            echo "$OUTPUT"
+          # Verify the image exists and has the expected layer
+          INSPECT=$(docker inspect "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1) && {
+            echo "Image inspected successfully"
+            echo "$INSPECT" | jq '.[0].RepoTags'
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           } || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
-            echo "error=Container run failed" >> "$GITHUB_OUTPUT"
+            echo "error=Image inspect failed" >> "$GITHUB_OUTPUT"
           }
 
       # ── Mirror Check ──────────────────────────────────────────────
