@@ -94,6 +94,26 @@ data:
         sampling_ratio: {{ .Values.observability.tracing.samplingRatio }}
       {{- end }}
 
+    {{- if .Values.multiRegion.enabled }}
+    multi_region:
+      local_region: {{ .Values.multiRegion.localRegion | quote }}
+      health_check_interval_secs: {{ .Values.multiRegion.healthCheckIntervalSecs }}
+      internal_port: {{ .Values.multiRegion.internalPort }}
+      replication:
+        mode: {{ .Values.multiRegion.replication.mode | quote }}
+        max_lag_secs: {{ .Values.multiRegion.replication.maxLagSecs }}
+        batch_size: {{ .Values.multiRegion.replication.batchSize }}
+        sweep_interval_secs: {{ .Values.multiRegion.replication.sweepIntervalSecs }}
+      regions:
+        {{- range .Values.multiRegion.regions }}
+        - name: {{ .name | quote }}
+          endpoint: {{ .endpoint | quote }}
+          internal_endpoint: {{ .internalEndpoint | quote }}
+          is_primary: {{ .isPrimary }}
+          priority: {{ .priority }}
+        {{- end }}
+    {{- end }}
+
   auth.yaml: |
     server:
       listen_addr: "0.0.0.0:{{ .Values.auth.port }}"

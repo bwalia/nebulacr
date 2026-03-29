@@ -4,6 +4,7 @@ use crate::auth::OidcProviderConfig;
 
 /// Top-level registry configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RegistryConfig {
     pub server: ServerConfig,
     pub auth: AuthConfig,

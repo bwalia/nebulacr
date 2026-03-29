@@ -88,6 +88,27 @@ registry:
 serviceAccount:
   create: true
   name: nebulacr
+multiRegion:
+  enabled: true
+  localRegion: "k3s0-primary"
+  healthCheckIntervalSecs: 10
+  internalPort: 5002
+  replication:
+    mode: "async"
+    maxLagSecs: 60
+    batchSize: 50
+    sweepIntervalSecs: 10
+  regions:
+    - name: "k3s0-primary"
+      endpoint: "https://acc-nebulacr.diytaxreturn.co.uk"
+      internalEndpoint: "http://nebulacr-registry.acc.svc.cluster.local:5002"
+      isPrimary: true
+      priority: 1
+    - name: "srv1423968-mirror"
+      endpoint: "https://acc-nebulacr-mirror.diytaxreturn.co.uk"
+      internalEndpoint: "http://187.77.179.206:32518"
+      isPrimary: false
+      priority: 2
 storage:
   backend: filesystem
   filesystem:

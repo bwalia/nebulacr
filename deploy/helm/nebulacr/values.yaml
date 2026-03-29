@@ -363,6 +363,35 @@ podDisruptionBudget:
     enabled: true
     minAvailable: 1
 
+## -- Multi-region HA --
+multiRegion:
+  enabled: false
+  # Name of the local region
+  localRegion: ""
+  # Health check interval in seconds
+  healthCheckIntervalSecs: 10
+  # Internal replication port
+  internalPort: 5002
+  # Replication policy
+  replication:
+    mode: "async"    # "async" or "semi_sync"
+    maxLagSecs: 60
+    batchSize: 50
+    sweepIntervalSecs: 10
+  # All regions (including self)
+  # regions:
+  #   - name: "primary"
+  #     endpoint: "https://registry-primary.example.com"
+  #     internalEndpoint: "http://registry-primary-internal:5002"
+  #     isPrimary: true
+  #     priority: 1
+  #   - name: "mirror"
+  #     endpoint: "https://registry-mirror.example.com"
+  #     internalEndpoint: "http://registry-mirror-internal:5002"
+  #     isPrimary: false
+  #     priority: 2
+  regions: []
+
 ## -- Network policy --
 networkPolicy:
   enabled: false

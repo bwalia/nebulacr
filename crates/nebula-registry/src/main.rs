@@ -1456,8 +1456,30 @@ fn extract_header(headers: &HeaderMap, name: &str) -> Result<String, RegistryErr
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load configuration (defaults if no config file present)
-    let config = RegistryConfig::default();
+    // Load configuration from file if --config flag provided, otherwise defaults
+    let config = {
+        let args: Vec<String> = std::env::args().collect();
+        let config_path = args
+            .windows(2)
+            .find(|w| w[0] == "--config")
+            .map(|w| w[1].clone());
+        if let Some(path) = config_path {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    serde_yaml::from_str::<RegistryConfig>(&contents).unwrap_or_else(|e| {
+                        eprintln!("Warning: failed to parse config {path}: {e}, using defaults");
+                        RegistryConfig::default()
+                    })
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to read config {path}: {e}, using defaults");
+                    RegistryConfig::default()
+                }
+            }
+        } else {
+            RegistryConfig::default()
+        }
+    };
 
     // Initialize tracing
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()

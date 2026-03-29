@@ -1783,8 +1783,30 @@ async fn main() -> anyhow::Result<()> {
 
     info!("NebulaCR Auth Service starting");
 
-    // Load configuration (default for now; can be replaced with file/env loading)
-    let mut config = RegistryConfig::default();
+    // Load configuration from file if --config flag provided, otherwise defaults
+    let mut config = {
+        let args: Vec<String> = std::env::args().collect();
+        let config_path = args
+            .windows(2)
+            .find(|w| w[0] == "--config")
+            .map(|w| w[1].clone());
+        if let Some(path) = config_path {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    serde_yaml::from_str::<RegistryConfig>(&contents).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to parse config {path}: {e}, using defaults");
+                        RegistryConfig::default()
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read config {path}: {e}, using defaults");
+                    RegistryConfig::default()
+                }
+            }
+        } else {
+            RegistryConfig::default()
+        }
+    };
 
     // Configure bootstrap admin for development (password: "admin")
     config.auth.bootstrap_admin = Some(BootstrapAdmin {
