@@ -1444,6 +1444,224 @@ async fn internal_replication_status(
         .into_response())
 }
 
+// ── Image Status Check ──────────────────────────────────────────────────────
+
+/// GET /v2/{tenant}/{project}/{name}/status/{reference}
+///
+/// Pre-pull readiness check. Returns whether an image (manifest + all layers)
+/// is fully available and pullable. Use this to verify image availability
+/// before pulling, or to check if an image exists on the mirror.
+///
+/// Response:
+/// ```json
+/// {
+///   "available": true,
+///   "image": "demo/default/nginx:latest",
+///   "manifest": { "exists": true, "digest": "sha256:...", "mediaType": "...", "size": 1234 },
+///   "layers": [
+///     { "digest": "sha256:...", "size": 12345, "available": true },
+///     { "digest": "sha256:...", "size": 67890, "available": true }
+///   ],
+///   "config": { "digest": "sha256:...", "size": 5678, "available": true },
+///   "missing_layers": 0,
+///   "total_size": 86169
+/// }
+/// ```
+#[instrument(name = "image_status", skip(state, claims), fields(tenant = %params.tenant, project = %params.project, name = %params.name, reference = %params.reference))]
+async fn image_status(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Path(params): Path<ManifestRef>,
+) -> Result<axum::Json<serde_json::Value>, RegistryError> {
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
+
+    let image_ref = format!(
+        "{}/{}/{}:{}",
+        params.tenant, params.project, params.name, params.reference
+    );
+
+    // 1. Check manifest
+    let manifest_path_result = resolve_manifest_path(
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &params.reference,
+    )
+    .await;
+
+    let manifest_store_path = match manifest_path_result {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(axum::Json(serde_json::json!({
+                "available": false,
+                "image": image_ref,
+                "manifest": { "exists": false },
+                "layers": [],
+                "missing_layers": 0,
+                "total_size": 0,
+                "reason": "manifest not found"
+            })));
+        }
+    };
+
+    let store_path = StorePath::from(manifest_store_path);
+    let manifest_data = match state.store.get(&store_path).await {
+        Ok(result) => match result.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return Ok(axum::Json(serde_json::json!({
+                    "available": false,
+                    "image": image_ref,
+                    "manifest": { "exists": false },
+                    "layers": [],
+                    "missing_layers": 0,
+                    "total_size": 0,
+                    "reason": "manifest not readable"
+                })));
+            }
+        },
+        Err(_) => {
+            return Ok(axum::Json(serde_json::json!({
+                "available": false,
+                "image": image_ref,
+                "manifest": { "exists": false },
+                "layers": [],
+                "missing_layers": 0,
+                "total_size": 0,
+                "reason": "manifest not found"
+            })));
+        }
+    };
+
+    let digest = sha256_digest(&manifest_data);
+    let media_type = detect_manifest_media_type(&manifest_data);
+    let manifest_size = manifest_data.len();
+
+    // 2. Parse manifest to find layers and config
+    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_data)
+        .map_err(|e| RegistryError::ManifestInvalid {
+            reason: e.to_string(),
+        })?;
+
+    let mut layer_statuses = Vec::new();
+    let mut config_status = serde_json::json!(null);
+    let mut total_size: u64 = manifest_size as u64;
+    let mut missing_layers: u32 = 0;
+
+    // Check config blob if present
+    if let Some(config) = manifest_json.get("config") {
+        if let (Some(cfg_digest), Some(cfg_size)) = (
+            config.get("digest").and_then(|d| d.as_str()),
+            config.get("size").and_then(|s| s.as_u64()),
+        ) {
+            let cfg_path = blob_path(
+                &params.tenant,
+                &params.project,
+                &params.name,
+                cfg_digest,
+            );
+            let cfg_exists = state.store.head(&StorePath::from(cfg_path)).await.is_ok();
+            if !cfg_exists {
+                missing_layers += 1;
+            }
+            total_size += cfg_size;
+            config_status = serde_json::json!({
+                "digest": cfg_digest,
+                "size": cfg_size,
+                "available": cfg_exists
+            });
+        }
+    }
+
+    // Check each layer
+    if let Some(layers) = manifest_json.get("layers").and_then(|l| l.as_array()) {
+        for layer in layers {
+            if let (Some(layer_digest), Some(layer_size)) = (
+                layer.get("digest").and_then(|d| d.as_str()),
+                layer.get("size").and_then(|s| s.as_u64()),
+            ) {
+                let layer_store_path = blob_path(
+                    &params.tenant,
+                    &params.project,
+                    &params.name,
+                    layer_digest,
+                );
+                let layer_exists = state
+                    .store
+                    .head(&StorePath::from(layer_store_path))
+                    .await
+                    .is_ok();
+                if !layer_exists {
+                    missing_layers += 1;
+                }
+                total_size += layer_size;
+                layer_statuses.push(serde_json::json!({
+                    "digest": layer_digest,
+                    "size": layer_size,
+                    "available": layer_exists
+                }));
+            }
+        }
+    }
+
+    // For manifest lists/indexes, check sub-manifests
+    if let Some(manifests) = manifest_json.get("manifests").and_then(|m| m.as_array()) {
+        for sub in manifests {
+            if let (Some(sub_digest), Some(sub_size)) = (
+                sub.get("digest").and_then(|d| d.as_str()),
+                sub.get("size").and_then(|s| s.as_u64()),
+            ) {
+                let sub_path = manifest_path(
+                    &params.tenant,
+                    &params.project,
+                    &params.name,
+                    sub_digest,
+                );
+                let sub_exists = state
+                    .store
+                    .head(&StorePath::from(sub_path))
+                    .await
+                    .is_ok();
+                if !sub_exists {
+                    missing_layers += 1;
+                }
+                total_size += sub_size;
+                let platform = sub.get("platform").cloned().unwrap_or(serde_json::json!(null));
+                layer_statuses.push(serde_json::json!({
+                    "digest": sub_digest,
+                    "size": sub_size,
+                    "available": sub_exists,
+                    "platform": platform
+                }));
+            }
+        }
+    }
+
+    let all_available = missing_layers == 0;
+
+    Ok(axum::Json(serde_json::json!({
+        "available": all_available,
+        "image": image_ref,
+        "manifest": {
+            "exists": true,
+            "digest": digest,
+            "mediaType": media_type,
+            "size": manifest_size
+        },
+        "layers": layer_statuses,
+        "config": config_status,
+        "missing_layers": missing_layers,
+        "total_size": total_size
+    })))
+}
+
 fn extract_header(headers: &HeaderMap, name: &str) -> Result<String, RegistryError> {
     headers
         .get(name)
@@ -1842,6 +2060,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/v2/{tenant}/{project}/{name}/blobs/uploads/{uuid}",
             patch(upload_blob_chunk).put(complete_blob_upload),
+        )
+        // Image status check (pre-pull readiness)
+        .route(
+            "/v2/{tenant}/{project}/{name}/status/{reference}",
+            get(image_status),
         )
         // Tag listing
         .route("/v2/{tenant}/{project}/{name}/tags/list", get(list_tags))
