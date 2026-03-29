@@ -1,0 +1,351 @@
+name: "Nightly Registry Health Test"
+
+# Runs every night at 2am UTC, or manually.
+# Pushes a test image, pulls it back, verifies the round-trip,
+# checks the image status API, and tests the mirror.
+# Reports failures to Slack.
+#
+# Required GitHub Secrets:
+#   NEBULACR_USERNAME       - Registry username (e.g. "admin")
+#   NEBULACR_PASSWORD       - Registry password
+#   NEBULACR_REGISTRY       - Primary registry host (e.g. "acc-nebulacr.diytaxreturn.co.uk")
+#   NEBULACR_MIRROR         - Mirror registry host (e.g. "acc-nebulacr-mirror.diytaxreturn.co.uk")
+#   SLACK_WEBHOOK_URL       - Slack incoming webhook URL for failure notifications
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+env:
+  PRIMARY: ${{ secrets.NEBULACR_REGISTRY }}
+  MIRROR: ${{ secrets.NEBULACR_MIRROR }}
+  IMAGE_NAME: demo/default/nightly-test
+  IMAGE_TAG: nightly-${{ github.run_number }}
+
+jobs:
+  registry-health-test:
+    name: Registry Health Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Auth ──────────────────────────────────────────────────────
+      - name: Authenticate to primary
+        id: auth-primary
+        run: |
+          RESPONSE=$(curl -sf --connect-timeout 10 -u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}" \
+            "https://${PRIMARY}/auth/token?service=nebulacr-registry" 2>&1) || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Auth endpoint unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=No token in response" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "result=PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to mirror
+        id: auth-mirror
+        run: |
+          RESPONSE=$(curl -sf --connect-timeout 10 -u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}" \
+            "https://${MIRROR}/auth/token?service=nebulacr-registry" 2>&1) || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Mirror auth unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=No token from mirror" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "result=PASS" >> "$GITHUB_OUTPUT"
+
+      # ── Health Checks ─────────────────────────────────────────────
+      - name: Health check primary
+        id: health-primary
+        run: |
+          STATUS=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 \
+            "https://${PRIMARY}/health" 2>&1) || STATUS="000"
+          if [ "$STATUS" = "200" ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Primary /health returned $STATUS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Health check mirror
+        id: health-mirror
+        run: |
+          STATUS=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 \
+            "https://${MIRROR}/health" 2>&1) || STATUS="000"
+          if [ "$STATUS" = "200" ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Mirror /health returned $STATUS" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── V2 API Check ──────────────────────────────────────────────
+      - name: Registry v2 API check
+        id: v2-check
+        run: |
+          PRIMARY_V2=$(curl -sf --connect-timeout 10 "https://${PRIMARY}/v2/" 2>&1) && P_OK=true || P_OK=false
+          MIRROR_V2=$(curl -sf --connect-timeout 10 "https://${MIRROR}/v2/" 2>&1) && M_OK=true || M_OK=false
+          if $P_OK && $M_OK; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Primary=$P_OK Mirror=$M_OK" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── HA Status ─────────────────────────────────────────────────
+      - name: HA status check
+        id: ha-check
+        if: steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          HA=$(curl -sf --connect-timeout 10 \
+            -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
+            "https://${PRIMARY}/api/ha-status" 2>&1) || {
+            echo "result=SKIP" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          ENABLED=$(echo "$HA" | jq -r '.ha_enabled // false')
+          UNHEALTHY=$(echo "$HA" | jq '[.regions[]? | select(.healthy == false)] | length')
+          if [ "$ENABLED" = "true" ] && [ "$UNHEALTHY" = "0" ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          elif [ "$ENABLED" = "true" ]; then
+            echo "result=WARN" >> "$GITHUB_OUTPUT"
+            echo "error=$UNHEALTHY unhealthy region(s)" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=SKIP" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Build & Push ──────────────────────────────────────────────
+      - name: Build test image
+        id: build
+        run: |
+          cat > /tmp/Dockerfile <<'DOCKERFILE'
+          FROM alpine:3.20
+          RUN echo "NebulaCR nightly test $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /BUILD_INFO
+          CMD ["cat", "/BUILD_INFO"]
+          DOCKERFILE
+          docker build -t "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" /tmp/
+          echo "result=PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Docker login
+        if: steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          echo "${{ secrets.NEBULACR_PASSWORD }}" | \
+            docker login "https://${PRIMARY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
+
+      - name: Push image to primary
+        id: push
+        if: steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 && {
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          } || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=docker push failed" >> "$GITHUB_OUTPUT"
+          }
+
+      # ── Image Status API ──────────────────────────────────────────
+      - name: Check image status on primary
+        id: status-primary
+        if: steps.push.outputs.result == 'PASS'
+        run: |
+          RESPONSE=$(curl -sf --connect-timeout 10 \
+            -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
+            "https://${PRIMARY}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Status API unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          AVAILABLE=$(echo "$RESPONSE" | jq -r '.available')
+          MISSING=$(echo "$RESPONSE" | jq -r '.missing_layers')
+          if [ "$AVAILABLE" = "true" ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=available=false, missing_layers=$MISSING" >> "$GITHUB_OUTPUT"
+          fi
+          echo "$RESPONSE" | jq .
+
+      # ── Pull ───────────────────────────────────────────────────────
+      - name: Pull image from primary
+        id: pull
+        if: steps.push.outputs.result == 'PASS'
+        run: |
+          docker rmi "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
+          docker pull "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 && {
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          } || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=docker pull failed" >> "$GITHUB_OUTPUT"
+          }
+
+      - name: Verify pulled image
+        id: verify
+        if: steps.pull.outputs.result == 'PASS'
+        run: |
+          OUTPUT=$(docker run --rm "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1) && {
+            echo "$OUTPUT"
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          } || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Container run failed" >> "$GITHUB_OUTPUT"
+          }
+
+      # ── Mirror Check ──────────────────────────────────────────────
+      - name: Check image status on mirror
+        id: status-mirror
+        if: steps.push.outputs.result == 'PASS' && steps.auth-mirror.outputs.result == 'PASS'
+        run: |
+          # Allow time for replication
+          sleep 10
+          RESPONSE=$(curl -sf --connect-timeout 10 \
+            -H "Authorization: Bearer ${{ steps.auth-mirror.outputs.token }}" \
+            "https://${MIRROR}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
+            echo "result=SKIP" >> "$GITHUB_OUTPUT"
+            echo "error=Mirror status API unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          AVAILABLE=$(echo "$RESPONSE" | jq -r '.available')
+          echo "Mirror available: $AVAILABLE"
+          echo "$RESPONSE" | jq .
+          echo "result=$( [ "$AVAILABLE" = "true" ] && echo PASS || echo INFO )" >> "$GITHUB_OUTPUT"
+
+      # ── Cleanup ────────────────────────────────────────────────────
+      - name: Docker logout
+        if: always()
+        run: |
+          docker logout "${PRIMARY}" 2>/dev/null || true
+          docker logout "${MIRROR}" 2>/dev/null || true
+
+      # ── Report ─────────────────────────────────────────────────────
+      - name: Collect results
+        id: results
+        if: always()
+        run: |
+          TESTS=0
+          PASS=0
+          FAIL=0
+          REPORT=""
+
+          check() {
+            local name="$1" result="$2" error="$3"
+            TESTS=$((TESTS + 1))
+            if [ "$result" = "PASS" ]; then
+              PASS=$((PASS + 1))
+              REPORT="${REPORT}\n:white_check_mark: ${name}"
+            elif [ "$result" = "FAIL" ]; then
+              FAIL=$((FAIL + 1))
+              REPORT="${REPORT}\n:x: ${name}: ${error}"
+            elif [ "$result" = "WARN" ]; then
+              PASS=$((PASS + 1))
+              REPORT="${REPORT}\n:warning: ${name}: ${error}"
+            else
+              REPORT="${REPORT}\n:heavy_minus_sign: ${name}: skipped"
+            fi
+          }
+
+          check "Primary auth"       "${{ steps.auth-primary.outputs.result }}"   "${{ steps.auth-primary.outputs.error }}"
+          check "Mirror auth"        "${{ steps.auth-mirror.outputs.result }}"    "${{ steps.auth-mirror.outputs.error }}"
+          check "Primary health"     "${{ steps.health-primary.outputs.result }}" "${{ steps.health-primary.outputs.error }}"
+          check "Mirror health"      "${{ steps.health-mirror.outputs.result }}"  "${{ steps.health-mirror.outputs.error }}"
+          check "V2 API"             "${{ steps.v2-check.outputs.result }}"       "${{ steps.v2-check.outputs.error }}"
+          check "HA status"          "${{ steps.ha-check.outputs.result }}"       "${{ steps.ha-check.outputs.error }}"
+          check "Push image"         "${{ steps.push.outputs.result }}"           "${{ steps.push.outputs.error }}"
+          check "Image status API"   "${{ steps.status-primary.outputs.result }}" "${{ steps.status-primary.outputs.error }}"
+          check "Pull image"         "${{ steps.pull.outputs.result }}"           "${{ steps.pull.outputs.error }}"
+          check "Run container"      "${{ steps.verify.outputs.result }}"         "${{ steps.verify.outputs.error }}"
+
+          echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
+          echo "pass=$PASS" >> "$GITHUB_OUTPUT"
+          echo "fail=$FAIL" >> "$GITHUB_OUTPUT"
+
+          # Write report to file (multi-line)
+          echo -e "$REPORT" > /tmp/report.txt
+          echo "has_failures=$( [ "$FAIL" -gt 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack on failure
+        if: always() && steps.results.outputs.has_failures == 'true'
+        run: |
+          REPORT=$(cat /tmp/report.txt)
+          PAYLOAD=$(cat <<SLACK
+          {
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": ":rotating_light: NebulaCR Nightly Test FAILED",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Results:* ${{ steps.results.outputs.pass }}/${{ steps.results.outputs.tests }} passed, ${{ steps.results.outputs.fail }} failed"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "${REPORT}"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+                }
+              },
+              {
+                "type": "context",
+                "elements": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "Primary: \`${PRIMARY}\` | Mirror: \`${MIRROR}\` | Run #${{ github.run_number }}"
+                  }
+                ]
+              }
+            ]
+          }
+          SLACK
+          )
+          curl -sf -X POST -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            "${{ secrets.SLACK_WEBHOOK_URL }}" || echo "::warning::Failed to send Slack notification"
+
+      - name: Notify Slack on success (weekly summary)
+        if: always() && steps.results.outputs.has_failures == 'false' && github.event.schedule != ''
+        run: |
+          # Only send success to Slack on Mondays for a weekly summary
+          if [ "$(date +%u)" = "1" ]; then
+            curl -sf -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\":white_check_mark: NebulaCR weekly health check passed — ${{ steps.results.outputs.pass }}/${{ steps.results.outputs.tests }} tests OK. Primary: \`${PRIMARY}\` Mirror: \`${MIRROR}\`\"}" \
+              "${{ secrets.SLACK_WEBHOOK_URL }}" || true
+          fi
+
+      - name: Fail if tests failed
+        if: always() && steps.results.outputs.has_failures == 'true'
+        run: |
+          echo "::error::${{ steps.results.outputs.fail }} test(s) failed"
+          cat /tmp/report.txt
+          exit 1
