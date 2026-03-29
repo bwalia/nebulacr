@@ -1224,8 +1224,10 @@ async fn get_token_inner(
     // Docker sends credentials via Basic auth header or form body (OAuth2 flow)
     let subject = if let Some((username, password)) = extract_basic_auth(&headers) {
         authenticate_basic(&state, &username, &password).unwrap_or_else(|_| "anonymous".to_string())
-    } else if let (Some(ref username), Some(ref password)) = (&query.username, &query.password) {
-        authenticate_basic(&state, username, password).unwrap_or_else(|_| "anonymous".to_string())
+    } else if query.username.is_some() && query.password.is_some() {
+        let u = query.username.as_deref().unwrap();
+        let p = query.password.as_deref().unwrap();
+        authenticate_basic(&state, u, p).unwrap_or_else(|_| "anonymous".to_string())
     } else if let Some(ref account) = query.account {
         account.clone()
     } else {
