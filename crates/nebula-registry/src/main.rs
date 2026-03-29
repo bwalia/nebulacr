@@ -1460,9 +1460,13 @@ async fn main() -> anyhow::Result<()> {
     let config = {
         let args: Vec<String> = std::env::args().collect();
         let config_path = args
-            .windows(2)
-            .find(|w| w[0] == "--config")
-            .map(|w| w[1].clone());
+            .iter()
+            .find_map(|a| a.strip_prefix("--config=").map(String::from))
+            .or_else(|| {
+                args.windows(2)
+                    .find(|w| w[0] == "--config")
+                    .map(|w| w[1].clone())
+            });
         if let Some(path) = config_path {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {

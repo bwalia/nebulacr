@@ -167,6 +167,7 @@ impl Default for MultiRegionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ServerConfig {
     /// Bind address for the registry API.
     pub listen_addr: String,
@@ -177,6 +178,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuthConfig {
     /// OIDC identity providers.
     pub oidc_providers: Vec<OidcProviderConfig>,
@@ -203,6 +205,7 @@ pub struct BootstrapAdmin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     /// Backend type: "filesystem", "s3", "gcs", "azure".
     pub backend: String,
@@ -216,6 +219,7 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ObservabilityConfig {
     /// Log level filter (e.g. "info", "debug").
     pub log_level: String,
@@ -226,6 +230,7 @@ pub struct ObservabilityConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RateLimitConfig {
     /// Default requests per second per tenant.
     pub default_rps: u32,
@@ -333,6 +338,64 @@ impl Default for WebhookConfig {
             endpoints: vec![],
             timeout_ms: 5000,
             max_retries: 3,
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: "0.0.0.0:5000".into(),
+            auth_listen_addr: "0.0.0.0:5001".into(),
+            metrics_addr: "0.0.0.0:9090".into(),
+        }
+    }
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            oidc_providers: vec![],
+            signing_algorithm: "RS256".into(),
+            signing_key_path: "/etc/nebulacr/keys/private.pem".into(),
+            verification_key_path: "/etc/nebulacr/keys/public.pem".into(),
+            token_ttl_seconds: 300,
+            issuer: "nebulacr".into(),
+            audience: "nebulacr-registry".into(),
+            bootstrap_admin: None,
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: "filesystem".into(),
+            root: "/var/lib/nebulacr/data".into(),
+            endpoint: None,
+            region: None,
+            access_key: None,
+            secret_key: None,
+        }
+    }
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            log_level: "info".into(),
+            log_format: "json".into(),
+            otlp_endpoint: None,
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            default_rps: 100,
+            ip_rps: 50,
+            token_issue_rpm: 60,
         }
     }
 }
