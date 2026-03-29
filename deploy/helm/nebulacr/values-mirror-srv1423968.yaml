@@ -22,7 +22,7 @@ autoscaling:
 ingress:
   enabled: true
   className: nginx
-  host: nebulacr-mirror.srv1423968.hstgr.cloud
+  host: acc-nebulacr-mirror.diytaxreturn.co.uk
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
