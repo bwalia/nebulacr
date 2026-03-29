@@ -33,6 +33,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ── Debug ───────────────────────────────────────────────────
+      - name: Debug connectivity
+        run: |
+          echo "PRIMARY=${PRIMARY}"
+          echo "MIRROR=${MIRROR}"
+          echo "Testing primary..."
+          curl -sv --connect-timeout 10 "https://${PRIMARY}/v2/" 2>&1 | tail -5
+          echo "Testing mirror..."
+          curl -sv --connect-timeout 10 "https://${MIRROR}/v2/" 2>&1 | tail -5
+
       # ── Auth ──────────────────────────────────────────────────────
       - name: Authenticate to primary
         id: auth-primary
