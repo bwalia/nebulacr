@@ -136,6 +136,18 @@ impl IntoResponse for RegistryError {
                 detail: None,
             }],
         };
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        // Docker Registry V2 spec requires Www-Authenticate on 401 responses
+        if status == StatusCode::UNAUTHORIZED {
+            let realm = std::env::var("NEBULACR_AUTH_REALM")
+                .unwrap_or_else(|_| "/auth/token".to_string());
+            let service = std::env::var("NEBULACR_AUTH_SERVICE")
+                .unwrap_or_else(|_| "nebulacr-registry".to_string());
+            let header_val = format!("Bearer realm=\"{realm}\",service=\"{service}\"");
+            if let Ok(val) = axum::http::HeaderValue::from_str(&header_val) {
+                response.headers_mut().insert("Www-Authenticate", val);
+            }
+        }
+        response
     }
 }
