@@ -1470,10 +1470,16 @@ async fn main() -> anyhow::Result<()> {
         if let Some(path) = config_path {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
-                    serde_yaml::from_str::<RegistryConfig>(&contents).unwrap_or_else(|e| {
-                        eprintln!("Warning: failed to parse config {path}: {e}, using defaults");
-                        RegistryConfig::default()
-                    })
+                    match serde_yaml::from_str::<RegistryConfig>(&contents) {
+                        Ok(cfg) => {
+                            eprintln!("Config loaded from {path}, multi_region: {}", cfg.multi_region.is_some());
+                            cfg
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: failed to parse config {path}: {e}, using defaults");
+                            RegistryConfig::default()
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("Warning: failed to read config {path}: {e}, using defaults");
