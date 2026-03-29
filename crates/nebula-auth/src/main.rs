@@ -737,6 +737,20 @@ struct DockerTokenQuery {
     scope: Option<String>,
     #[serde(default)]
     account: Option<String>,
+    // OAuth2 form fields sent by Docker during Www-Authenticate challenge
+    #[serde(default)]
+    #[allow(dead_code)]
+    grant_type: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    client_id: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    access_type: Option<String>,
 }
 
 /// Parse a Docker scope string like `repository:tenant/project/repo:pull,push`.
@@ -1171,11 +1185,31 @@ async fn post_token(
     }))
 }
 
+/// POST /auth/token — Docker OAuth2-compatible form-encoded token exchange.
+/// Docker clients POST form data when using the Www-Authenticate challenge flow.
+async fn post_token_form(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<DockerTokenQuery>,
+) -> Result<Json<DockerTokenResponse>, RegistryError> {
+    // Delegate to the GET handler logic with the same query params
+    get_token_inner(state, headers, form).await
+}
+
 /// GET /auth/token — Docker-compatible token endpoint.
 async fn get_token(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<DockerTokenQuery>,
+) -> Result<Json<DockerTokenResponse>, RegistryError> {
+    get_token_inner(state, headers, query).await
+}
+
+/// Shared token issuance logic for GET and POST (form-encoded) flows.
+async fn get_token_inner(
+    state: AppState,
+    headers: HeaderMap,
+    query: DockerTokenQuery,
 ) -> Result<Json<DockerTokenResponse>, RegistryError> {
     increment_auth_requests();
 
@@ -1187,9 +1221,11 @@ async fn get_token(
     );
     let _guard = span.enter();
 
-    // Docker sends credentials via Basic auth
+    // Docker sends credentials via Basic auth header or form body (OAuth2 flow)
     let subject = if let Some((username, password)) = extract_basic_auth(&headers) {
         authenticate_basic(&state, &username, &password).unwrap_or_else(|_| "anonymous".to_string())
+    } else if let (Some(ref username), Some(ref password)) = (&query.username, &query.password) {
+        authenticate_basic(&state, username, password).unwrap_or_else(|_| "anonymous".to_string())
     } else if let Some(ref account) = query.account {
         account.clone()
     } else {
@@ -1889,8 +1925,9 @@ async fn main() -> anyhow::Result<()> {
     // Build Axum router
     let app = Router::new()
         // Existing endpoints
-        .route("/auth/token", post(post_token))
-        .route("/auth/token", get(get_token))
+        .route("/auth/token", post(post_token_form).get(get_token))
+        // JSON token request endpoint (API clients)
+        .route("/auth/token/json", post(post_token))
         // New endpoints
         .route("/auth/github-actions/token", post(github_actions_token))
         .route("/auth/introspect", post(introspect_token))
