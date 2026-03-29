@@ -70,6 +70,15 @@ spec:
                   name: http
           {{- end }}
           {{- end }}
+          {{- if .Values.multiRegion.enabled }}
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nebulacr.fullname" . }}-registry
+                port:
+                  name: http
+          {{- end }}
           {{- if .Values.ingress.dashboard.enabled }}
           - path: /dashboard
             pathType: Prefix

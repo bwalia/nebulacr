@@ -35,7 +35,7 @@ registry:
   image:
     repository: ghcr.io/bwalia/nebulacr
     tag: ""  # Defaults to appVersion
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   replicas: 2
   port: 5000
   metricsPort: 9090
@@ -79,7 +79,7 @@ auth:
   image:
     repository: ghcr.io/bwalia/nebulacr
     tag: ""  # Defaults to appVersion
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   replicas: 2
   port: 5001
   metricsPort: 9091
