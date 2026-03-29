@@ -1,0 +1,109 @@
+## NebulaCR Mirror — srv1423968 (187.77.179.206)
+## Pull-through cache mirror connected to primary at k3s0
+
+auth:
+  image:
+    tag: "latest"
+  replicas: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+autoscaling:
+  auth:
+    enabled: false
+  registry:
+    enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  host: nebulacr-mirror.srv1423968.hstgr.cloud
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  tls:
+    enabled: false
+    secretName: ""
+  registryPath: /v2
+  authPath: /auth
+  security:
+    exposeAllAuthPaths: false
+    exposeGitHubActions: false
+  dashboard:
+    enabled: true
+
+jwt:
+  existingSecret: nebulacr-jwt-keys
+
+networkPolicy:
+  enabled: false
+
+observability:
+  logFormat: json
+  logLevel: info
+
+podDisruptionBudget:
+  auth:
+    enabled: false
+  registry:
+    enabled: false
+
+pullThroughCache:
+  enabled: true
+  defaultUpstream: docker.io
+  ttl: 86400
+  upstreams:
+    docker.io:
+      url: "https://registry-1.docker.io"
+      username: ""
+      password: ""
+    ghcr.io:
+      url: "https://ghcr.io"
+      username: ""
+      password: ""
+    # Primary NebulaCR instance — pull-through cache for images
+    # pushed to the primary registry at k3s0
+    primary-nebulacr:
+      url: "https://acc-nebulacr.diytaxreturn.co.uk"
+      username: ""
+      password: ""
+
+rateLimiting:
+  burst: 200
+  enabled: true
+  pullRatePerTenant: 1000
+  pushRatePerTenant: 500
+  requestsPerSecond: 100
+
+registry:
+  image:
+    tag: "latest"
+  replicas: 1
+  resources:
+    limits:
+      cpu: "1"
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+serviceAccount:
+  create: true
+  name: nebulacr
+
+storage:
+  backend: filesystem
+  filesystem:
+    persistence:
+      accessMode: ReadWriteOnce
+      enabled: true
+      size: 20Gi
+      storageClass: local-path
+    rootDirectory: /var/lib/nebulacr/data
