@@ -37,7 +37,7 @@ use uuid::Uuid;
 use nebula_common::auth::TokenClaims;
 use nebula_common::config::RegistryConfig;
 use nebula_common::errors::RegistryError;
-use nebula_common::models::Action;
+use nebula_common::models::{Action, Role};
 use nebula_common::storage::{
     blob_path, manifest_path, sha256_digest, tag_link_path, tags_prefix, upload_path,
 };
