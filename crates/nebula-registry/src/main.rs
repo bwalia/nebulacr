@@ -160,6 +160,11 @@ fn authorize(
         });
     }
 
+    // Admin role bypasses scope checks
+    if claims.role == Role::Admin {
+        return Ok(());
+    }
+
     // Check scopes: at least one scope must match the repository and include the action
     let scope_ok = claims
         .scopes
