@@ -22,6 +22,7 @@ env:
   MIRROR: ${{ secrets.NEBULACR_MIRROR }}
   IMAGE_NAME: demo/default/nightly-test
   IMAGE_TAG: nightly-${{ github.run_number }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   registry-health-test:
@@ -32,6 +33,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ── Cleanup stale images on self-hosted runner ─────────────
+      - name: Cleanup old nightly images
+        run: |
+          docker images --filter "reference=*/${IMAGE_NAME}" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | \
+            xargs -r docker rmi 2>/dev/null || true
 
       # ── Debug ───────────────────────────────────────────────────
       - name: Debug connectivity
@@ -162,6 +169,7 @@ jobs:
       - name: Docker login
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
+          docker logout "${PRIMARY}" 2>/dev/null || true
           echo "${{ secrets.NEBULACR_PASSWORD }}" | \
             docker login "https://${PRIMARY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
 
@@ -169,12 +177,20 @@ jobs:
         id: push
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
-          docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 && {
-            echo "result=PASS" >> "$GITHUB_OUTPUT"
-          } || {
-            echo "result=FAIL" >> "$GITHUB_OUTPUT"
-            echo "error=docker push failed" >> "$GITHUB_OUTPUT"
-          }
+          PUSH_OUT=""
+          for ATTEMPT in 1 2 3; do
+            echo "Push attempt $ATTEMPT/3..."
+            if PUSH_OUT=$(docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1); then
+              echo "$PUSH_OUT"
+              echo "result=PASS" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $ATTEMPT failed:"
+            echo "$PUSH_OUT"
+            [ "$ATTEMPT" -lt 3 ] && sleep 5
+          done
+          echo "result=FAIL" >> "$GITHUB_OUTPUT"
+          echo "error=docker push failed after 3 attempts: $(echo "$PUSH_OUT" | tail -1)" >> "$GITHUB_OUTPUT"
 
       # ── Image Status API ──────────────────────────────────────────
       - name: Check image status on primary
@@ -204,26 +220,28 @@ jobs:
         if: steps.push.outputs.result == 'PASS'
         run: |
           docker rmi "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
-          docker pull "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 && {
+          if PULL_OUT=$(docker pull "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1); then
+            echo "$PULL_OUT"
             echo "result=PASS" >> "$GITHUB_OUTPUT"
-          } || {
+          else
+            echo "$PULL_OUT"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
-            echo "error=docker pull failed" >> "$GITHUB_OUTPUT"
-          }
+            echo "error=docker pull failed: $(echo "$PULL_OUT" | tail -1)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Verify pulled image
         id: verify
         if: steps.pull.outputs.result == 'PASS'
         run: |
-          # Verify the image exists and has the expected layer
-          INSPECT=$(docker inspect "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1) && {
+          if INSPECT=$(docker inspect "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1); then
             echo "Image inspected successfully"
             echo "$INSPECT" | jq '.[0].RepoTags'
             echo "result=PASS" >> "$GITHUB_OUTPUT"
-          } || {
+          else
+            echo "$INSPECT"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Image inspect failed" >> "$GITHUB_OUTPUT"
-          }
+          fi
 
       # ── Mirror Check ──────────────────────────────────────────────
       - name: Check image status on mirror
