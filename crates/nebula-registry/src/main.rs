@@ -254,6 +254,36 @@ struct UploadRef {
     uuid: String,
 }
 
+/// Default tenant used for 2-segment Docker image paths (namespace/repo).
+const DEFAULT_TENANT: &str = "_";
+
+#[derive(Debug, serde::Deserialize)]
+struct RepoPath2 {
+    project: String,
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ManifestRef2 {
+    project: String,
+    name: String,
+    reference: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BlobRef2 {
+    project: String,
+    name: String,
+    digest: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UploadRef2 {
+    project: String,
+    name: String,
+    uuid: String,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct DigestQuery {
     digest: Option<String>,
@@ -1696,6 +1726,115 @@ async fn image_status(
     })))
 }
 
+// ── 2-segment wrapper handlers (default tenant) ────────────────────────────
+//
+// Standard Docker clients push with 2 path segments: {namespace}/{repo}.
+// These wrappers inject the default tenant and delegate to the 3-segment handlers.
+
+async fn head_manifest_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<ManifestRef2>,
+) -> Result<Response, RegistryError> {
+    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    head_manifest(state, claims, Path(params)).await
+}
+
+async fn get_manifest_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<ManifestRef2>,
+) -> Result<Response, RegistryError> {
+    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    get_manifest(state, claims, Path(params)).await
+}
+
+async fn put_manifest_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<ManifestRef2>,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    put_manifest(state, claims, Path(params), body).await
+}
+
+async fn delete_manifest_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<ManifestRef2>,
+) -> Result<Response, RegistryError> {
+    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    delete_manifest(state, claims, Path(params)).await
+}
+
+async fn head_blob_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<BlobRef2>,
+) -> Result<Response, RegistryError> {
+    let params = BlobRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, digest: p.digest };
+    head_blob(state, claims, Path(params)).await
+}
+
+async fn get_blob_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<BlobRef2>,
+) -> Result<Response, RegistryError> {
+    let params = BlobRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, digest: p.digest };
+    get_blob(state, claims, Path(params)).await
+}
+
+async fn initiate_blob_upload_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<RepoPath2>,
+) -> Result<Response, RegistryError> {
+    let params = RepoPath { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name };
+    initiate_blob_upload(state, claims, Path(params)).await
+}
+
+async fn upload_blob_chunk_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<UploadRef2>,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    let params = UploadRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, uuid: p.uuid };
+    upload_blob_chunk(state, claims, Path(params), body).await
+}
+
+async fn complete_blob_upload_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<UploadRef2>,
+    query: Query<DigestQuery>,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    let params = UploadRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, uuid: p.uuid };
+    complete_blob_upload(state, claims, Path(params), query, body).await
+}
+
+async fn image_status_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<ManifestRef2>,
+) -> Result<axum::Json<serde_json::Value>, RegistryError> {
+    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    image_status(state, claims, Path(params)).await
+}
+
+async fn list_tags_2seg(
+    state: State<AppState>,
+    claims: AuthenticatedClaims,
+    Path(p): Path<RepoPath2>,
+    pagination: Query<PaginationQuery>,
+) -> Result<Response, RegistryError> {
+    let params = RepoPath { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name };
+    list_tags(state, claims, Path(params), pagination).await
+}
+
 fn extract_header(headers: &HeaderMap, name: &str) -> Result<String, RegistryError> {
     headers
         .get(name)
@@ -2102,6 +2241,31 @@ async fn main() -> anyhow::Result<()> {
         )
         // Tag listing
         .route("/v2/{tenant}/{project}/{name}/tags/list", get(list_tags))
+        // 2-segment routes (standard Docker: namespace/repo → default tenant)
+        .route(
+            "/v2/{project}/{name}/manifests/{reference}",
+            head(head_manifest_2seg)
+                .get(get_manifest_2seg)
+                .put(put_manifest_2seg)
+                .delete(delete_manifest_2seg),
+        )
+        .route(
+            "/v2/{project}/{name}/blobs/{digest}",
+            head(head_blob_2seg).get(get_blob_2seg),
+        )
+        .route(
+            "/v2/{project}/{name}/blobs/uploads/",
+            post(initiate_blob_upload_2seg),
+        )
+        .route(
+            "/v2/{project}/{name}/blobs/uploads/{uuid}",
+            patch(upload_blob_chunk_2seg).put(complete_blob_upload_2seg),
+        )
+        .route(
+            "/v2/{project}/{name}/status/{reference}",
+            get(image_status_2seg),
+        )
+        .route("/v2/{project}/{name}/tags/list", get(list_tags_2seg))
         // Catalog
         .route("/v2/_catalog", get(catalog));
 
