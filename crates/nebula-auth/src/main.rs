@@ -775,6 +775,8 @@ fn parse_docker_scope(scope: &str) -> Option<RequestedScope> {
         .collect();
 
     // Split name into tenant/project/repo components
+    // 3 segments: tenant/project/repo (NebulaCR multi-tenant)
+    // 2 segments: project/repo (standard Docker — uses default tenant "_")
     let name_parts: Vec<&str> = name.splitn(3, '/').collect();
     let (tenant, project, repository) = match name_parts.len() {
         3 => (
@@ -783,11 +785,11 @@ fn parse_docker_scope(scope: &str) -> Option<RequestedScope> {
             Some(name_parts[2].to_string()),
         ),
         2 => (
-            name_parts[0].to_string(),
+            "_".to_string(),
+            Some(name_parts[0].to_string()),
             Some(name_parts[1].to_string()),
-            None,
         ),
-        1 => ("demo".to_string(), None, Some(name_parts[0].to_string())),
+        1 => ("_".to_string(), None, Some(name_parts[0].to_string())),
         _ => return None,
     };
 
@@ -1791,13 +1793,48 @@ fn seed_demo_data() -> (TenantMap, ProjectMap, Vec<AccessPolicy>) {
         created_at: now,
     };
 
+    // Default tenant "_" for standard 2-segment Docker image paths (namespace/repo)
+    let default_tenant_id = Uuid::new_v4();
+    let default_tenant = Tenant {
+        id: default_tenant_id,
+        name: "_".into(),
+        display_name: "Default Tenant".into(),
+        enabled: true,
+        storage_prefix: "_".into(),
+        rate_limit_rps: 100,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let default_project_id = Uuid::new_v4();
+    let default_project = Project {
+        id: default_project_id,
+        tenant_id: default_tenant_id,
+        name: "_".into(),
+        display_name: "Default Project".into(),
+        visibility: Visibility::Private,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let default_policy = AccessPolicy {
+        id: Uuid::new_v4(),
+        tenant_id: default_tenant_id,
+        project_id: None,
+        subject: "admin".into(),
+        role: Role::Admin,
+        created_at: now,
+    };
+
     let mut tenants = HashMap::new();
     tenants.insert("demo".to_string(), tenant);
+    tenants.insert("_".to_string(), default_tenant);
 
     let mut projects = HashMap::new();
     projects.insert((tenant_id, "default".to_string()), project);
+    projects.insert((default_tenant_id, "_".to_string()), default_project);
 
-    (tenants, projects, vec![policy])
+    (tenants, projects, vec![policy, default_policy])
 }
 
 // ═══════════════════════════════════════════════════════════════════
