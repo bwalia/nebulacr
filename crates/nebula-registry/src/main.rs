@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use axum::{
     Router,
-    extract::{FromRequestParts, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -2273,6 +2273,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(public_routes)
         .merge(dashboard_routes)
         .merge(registry_routes)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)) // 2 GiB for large container image layers
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2296,6 +2297,7 @@ async fn main() -> anyhow::Result<()> {
             "/internal/replication/status",
             get(internal_replication_status),
         )
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         .with_state(state);
 
     let internal_addr = format!("0.0.0.0:{internal_port}");

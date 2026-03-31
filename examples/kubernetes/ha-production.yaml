@@ -1,0 +1,717 @@
+# ============================================================================
+# NebulaCR -- Production High-Availability Kubernetes Deployment
+# ============================================================================
+#
+# This manifest provides a production-grade, highly available deployment of
+# NebulaCR. It is intended as a reference architecture. For real production
+# use, prefer the Helm chart (deploy/helm/nebulacr/) which provides
+# templating, upgrades, and value overrides.
+#
+# What is included:
+#   - Namespace
+#   - Registry deployment (3 replicas, anti-affinity, resource limits, probes)
+#   - Auth deployment (2 replicas)
+#   - ClusterIP services for both
+#   - HorizontalPodAutoscaler for both
+#   - PodDisruptionBudget for both
+#   - NetworkPolicy (ingress-only access to registry and auth)
+#   - Ingress with TLS placeholder
+#   - ServiceMonitor for Prometheus (requires prometheus-operator CRDs)
+#   - ConfigMap and Secret placeholders
+#   - PVC for filesystem storage
+#
+# Prerequisites:
+#   - Kubernetes 1.27+
+#   - An ingress controller (nginx-ingress, Traefik, etc.)
+#   - cert-manager or a manually provisioned TLS secret
+#   - (Optional) prometheus-operator for ServiceMonitor
+#
+# Before applying:
+#   1. Generate JWT signing keys and create the Secret (see minimal.yaml)
+#   2. Update the Ingress host and TLS secretName below
+#   3. Adjust resource requests/limits and replica counts for your cluster
+#   4. For object storage (S3/GCS/Azure), replace the filesystem storage
+#      section in the ConfigMap and remove the PVC
+#
+# ============================================================================
+
+---
+# ---------- Namespace ----------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/part-of: nebulacr
+
+---
+# ---------- ConfigMap ----------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nebulacr-config
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+data:
+  registry.yaml: |
+    server:
+      listen_addr: "0.0.0.0:5000"
+      metrics_addr: "0.0.0.0:9090"
+
+    auth:
+      service_url: "http://nebulacr-auth:5001"
+      jwt:
+        access_token_ttl: 3600
+        refresh_token_ttl: 86400
+        signing_key_path: "/etc/nebulacr/keys/signing.pem"
+        verification_key_path: "/etc/nebulacr/keys/verification.pem"
+
+    storage:
+      backend: "filesystem"
+      filesystem:
+        root_directory: "/var/lib/nebulacr/data"
+
+    rate_limiting:
+      enabled: true
+      requests_per_second: 100
+      burst: 200
+      pull_rate_per_tenant: 1000
+      push_rate_per_tenant: 500
+
+    observability:
+      log_level: "info"
+      log_format: "json"
+
+  auth.yaml: |
+    server:
+      listen_addr: "0.0.0.0:5001"
+      metrics_addr: "0.0.0.0:9091"
+
+    jwt:
+      access_token_ttl: 3600
+      refresh_token_ttl: 86400
+      signing_key_path: "/etc/nebulacr/keys/signing.pem"
+      verification_key_path: "/etc/nebulacr/keys/verification.pem"
+
+    observability:
+      log_level: "info"
+      log_format: "json"
+
+---
+# ---------- Secret (placeholder) ----------
+# Generate real keys before deploying. See minimal.yaml for instructions.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nebulacr-jwt-keys
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+type: Opaque
+data: {}
+  # signing.pem: <base64-encoded-private-key>
+  # verification.pem: <base64-encoded-public-key>
+
+---
+# ---------- PersistentVolumeClaim ----------
+# For production with multiple replicas, consider using S3/GCS/Azure storage
+# instead of filesystem. With filesystem storage and ReadWriteMany, you need
+# a storage class that supports RWX (e.g. NFS, EFS, CephFS).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nebulacr-data
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  # storageClassName: "efs-sc"  # Uncomment and set to your RWX storage class
+
+---
+# ---------- Registry Deployment (3 replicas) ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nebulacr
+        app.kubernetes.io/component: registry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: nebulacr
+                    app.kubernetes.io/component: registry
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: nebulacr
+              app.kubernetes.io/component: registry
+      containers:
+        - name: registry
+          image: bwalia/nebulacr:latest
+          imagePullPolicy: Always
+          args:
+            - nebula-registry
+            - serve
+            - --config=/etc/nebulacr/config/registry.yaml
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nebulacr/config
+              readOnly: true
+            - name: signing-keys
+              mountPath: /etc/nebulacr/keys
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/nebulacr/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: nebulacr-config
+        - name: signing-keys
+          secret:
+            secretName: nebulacr-jwt-keys
+            defaultMode: 0440
+        - name: data
+          persistentVolumeClaim:
+            claimName: nebulacr-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+
+---
+# ---------- Auth Deployment (2 replicas) ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: auth
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nebulacr
+        app.kubernetes.io/component: auth
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: nebulacr
+                    app.kubernetes.io/component: auth
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: auth
+          image: bwalia/nebulacr:latest
+          imagePullPolicy: Always
+          args:
+            - nebula-auth
+            - serve
+            - --config=/etc/nebulacr/config/auth.yaml
+          ports:
+            - name: http
+              containerPort: 5001
+              protocol: TCP
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nebulacr/config
+              readOnly: true
+            - name: signing-keys
+              mountPath: /etc/nebulacr/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: nebulacr-config
+        - name: signing-keys
+          secret:
+            secretName: nebulacr-jwt-keys
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+
+---
+# ---------- Registry Service ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+
+---
+# ---------- Auth Service ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+  ports:
+    - name: http
+      port: 5001
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9091
+      targetPort: metrics
+      protocol: TCP
+
+---
+# ---------- HPA: Registry ----------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nebulacr-registry
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 60
+
+---
+# ---------- HPA: Auth ----------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nebulacr-auth
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 60
+
+---
+# ---------- PodDisruptionBudget: Registry ----------
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: registry
+
+---
+# ---------- PodDisruptionBudget: Auth ----------
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: auth
+
+---
+# ---------- NetworkPolicy: Auth ----------
+# Only allow traffic from the ingress controller namespace and from
+# registry pods (for internal token validation), plus Prometheus scraping.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: auth
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from the ingress controller namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx  # Adjust to your ingress namespace
+      ports:
+        - port: 5001
+          protocol: TCP
+    # Allow from registry pods (internal token validation)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nebulacr
+              app.kubernetes.io/component: registry
+      ports:
+        - port: 5001
+          protocol: TCP
+    # Allow Prometheus metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring  # Adjust to your monitoring namespace
+      ports:
+        - port: 9091
+          protocol: TCP
+
+---
+# ---------- NetworkPolicy: Registry ----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: registry
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from the ingress controller namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx  # Adjust to your ingress namespace
+      ports:
+        - port: 5000
+          protocol: TCP
+    # Allow Prometheus metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring  # Adjust to your monitoring namespace
+      ports:
+        - port: 9090
+          protocol: TCP
+
+---
+# ---------- Ingress ----------
+# Update the host, TLS secret, and ingressClassName for your environment.
+# If using cert-manager, add the appropriate annotation to auto-provision certs.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nebulacr
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+  annotations:
+    # Disable body size limit for large image layer uploads
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Uncomment for cert-manager:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx  # Adjust to your ingress class
+  tls:
+    - hosts:
+        - registry.example.com  # Replace with your domain
+      secretName: nebulacr-tls  # Replace with your TLS secret, or let cert-manager create it
+  rules:
+    - host: registry.example.com  # Replace with your domain
+      http:
+        paths:
+          # OCI Registry API
+          - path: /v2
+            pathType: Prefix
+            backend:
+              service:
+                name: nebulacr-registry
+                port:
+                  name: http
+          # Docker token auth endpoint (required for docker login)
+          - path: /auth/token
+            pathType: Prefix
+            backend:
+              service:
+                name: nebulacr-auth
+                port:
+                  name: http
+
+---
+# ---------- ServiceMonitor: Registry ----------
+# Requires the prometheus-operator CRDs to be installed.
+# If you do not use prometheus-operator, remove these resources and
+# configure Prometheus scrape targets manually.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: registry
+  namespaceSelector:
+    matchNames:
+      - nebulacr
+  endpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      path: /metrics
+
+---
+# ---------- ServiceMonitor: Auth ----------
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: auth
+  namespaceSelector:
+    matchNames:
+      - nebulacr
+  endpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      path: /metrics

@@ -1,0 +1,99 @@
+# ============================================================================
+# NebulaCR Distroless Dockerfile
+# ============================================================================
+#
+# An optimized container image variant using Google's distroless base.
+# Produces significantly smaller images (~30-50 MB) compared to the default
+# debian:bookworm-slim runtime (~80-120 MB).
+#
+# Tradeoffs vs. the standard Dockerfile:
+#
+#   [+] Much smaller image size (target <50 MB)
+#   [+] Smaller attack surface -- no shell, no package manager, no coreutils
+#   [+] Runs as nonroot (uid 65534) by default via the distroless :nonroot tag
+#   [+] Fewer CVEs from OS packages
+#
+#   [-] No shell -- cannot exec into the container for debugging
+#   [-] No curl/wget -- HEALTHCHECK with CMD is not possible; rely on
+#       Kubernetes httpGet probes instead (which you should use anyway)
+#   [-] No tini -- not needed because distroless uses a static entrypoint
+#       and Kubernetes sends signals directly to PID 1
+#   [-] Harder to troubleshoot in production; consider running the standard
+#       image alongside for debug pods if needed
+#
+# Build:
+#   docker build -f Dockerfile.scratch -t bwalia/nebulacr:distroless .
+#
+# ============================================================================
+
+# ── Builder stage ────────────────────────────────────────────────────────────
+# Identical to the standard Dockerfile builder for consistency.
+
+FROM rust:1.94-bookworm AS builder
+
+WORKDIR /build
+
+# Cache dependency compilation: copy manifests first, then build a dummy
+# project so that changing application source does not invalidate the
+# dependency layer.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/nebula-common/Cargo.toml      crates/nebula-common/Cargo.toml
+COPY crates/nebula-auth/Cargo.toml        crates/nebula-auth/Cargo.toml
+COPY crates/nebula-registry/Cargo.toml    crates/nebula-registry/Cargo.toml
+COPY crates/nebula-controller/Cargo.toml  crates/nebula-controller/Cargo.toml
+COPY crates/nebula-resilience/Cargo.toml  crates/nebula-resilience/Cargo.toml
+COPY crates/nebula-mirror/Cargo.toml      crates/nebula-mirror/Cargo.toml
+COPY crates/nebula-replication/Cargo.toml crates/nebula-replication/Cargo.toml
+
+# Create stub source files so Cargo can resolve the workspace
+RUN mkdir -p crates/nebula-common/src      && echo "pub fn _stub(){}" > crates/nebula-common/src/lib.rs \
+ && mkdir -p crates/nebula-auth/src        && echo "fn main(){}" > crates/nebula-auth/src/main.rs \
+ && mkdir -p crates/nebula-registry/src    && echo "fn main(){}" > crates/nebula-registry/src/main.rs \
+ && mkdir -p crates/nebula-controller/src  && echo "fn main(){}" > crates/nebula-controller/src/main.rs \
+ && mkdir -p crates/nebula-resilience/src  && echo "pub fn _stub(){}" > crates/nebula-resilience/src/lib.rs \
+ && mkdir -p crates/nebula-mirror/src      && echo "pub fn _stub(){}" > crates/nebula-mirror/src/lib.rs \
+ && mkdir -p crates/nebula-replication/src && echo "pub fn _stub(){}" > crates/nebula-replication/src/lib.rs
+
+# Build dependencies only (this layer is cached unless Cargo.toml/lock change)
+RUN cargo build --release --workspace 2>&1 || true
+
+# Remove the stub artifacts so the real source gets compiled
+RUN rm -rf crates/nebula-common/src crates/nebula-auth/src crates/nebula-registry/src \
+    crates/nebula-controller/src crates/nebula-resilience/src crates/nebula-mirror/src \
+    crates/nebula-replication/src \
+ && rm -rf target/release/.fingerprint/nebula-*
+
+# Copy the actual source code
+COPY crates/ crates/
+
+# Build the real binaries
+RUN cargo build --release --bin nebula-auth --bin nebula-registry
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+# distroless/cc-debian12 includes glibc and libgcc -- the minimum needed to
+# run dynamically-linked Rust binaries. The :nonroot tag sets the default
+# user to uid 65534 (nobody), so no USER directive is needed.
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+
+# Copy only the two compiled binaries. No shell, no curl, no tini.
+COPY --from=builder /build/target/release/nebula-auth     /usr/local/bin/nebula-auth
+COPY --from=builder /build/target/release/nebula-registry /usr/local/bin/nebula-registry
+
+# Expose ports:
+#   5000 - OCI Registry API (Docker Registry HTTP API V2)
+#   5001 - Auth / Token service
+#   9090 - Prometheus metrics
+EXPOSE 5000 5001 9090
+
+# No HEALTHCHECK directive -- distroless has no shell or curl to execute it.
+# Use Kubernetes httpGet probes on /health instead (see examples/kubernetes/).
+
+# No ENTRYPOINT with tini -- distroless runs the binary as PID 1 directly.
+# Kubernetes handles signal forwarding to PID 1, so graceful shutdown works
+# as expected.
+
+# Default: run the registry service.
+# Override with ["nebula-auth"] to run the auth service:
+#   docker run bwalia/nebulacr:distroless nebula-auth
+ENTRYPOINT ["nebula-registry"]

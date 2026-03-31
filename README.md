@@ -1,5 +1,11 @@
 # NebulaCR
 
+[![Build](https://github.com/bwalia/nebulacr/actions/workflows/ci.yml/badge.svg)](https://github.com/bwalia/nebulacr/actions/workflows/ci.yml)
+[![Docker Hub](https://img.shields.io/docker/v/bwalia/nebulacr?label=Docker%20Hub&sort=semver)](https://hub.docker.com/r/bwalia/nebulacr)
+[![Docker Pulls](https://img.shields.io/docker/pulls/bwalia/nebulacr)](https://hub.docker.com/r/bwalia/nebulacr)
+[![License](https://img.shields.io/github/license/bwalia/nebulacr)](LICENSE)
+[![GHCR](https://img.shields.io/badge/GHCR-ghcr.io%2Fbwalia%2Fnebulacr-blue)](https://github.com/bwalia/nebulacr/pkgs/container/nebulacr)
+
 A cloud-native Docker/OCI container registry built in Rust with multi-tenancy, zero-trust authentication, and pull-through caching.
 
 ## Features
@@ -8,11 +14,12 @@ A cloud-native Docker/OCI container registry built in Rust with multi-tenancy, z
 - **Pull-through cache** for Docker Hub, GHCR, GCR, Quay.io, and registry.k8s.io
 - **Multi-tenancy** with Tenant, Project, AccessPolicy, and TokenPolicy CRDs
 - **Zero-trust auth** via OIDC (Google, GitHub Actions, GitLab CI, Azure AD)
-- **Multiple storage backends** — filesystem, S3, GCS, Azure Blob
-- **High availability** — stateless services, HPA, PDB, circuit breakers
+- **Multiple storage backends** -- filesystem, S3, GCS, Azure Blob
+- **High availability** -- stateless services, HPA, PDB, circuit breakers
 - **Multi-region replication** with async/semi-sync modes
-- **Observability** — Prometheus metrics, structured JSON logging, OpenTelemetry tracing
+- **Observability** -- Prometheus metrics, structured JSON logging, OpenTelemetry tracing
 - **Rate limiting** per IP and per tenant
+- **Multi-architecture** -- linux/amd64 and linux/arm64
 - **Webhook notifications** for registry events
 
 ## Architecture
@@ -34,85 +41,208 @@ A cloud-native Docker/OCI container registry built in Rust with multi-tenancy, z
          S3/GCS  Azure  Filesystem   (Google, GitHub, etc.)
 ```
 
-**Two core services:**
-
 | Service | Port | Metrics | Purpose |
 |---------|------|---------|---------|
 | `nebula-registry` | 5000 | 9090 | OCI Distribution API, blob/manifest storage, pull-through cache |
 | `nebula-auth` | 5001 | 9091 | OIDC validation, JWT issuance, RBAC policy resolution |
 
-## Quick Start
+## Quick Start (Local)
 
-### Pull-Through Cache (Simplest Install)
+Run NebulaCR locally in under 5 minutes.
 
-Deploy NebulaCR as a caching proxy with zero configuration:
-
-```bash
-helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr --namespace nebulacr --create-namespace
-```
-
-That's it. NebulaCR caches images from Docker Hub, GHCR, GCR, Quay.io, and registry.k8s.io out of the box.
-
-Pull images through the cache:
+### Option A: Docker Run (Simplest)
 
 ```bash
-# Docker Hub (default upstream)
-docker pull <nebulacr-host>:5000/library/nginx:latest
-
-# GHCR
-docker pull <nebulacr-host>:5000/ghcr.io/org/repo:tag
-
-# Quay.io
-docker pull <nebulacr-host>:5000/quay.io/prometheus/prometheus:latest
+docker run -d --name nebulacr -p 5000:5000 bwalia/nebulacr:latest
 ```
 
-### Configure containerd to Use NebulaCR as a Mirror
-
-Add to `/etc/containerd/config.toml` on each node (or use a DaemonSet):
-
-```toml
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
-  endpoint = ["http://nebulacr-registry.nebulacr.svc.cluster.local:5000"]
-```
-
-### Local Development with Docker Compose
+### Option B: Docker Compose (Full Stack)
 
 ```bash
+git clone https://github.com/bwalia/nebulacr.git
+cd nebulacr
 docker compose up -d
 ```
 
 This starts the registry on `localhost:5000`, auth on `localhost:5001`, and auto-generates JWT signing keys.
 
+### Test It
+
 ```bash
-# Push an image
-docker tag myapp:latest localhost:5000/myorg/myapp:latest
-docker push localhost:5000/myorg/myapp:latest
+# Login (default dev credentials)
+docker login localhost:5000 -u admin -p admin
+
+# Tag and push an image (2-segment path -- standard Docker)
+docker tag nginx:latest localhost:5000/myorg/nginx:latest
+docker push localhost:5000/myorg/nginx:latest
 
 # Pull it back
-docker pull localhost:5000/myorg/myapp:latest
+docker pull localhost:5000/myorg/nginx:latest
 ```
 
-## Installation
+## Quick Start (Kubernetes)
 
-### Helm Chart
-
-The chart is published to both GitHub Pages and GHCR OCI:
+### Helm Install
 
 ```bash
-# Option A: OCI registry (recommended)
+# OCI registry (recommended)
 helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
   --namespace nebulacr --create-namespace
 
-# Option B: Helm repository
+# Or via Helm repository
 helm repo add nebulacr https://bwalia.github.io/nebulacr
 helm repo update
 helm install nebulacr nebulacr/nebulacr \
   --namespace nebulacr --create-namespace
 ```
 
-See [deploy/helm/nebulacr/README.md](deploy/helm/nebulacr/README.md) for the full Helm chart reference.
+### Verify
 
-### Production Install with OIDC and S3
+```bash
+kubectl port-forward -n nebulacr svc/nebulacr-registry 5000:5000 &
+curl http://localhost:5000/health
+# {"status":"healthy"}
+```
+
+See [examples/kubernetes/](examples/kubernetes/) for minimal and HA production manifests.
+
+## Authentication
+
+### Docker CLI Login
+
+```bash
+# Development (bootstrap admin)
+docker login registry.example.com -u admin -p admin
+
+# Request a short-lived token via API
+TOKEN=$(curl -s -u admin:admin \
+  "https://registry.example.com/auth/token?service=nebulacr-registry&scope=repository:myorg/myapp:push,pull" \
+  | jq -r '.token')
+
+# Use the token
+docker login registry.example.com -u token -p "$TOKEN"
+```
+
+### OIDC (Production)
+
+```bash
+helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
+  --set oidc.enabled=true \
+  --set oidc.issuerUrl="https://accounts.google.com" \
+  --set oidc.clientId="YOUR_CLIENT_ID" \
+  --set oidc.clientSecret="YOUR_CLIENT_SECRET"
+```
+
+See [docs/authentication.md](docs/authentication.md) for full details including CI/CD integration.
+
+## Multi-Tenant Example
+
+NebulaCR supports both standard Docker 2-segment paths and multi-tenant 3-segment paths:
+
+```bash
+# Standard Docker (2-segment -- uses default tenant automatically)
+docker tag nginx registry.example.com/myorg/nginx:latest
+docker push registry.example.com/myorg/nginx:latest
+
+# Multi-tenant (3-segment -- explicit tenant)
+docker tag nginx registry.example.com/tenant-a/project-1/nginx:latest
+docker push registry.example.com/tenant-a/project-1/nginx:latest
+```
+
+Manage tenants via Kubernetes CRDs:
+
+```yaml
+apiVersion: nebulacr.io/v1alpha1
+kind: Tenant
+metadata:
+  name: my-org
+spec:
+  displayName: My Organization
+  adminEmail: admin@my-org.com
+  quotas:
+    maxStorageBytes: 107374182400  # 100 GiB
+    maxRepositories: 500
+    pullRatePerMinute: 1000
+    pushRatePerMinute: 500
+```
+
+See [docs/multi-tenancy.md](docs/multi-tenancy.md) for full details.
+
+## Pull-Through Cache
+
+Deploy NebulaCR as a caching proxy with zero configuration:
+
+```bash
+helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
+  --namespace nebulacr --create-namespace
+```
+
+Pull images through the cache:
+
+```bash
+docker pull <nebulacr-host>:5000/library/nginx:latest       # Docker Hub
+docker pull <nebulacr-host>:5000/ghcr.io/org/repo:tag       # GHCR
+docker pull <nebulacr-host>:5000/quay.io/prometheus/prometheus:latest  # Quay
+```
+
+### Configure containerd Mirror
+
+Add to `/etc/containerd/config.toml`:
+
+```toml
+[plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+  endpoint = ["http://nebulacr-registry.nebulacr.svc.cluster.local:5000"]
+```
+
+## Mirror / HA Example
+
+NebulaCR supports multi-region replication with automatic failover:
+
+```bash
+helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
+  --set registry.replicas=3 \
+  --set auth.replicas=2 \
+  --set multiRegion.enabled=true \
+  --set multiRegion.localRegion=us-east-1 \
+  --set multiRegion.isPrimary=true
+```
+
+When a region goes down, reads are automatically served from healthy replicas. See [docs/architecture.md](docs/architecture.md) for the replication model.
+
+## Observability
+
+### Prometheus Metrics
+
+```bash
+curl http://localhost:5000/metrics
+```
+
+Key metrics:
+- `nebulacr_http_requests_total` -- request count by method, path, status
+- `nebulacr_http_request_duration_seconds` -- request latency histogram
+- `nebulacr_storage_operations_total` -- storage operations by backend
+- `nebulacr_auth_tokens_issued_total` -- token issuance count
+
+Enable automatic scraping with Prometheus Operator:
+
+```bash
+helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
+  --set serviceMonitor.enabled=true
+```
+
+### OpenTelemetry Tracing
+
+```bash
+helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
+  --set observability.otlpEndpoint=http://otel-collector:4317 \
+  --set observability.tracing.enabled=true
+```
+
+See [docs/observability.md](docs/observability.md) for Grafana dashboards and scrape configs.
+
+## Production Install
+
+### With OIDC and S3 Storage
 
 ```bash
 helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
@@ -133,10 +263,11 @@ helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
 
 ```bash
 helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
-  --namespace nebulacr --create-namespace \
   --set pullThroughCache.upstreams.docker\\.io.username=myuser \
   --set pullThroughCache.upstreams.docker\\.io.password=mytoken
 ```
+
+See [docs/deployment.md](docs/deployment.md) for all deployment options.
 
 ## Configuration Reference
 
@@ -153,31 +284,12 @@ See [`config/nebulacr.example.toml`](config/nebulacr.example.toml) for all avail
 
 ### Kubernetes CRDs
 
-NebulaCR installs four Custom Resource Definitions for managing multi-tenant access:
-
 | CRD | Scope | Purpose |
 |-----|-------|---------|
 | `Tenant` | Cluster | Top-level org with quotas, IP restrictions, OIDC mapping |
 | `Project` | Namespace | Groups repositories; sets visibility, retention, scanning policies |
 | `AccessPolicy` | Namespace | Fine-grained RBAC with subjects, resources, actions, conditions |
 | `TokenPolicy` | Namespace | Token lifetime, rotation, revocation, robot accounts |
-
-Example Tenant:
-
-```yaml
-apiVersion: nebulacr.io/v1alpha1
-kind: Tenant
-metadata:
-  name: my-org
-spec:
-  displayName: My Organization
-  adminEmail: admin@my-org.com
-  quotas:
-    maxStorageBytes: 107374182400  # 100 GiB
-    maxRepositories: 500
-    pullRatePerMinute: 1000
-    pushRatePerMinute: 500
-```
 
 ## CI/CD Integration
 
@@ -207,30 +319,26 @@ Ready-to-use examples for all major CI/CD platforms:
     docker push registry.example.com/my-org/my-project/app:${{ github.sha }}
 ```
 
-## Observability
+## Docker Images
 
-### Prometheus Metrics
-
-Enable the ServiceMonitor for automatic scraping:
+NebulaCR is published to both Docker Hub and GHCR:
 
 ```bash
-helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
-  --set serviceMonitor.enabled=true
+# Docker Hub
+docker pull bwalia/nebulacr:latest
+
+# GitHub Container Registry
+docker pull ghcr.io/bwalia/nebulacr:latest
 ```
 
-Key metrics exposed on `/metrics`:
-- `nebulacr_http_requests_total` — request count by method, path, status
-- `nebulacr_http_request_duration_seconds` — request latency histogram
-- `nebulacr_storage_operations_total` — storage operations by backend and type
-- `nebulacr_auth_tokens_issued_total` — token issuance count
+| Tag | Description |
+|-----|-------------|
+| `latest` | Latest stable release |
+| `vX.Y.Z` | Specific version |
+| `X.Y` | Major.minor version |
+| `edge` | Latest dev build from main |
 
-### OpenTelemetry Tracing
-
-```bash
-helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
-  --set observability.otlpEndpoint=http://otel-collector:4317 \
-  --set observability.tracing.enabled=true
-```
+Multi-architecture: `linux/amd64` and `linux/arm64`.
 
 ## Project Structure
 
@@ -246,9 +354,9 @@ nebulacr/
 │   └── nebula-replication/   # Multi-region replication
 ├── deploy/helm/nebulacr/     # Helm chart
 ├── config/                   # Example configuration
-├── docs/                     # Architecture, threat model, diagrams
-├── examples/                 # CI/CD integration examples
-└── contrib/opsapi/           # OpsAPI metadata integration
+├── docs/                     # Documentation
+├── examples/                 # CI/CD and Kubernetes examples
+└── docker-compose.yml        # Local development stack
 ```
 
 ## Building from Source
@@ -262,25 +370,33 @@ cargo test --workspace
 
 # Build Docker image
 docker build -t nebulacr:latest .
+
+# Build optimized (distroless) image
+docker build -f Dockerfile.scratch -t nebulacr:scratch .
 ```
-
-## Security
-
-- See [`docs/threat-model.md`](docs/threat-model.md) for the full threat model
-- See [`docs/security-audit-checklist.md`](docs/security-audit-checklist.md) for the security audit checklist
-- Containers run as non-root (UID 65534) with read-only root filesystems
-- All capabilities dropped, seccomp profile enforced
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [System Architecture Diagrams](docs/system-architecture-diagrams.md)
+- [Authentication](docs/authentication.md)
+- [Multi-Tenancy](docs/multi-tenancy.md)
+- [Deployment Guide](docs/deployment.md)
+- [Observability](docs/observability.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Threat Model](docs/threat-model.md)
 - [Security Audit Checklist](docs/security-audit-checklist.md)
+- [System Architecture Diagrams](docs/system-architecture-diagrams.md)
 - [Helm Chart Reference](deploy/helm/nebulacr/README.md)
 - [Configuration Reference](config/nebulacr.example.toml)
-- [OpsAPI Integration](contrib/opsapi/README.md)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and pull request guidelines.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## License
 
-Apache-2.0
+Apache-2.0 -- see [LICENSE](LICENSE) for details.

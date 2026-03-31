@@ -1,0 +1,400 @@
+# ============================================================================
+# NebulaCR -- Minimal Single-Node Kubernetes Deployment
+# ============================================================================
+#
+# This manifest deploys NebulaCR (registry + auth) on a single node with
+# filesystem storage. It is intended for development, testing, and evaluation
+# -- NOT for production use. For production, see ha-production.yaml or the
+# Helm chart in deploy/helm/nebulacr/.
+#
+# Prerequisites:
+#   - A running Kubernetes cluster (minikube, kind, k3s, etc.)
+#   - kubectl configured to talk to the cluster
+#
+# Quick start:
+#
+#   # 1. Generate JWT signing keys (ES256 / ECDSA P-256)
+#   openssl ecparam -genkey -name prime256v1 -noout -out signing.pem
+#   openssl ec -in signing.pem -pubout -out verification.pem
+#
+#   # 2. Create the namespace and store the keys as a Secret
+#   kubectl create namespace nebulacr
+#   kubectl -n nebulacr create secret generic nebulacr-jwt-keys \
+#     --from-file=signing.pem=signing.pem \
+#     --from-file=verification.pem=verification.pem
+#
+#   # 3. Apply this manifest
+#   kubectl apply -f minimal.yaml
+#
+#   # 4. Wait for pods
+#   kubectl -n nebulacr rollout status deployment/nebulacr-registry
+#   kubectl -n nebulacr rollout status deployment/nebulacr-auth
+#
+#   # 5. Port-forward and test
+#   kubectl -n nebulacr port-forward svc/nebulacr-registry 5000:5000 &
+#   curl http://localhost:5000/v2/
+#
+#   # Push an image (assuming anonymous push is allowed, or configure auth):
+#   docker tag alpine:latest localhost:5000/library/alpine:latest
+#   docker push localhost:5000/library/alpine:latest
+#
+#   # Port-forward the auth service
+#   kubectl -n nebulacr port-forward svc/nebulacr-auth 5001:5001 &
+#   curl http://localhost:5001/health
+#
+# ============================================================================
+
+---
+# ---------- Namespace ----------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/part-of: nebulacr
+
+---
+# ---------- ConfigMap ----------
+# Minimal configuration for both the registry and auth services.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nebulacr-config
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+data:
+  registry.yaml: |
+    server:
+      listen_addr: "0.0.0.0:5000"
+      metrics_addr: "0.0.0.0:9090"
+
+    auth:
+      service_url: "http://nebulacr-auth:5001"
+      jwt:
+        access_token_ttl: 3600
+        refresh_token_ttl: 86400
+        signing_key_path: "/etc/nebulacr/keys/signing.pem"
+        verification_key_path: "/etc/nebulacr/keys/verification.pem"
+
+    storage:
+      backend: "filesystem"
+      filesystem:
+        root_directory: "/var/lib/nebulacr/data"
+
+    observability:
+      log_level: "info"
+      log_format: "json"
+
+  auth.yaml: |
+    server:
+      listen_addr: "0.0.0.0:5001"
+      metrics_addr: "0.0.0.0:9091"
+
+    jwt:
+      access_token_ttl: 3600
+      refresh_token_ttl: 86400
+      signing_key_path: "/etc/nebulacr/keys/signing.pem"
+      verification_key_path: "/etc/nebulacr/keys/verification.pem"
+
+    observability:
+      log_level: "info"
+      log_format: "json"
+
+---
+# ---------- Secret (placeholder) ----------
+# IMPORTANT: Do NOT commit real keys to version control.
+#
+# Generate keys and create this secret manually BEFORE applying the rest:
+#
+#   openssl ecparam -genkey -name prime256v1 -noout -out signing.pem
+#   openssl ec -in signing.pem -pubout -out verification.pem
+#   kubectl -n nebulacr create secret generic nebulacr-jwt-keys \
+#     --from-file=signing.pem=signing.pem \
+#     --from-file=verification.pem=verification.pem
+#
+# The secret below is an empty placeholder so that the deployment YAML
+# references are valid. Replace or delete it once you create the real secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nebulacr-jwt-keys
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+type: Opaque
+data: {}
+  # signing.pem: <base64-encoded-private-key>
+  # verification.pem: <base64-encoded-public-key>
+
+---
+# ---------- PersistentVolumeClaim ----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nebulacr-data
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# ---------- Registry Deployment ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  replicas: 1
+  # Recreate strategy because the PVC is ReadWriteOnce (single-node).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nebulacr
+        app.kubernetes.io/component: registry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: registry
+          image: bwalia/nebulacr:latest
+          imagePullPolicy: Always
+          args:
+            - nebula-registry
+            - serve
+            - --config=/etc/nebulacr/config/registry.yaml
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nebulacr/config
+              readOnly: true
+            - name: signing-keys
+              mountPath: /etc/nebulacr/keys
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/nebulacr/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: nebulacr-config
+        - name: signing-keys
+          secret:
+            secretName: nebulacr-jwt-keys
+            defaultMode: 0440
+        - name: data
+          persistentVolumeClaim:
+            claimName: nebulacr-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+
+---
+# ---------- Auth Deployment ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nebulacr
+      app.kubernetes.io/component: auth
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nebulacr
+        app.kubernetes.io/component: auth
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: auth
+          image: bwalia/nebulacr:latest
+          imagePullPolicy: Always
+          args:
+            - nebula-auth
+            - serve
+            - --config=/etc/nebulacr/config/auth.yaml
+          ports:
+            - name: http
+              containerPort: 5001
+              protocol: TCP
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nebulacr/config
+              readOnly: true
+            - name: signing-keys
+              mountPath: /etc/nebulacr/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: nebulacr-config
+        - name: signing-keys
+          secret:
+            secretName: nebulacr-jwt-keys
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+
+---
+# ---------- Registry Service ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nebulacr-registry
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+
+---
+# ---------- Auth Service ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nebulacr-auth
+  namespace: nebulacr
+  labels:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nebulacr
+    app.kubernetes.io/component: auth
+  ports:
+    - name: http
+      port: 5001
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9091
+      targetPort: metrics
+      protocol: TCP
