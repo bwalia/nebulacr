@@ -114,13 +114,24 @@ where
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or(RegistryError::Unauthorized)?;
+            .ok_or_else(|| {
+                debug!("Request missing Authorization header");
+                RegistryError::Unauthorized
+            })?;
 
         let token = auth_header
             .strip_prefix("Bearer ")
-            .ok_or(RegistryError::Unauthorized)?;
+            .ok_or_else(|| {
+                debug!("Authorization header is not Bearer token");
+                RegistryError::Unauthorized
+            })?;
 
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::RS256);
+        let algorithm = if app_state.config.auth.signing_algorithm == "EdDSA" {
+            jsonwebtoken::Algorithm::EdDSA
+        } else {
+            jsonwebtoken::Algorithm::RS256
+        };
+        let mut validation = Validation::new(algorithm);
         validation.set_audience(&[&app_state.config.auth.audience]);
         validation.set_issuer(&[&app_state.config.auth.issuer]);
         validation.validate_exp = true;
@@ -130,11 +141,20 @@ where
             &app_state.decoding_key,
             &validation,
         )
-        .map_err(|e| match e.kind() {
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => RegistryError::TokenExpired,
-            _ => RegistryError::TokenInvalid {
-                reason: e.to_string(),
-            },
+        .map_err(|e| {
+            let uri = parts.uri.to_string();
+            match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                    debug!(uri = %uri, "Token expired");
+                    RegistryError::TokenExpired
+                }
+                _ => {
+                    warn!(uri = %uri, error = %e, "JWT validation failed");
+                    RegistryError::TokenInvalid {
+                        reason: e.to_string(),
+                    }
+                }
+            }
         })?;
 
         Ok(AuthenticatedClaims(token_data.claims))
@@ -2021,23 +2041,36 @@ async fn main() -> anyhow::Result<()> {
 
     info!(backend = %storage_backend, root = %storage_root, "Storage backend initialized");
 
-    // Load JWT verification key
-    let verification_key_pem =
-        std::fs::read(&config.auth.verification_key_path).unwrap_or_else(|e| {
-            warn!(
-                path = %config.auth.verification_key_path,
-                error = %e,
-                "Failed to load verification key, using empty key (auth will fail)"
-            );
-            Vec::new()
-        });
+    // Load JWT verification key — fail hard if key is missing or invalid.
+    // A silent fallback to a dummy key causes all token validation to fail
+    // after pod restart, making pushes return 401 with no diagnostic info.
+    let verification_key_path = &config.auth.verification_key_path;
+    let verification_key_pem = std::fs::read(verification_key_path).unwrap_or_else(|e| {
+        error!(
+            path = %verification_key_path,
+            error = %e,
+            "FATAL: Cannot load JWT verification key — all authenticated requests will fail"
+        );
+        panic!("Cannot start registry without JWT verification key: {e}");
+    });
+
+    info!(
+        path = %verification_key_path,
+        size = verification_key_pem.len(),
+        algorithm = %config.auth.signing_algorithm,
+        "JWT verification key loaded"
+    );
 
     let decoding_key = if config.auth.signing_algorithm == "EdDSA" {
-        DecodingKey::from_ed_pem(&verification_key_pem)
-            .unwrap_or_else(|_| DecodingKey::from_secret(b""))
+        DecodingKey::from_ed_pem(&verification_key_pem).unwrap_or_else(|e| {
+            error!(error = %e, "FATAL: Invalid EdDSA verification key PEM");
+            panic!("Invalid EdDSA verification key: {e}");
+        })
     } else {
-        DecodingKey::from_rsa_pem(&verification_key_pem)
-            .unwrap_or_else(|_| DecodingKey::from_secret(b""))
+        DecodingKey::from_rsa_pem(&verification_key_pem).unwrap_or_else(|e| {
+            error!(error = %e, "FATAL: Invalid RSA verification key PEM");
+            panic!("Invalid RSA verification key: {e}");
+        })
     };
 
     // Rate limiter: default tenant-keyed limiter
