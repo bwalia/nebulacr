@@ -116,5 +116,5 @@ storage:
       accessMode: ReadWriteOnce
       enabled: true
       size: 50Gi
-      storageClass: longhorn
+      storageClass: local-path
     rootDirectory: /var/lib/nebulacr/data
