@@ -222,6 +222,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nebulacr.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - {{ .Values.storage.filesystem.persistence.accessMode }}
