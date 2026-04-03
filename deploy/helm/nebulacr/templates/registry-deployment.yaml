@@ -85,10 +85,8 @@ spec:
           env:
             - name: NEBULACR_LOG_LEVEL
               value: {{ .Values.observability.logLevel | quote }}
-            {{- if .Values.ingress.enabled }}
             - name: NEBULACR_AUTH_REALM
-              value: "https://{{ .Values.ingress.host }}/auth/token"
-            {{- end }}
+              value: "/auth/token"
             {{- if and .Values.oidc.enabled .Values.oidc.clientSecret }}
             - name: NEBULACR_OIDC_CLIENT_SECRET
               valueFrom:
