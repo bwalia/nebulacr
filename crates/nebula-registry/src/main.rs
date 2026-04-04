@@ -208,9 +208,35 @@ async fn request_id_middleware(mut request: Request, next: Next) -> Response {
         request.headers_mut().insert("x-request-id", val);
     }
 
+    // Capture the Host header and scheme for dynamic Www-Authenticate realm
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:5000")
+        .to_string();
+    let scheme = request
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http")
+        .to_string();
+
     let mut response = next.run(request).await;
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", val);
+    }
+
+    // Override Www-Authenticate realm to use the request's own host/scheme
+    // so Docker follows the auth challenge back to the same entry point.
+    if response.status() == StatusCode::UNAUTHORIZED {
+        let service = std::env::var("NEBULACR_AUTH_SERVICE")
+            .unwrap_or_else(|_| "nebulacr-registry".to_string());
+        let realm = format!("{scheme}://{host}/auth/token");
+        let header_val = format!("Bearer realm=\"{realm}\",service=\"{service}\"");
+        if let Ok(val) = HeaderValue::from_str(&header_val) {
+            response.headers_mut().insert("www-authenticate", val);
+        }
     }
     response
 }
