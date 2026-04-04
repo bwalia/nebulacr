@@ -40,6 +40,16 @@ spec:
         - port: {{ .Values.auth.metricsPort }}
           protocol: TCP
     {{- end }}
+    # Allow from additional namespaces (e.g. CI runners)
+    {{- range .Values.networkPolicy.extraAllowedNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+      ports:
+        - port: {{ $.Values.auth.port }}
+          protocol: TCP
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -71,6 +81,16 @@ spec:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
       ports:
         - port: {{ .Values.registry.metricsPort }}
+          protocol: TCP
+    {{- end }}
+    # Allow from additional namespaces (e.g. CI runners)
+    {{- range .Values.networkPolicy.extraAllowedNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+      ports:
+        - port: {{ $.Values.registry.port }}
           protocol: TCP
     {{- end }}
 {{- end }}

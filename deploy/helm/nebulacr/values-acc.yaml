@@ -58,6 +58,9 @@ networkPolicy:
   enabled: true
   ingressNamespace: wslproxy-system
   monitoringNamespace: monitoring
+  extraAllowedNamespaces:
+    - github-runners
+    - acc
 observability:
   logFormat: json
   logLevel: info

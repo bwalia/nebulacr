@@ -399,3 +399,5 @@ networkPolicy:
   ingressNamespace: "wslproxy-system"
   # Namespace for Prometheus metrics scraping (leave empty to disable)
   monitoringNamespace: "monitoring"
+  # Additional namespaces allowed to access registry and auth (e.g. CI runners)
+  extraAllowedNamespaces: []
