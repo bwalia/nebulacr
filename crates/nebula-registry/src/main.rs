@@ -227,13 +227,14 @@ async fn request_id_middleware(mut request: Request, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", val);
     }
 
-    // Override Www-Authenticate realm to use the request's own host/scheme
-    // so Docker follows the auth challenge back to the same entry point.
+    // Override Www-Authenticate realm to use the request's own host/scheme.
+    // The registry proxies /auth/token to the auth service, so Docker always
+    // follows the realm back to the same host it connected to.
     if response.status() == StatusCode::UNAUTHORIZED {
-        let service = std::env::var("NEBULACR_AUTH_SERVICE")
+        let service_name = std::env::var("NEBULACR_AUTH_SERVICE")
             .unwrap_or_else(|_| "nebulacr-registry".to_string());
         let realm = format!("{scheme}://{host}/auth/token");
-        let header_val = format!("Bearer realm=\"{realm}\",service=\"{service}\"");
+        let header_val = format!("Bearer realm=\"{realm}\",service=\"{service_name}\"");
         if let Ok(val) = HeaderValue::from_str(&header_val) {
             response.headers_mut().insert("www-authenticate", val);
         }
@@ -351,6 +352,60 @@ async fn v2_check() -> impl IntoResponse {
         [("Docker-Distribution-API-Version", "registry/2.0")],
         "{}",
     )
+}
+
+/// GET/POST /auth/token — Proxy to the auth service.
+/// When the registry is accessed directly (not via ingress), Docker follows the
+/// Www-Authenticate realm to the registry's own URL. This handler proxies the
+/// token request to the auth service so Docker can obtain tokens without needing
+/// to know the auth service's internal address.
+async fn proxy_auth_token(
+    State(state): State<AppState>,
+    req: Request,
+) -> Result<Response, RegistryError> {
+    let auth_url = std::env::var("NEBULACR_AUTH_SERVICE_URL")
+        .unwrap_or_else(|_| "http://nebulacr-auth:5001".to_string());
+    let uri = req.uri();
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("{auth_url}/auth/token{query}");
+
+    let client = reqwest::Client::new();
+    let mut proxy_req = client.request(req.method().clone(), &target);
+
+    // Forward auth headers (Basic auth from Docker)
+    if let Some(auth) = req.headers().get(header::AUTHORIZATION) {
+        proxy_req = proxy_req.header("Authorization", auth.to_str().unwrap_or(""));
+    }
+    if let Some(ct) = req.headers().get(header::CONTENT_TYPE) {
+        proxy_req = proxy_req.header("Content-Type", ct.to_str().unwrap_or(""));
+    }
+
+    // Forward body for POST requests
+    let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 64)
+        .await
+        .unwrap_or_default();
+    if !body_bytes.is_empty() {
+        proxy_req = proxy_req.body(body_bytes.to_vec());
+    }
+
+    let resp = proxy_req.send().await.map_err(|e| {
+        error!(target = %target, error = %e, "Failed to proxy auth token request");
+        RegistryError::Internal(format!("auth proxy error: {e}"))
+    })?;
+
+    let status = StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await.unwrap_or_default();
+
+    let mut response = (status, body).into_response();
+    // Copy relevant headers from auth response
+    for (name, value) in headers.iter() {
+        if name == "content-type" || name == "cache-control" {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    Ok(response)
 }
 
 /// GET /health - Health check
@@ -2257,7 +2312,8 @@ async fn main() -> anyhow::Result<()> {
     let public_routes = Router::new()
         .route("/v2/", get(v2_check))
         .route("/health", get(health_check))
-        .route("/metrics", get(metrics_handler));
+        .route("/metrics", get(metrics_handler))
+        .route("/auth/token", get(proxy_auth_token).post(proxy_auth_token));
 
     // Dashboard and API routes (no auth - internal use)
     let dashboard_routes = Router::new()
