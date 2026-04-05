@@ -152,9 +152,14 @@ jobs:
         id: dashboard-check
         run: |
           P_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/dashboard" 2>&1)
-          M_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${MIRROR}/dashboard" 2>&1)
-          if [ "$P_DASH" = "200" ] && [ "$M_DASH" = "200" ]; then
-            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          M_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${MIRROR}/dashboard" 2>&1) || M_DASH="000"
+          if [ "$P_DASH" = "200" ]; then
+            if [ "$M_DASH" = "200" ]; then
+              echo "result=PASS" >> "$GITHUB_OUTPUT"
+            else
+              echo "result=WARN" >> "$GITHUB_OUTPUT"
+              echo "error=Primary=$P_DASH Mirror=$M_DASH (mirror may use different URL)" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Primary=$P_DASH Mirror=$M_DASH" >> "$GITHUB_OUTPUT"

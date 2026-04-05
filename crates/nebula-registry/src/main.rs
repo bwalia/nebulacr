@@ -119,12 +119,10 @@ where
                 RegistryError::Unauthorized
             })?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| {
-                debug!("Authorization header is not Bearer token");
-                RegistryError::Unauthorized
-            })?;
+        let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            debug!("Authorization header is not Bearer token");
+            RegistryError::Unauthorized
+        })?;
 
         let algorithm = if app_state.config.auth.signing_algorithm == "EdDSA" {
             jsonwebtoken::Algorithm::EdDSA
@@ -136,26 +134,22 @@ where
         validation.set_issuer(&[&app_state.config.auth.issuer]);
         validation.validate_exp = true;
 
-        let token_data: TokenData<TokenClaims> = jsonwebtoken::decode(
-            token,
-            &app_state.decoding_key,
-            &validation,
-        )
-        .map_err(|e| {
-            let uri = parts.uri.to_string();
-            match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-                    debug!(uri = %uri, "Token expired");
-                    RegistryError::TokenExpired
-                }
-                _ => {
-                    warn!(uri = %uri, error = %e, "JWT validation failed");
-                    RegistryError::TokenInvalid {
-                        reason: e.to_string(),
+        let token_data: TokenData<TokenClaims> =
+            jsonwebtoken::decode(token, &app_state.decoding_key, &validation).map_err(|e| {
+                let uri = parts.uri.to_string();
+                match e.kind() {
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                        debug!(uri = %uri, "Token expired");
+                        RegistryError::TokenExpired
+                    }
+                    _ => {
+                        warn!(uri = %uri, error = %e, "JWT validation failed");
+                        RegistryError::TokenInvalid {
+                            reason: e.to_string(),
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
 
         Ok(AuthenticatedClaims(token_data.claims))
     }
@@ -360,7 +354,7 @@ async fn v2_check() -> impl IntoResponse {
 /// token request to the auth service so Docker can obtain tokens without needing
 /// to know the auth service's internal address.
 async fn proxy_auth_token(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     req: Request,
 ) -> Result<Response, RegistryError> {
     let auth_url = std::env::var("NEBULACR_AUTH_SERVICE_URL")
@@ -393,8 +387,8 @@ async fn proxy_auth_token(
         RegistryError::Internal(format!("auth proxy error: {e}"))
     })?;
 
-    let status = StatusCode::from_u16(resp.status().as_u16())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status =
+        StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let headers = resp.headers().clone();
     let body = resp.bytes().await.unwrap_or_default();
 
@@ -1499,21 +1493,25 @@ async fn internal_replicate_manifest(
     counter!("registry_manifest_push_total",
         "tenant" => tenant.clone(),
         "project" => project.clone()
-    ).increment(1);
+    )
+    .increment(1);
     counter!("registry_push_bytes_total").increment(body.len() as u64);
-    state.audit_log.record(audit::RegistryAuditEvent {
-        event_type: "manifest.replicated".into(),
-        subject: format!("replication:{source_region}"),
-        tenant: tenant.clone(),
-        project: project.clone(),
-        repository: repo.clone(),
-        reference: reference.clone(),
-        digest: digest.clone(),
-        size_bytes: body.len() as u64,
-        status_code: 200,
-        duration_ms: 0,
-        timestamp: chrono::Utc::now(),
-    }).await;
+    state
+        .audit_log
+        .record(audit::RegistryAuditEvent {
+            event_type: "manifest.replicated".into(),
+            subject: format!("replication:{source_region}"),
+            tenant: tenant.clone(),
+            project: project.clone(),
+            repository: repo.clone(),
+            reference: reference.clone(),
+            digest: digest.clone(),
+            size_bytes: body.len() as u64,
+            status_code: 200,
+            duration_ms: 0,
+            timestamp: chrono::Utc::now(),
+        })
+        .await;
 
     Ok(StatusCode::OK.into_response())
 }
@@ -1549,7 +1547,8 @@ async fn internal_replicate_blob(
     counter!("registry_blob_upload_bytes_total",
         "tenant" => tenant.clone(),
         "project" => project.clone()
-    ).increment(blob_size);
+    )
+    .increment(blob_size);
     counter!("registry_push_bytes_total").increment(blob_size);
 
     Ok(StatusCode::OK.into_response())
@@ -1710,8 +1709,8 @@ async fn image_status(
     let manifest_size = manifest_data.len();
 
     // 2. Parse manifest to find layers and config
-    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_data)
-        .map_err(|e| RegistryError::ManifestInvalid {
+    let manifest_json: serde_json::Value =
+        serde_json::from_slice(&manifest_data).map_err(|e| RegistryError::ManifestInvalid {
             reason: e.to_string(),
         })?;
 
@@ -1726,12 +1725,7 @@ async fn image_status(
             config.get("digest").and_then(|d| d.as_str()),
             config.get("size").and_then(|s| s.as_u64()),
         ) {
-            let cfg_path = blob_path(
-                &params.tenant,
-                &params.project,
-                &params.name,
-                cfg_digest,
-            );
+            let cfg_path = blob_path(&params.tenant, &params.project, &params.name, cfg_digest);
             let cfg_exists = state.store.head(&StorePath::from(cfg_path)).await.is_ok();
             if !cfg_exists {
                 missing_layers += 1;
@@ -1752,12 +1746,8 @@ async fn image_status(
                 layer.get("digest").and_then(|d| d.as_str()),
                 layer.get("size").and_then(|s| s.as_u64()),
             ) {
-                let layer_store_path = blob_path(
-                    &params.tenant,
-                    &params.project,
-                    &params.name,
-                    layer_digest,
-                );
+                let layer_store_path =
+                    blob_path(&params.tenant, &params.project, &params.name, layer_digest);
                 let layer_exists = state
                     .store
                     .head(&StorePath::from(layer_store_path))
@@ -1783,22 +1773,17 @@ async fn image_status(
                 sub.get("digest").and_then(|d| d.as_str()),
                 sub.get("size").and_then(|s| s.as_u64()),
             ) {
-                let sub_path = manifest_path(
-                    &params.tenant,
-                    &params.project,
-                    &params.name,
-                    sub_digest,
-                );
-                let sub_exists = state
-                    .store
-                    .head(&StorePath::from(sub_path))
-                    .await
-                    .is_ok();
+                let sub_path =
+                    manifest_path(&params.tenant, &params.project, &params.name, sub_digest);
+                let sub_exists = state.store.head(&StorePath::from(sub_path)).await.is_ok();
                 if !sub_exists {
                     missing_layers += 1;
                 }
                 total_size += sub_size;
-                let platform = sub.get("platform").cloned().unwrap_or(serde_json::json!(null));
+                let platform = sub
+                    .get("platform")
+                    .cloned()
+                    .unwrap_or(serde_json::json!(null));
                 layer_statuses.push(serde_json::json!({
                     "digest": sub_digest,
                     "size": sub_size,
@@ -1837,7 +1822,12 @@ async fn head_manifest_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<ManifestRef2>,
 ) -> Result<Response, RegistryError> {
-    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    let params = ManifestRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        reference: p.reference,
+    };
     head_manifest(state, claims, Path(params)).await
 }
 
@@ -1846,7 +1836,12 @@ async fn get_manifest_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<ManifestRef2>,
 ) -> Result<Response, RegistryError> {
-    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    let params = ManifestRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        reference: p.reference,
+    };
     get_manifest(state, claims, Path(params)).await
 }
 
@@ -1856,7 +1851,12 @@ async fn put_manifest_2seg(
     Path(p): Path<ManifestRef2>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
-    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    let params = ManifestRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        reference: p.reference,
+    };
     put_manifest(state, claims, Path(params), body).await
 }
 
@@ -1865,7 +1865,12 @@ async fn delete_manifest_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<ManifestRef2>,
 ) -> Result<Response, RegistryError> {
-    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    let params = ManifestRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        reference: p.reference,
+    };
     delete_manifest(state, claims, Path(params)).await
 }
 
@@ -1874,7 +1879,12 @@ async fn head_blob_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<BlobRef2>,
 ) -> Result<Response, RegistryError> {
-    let params = BlobRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, digest: p.digest };
+    let params = BlobRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        digest: p.digest,
+    };
     head_blob(state, claims, Path(params)).await
 }
 
@@ -1883,7 +1893,12 @@ async fn get_blob_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<BlobRef2>,
 ) -> Result<Response, RegistryError> {
-    let params = BlobRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, digest: p.digest };
+    let params = BlobRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        digest: p.digest,
+    };
     get_blob(state, claims, Path(params)).await
 }
 
@@ -1892,7 +1907,11 @@ async fn initiate_blob_upload_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<RepoPath2>,
 ) -> Result<Response, RegistryError> {
-    let params = RepoPath { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name };
+    let params = RepoPath {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+    };
     initiate_blob_upload(state, claims, Path(params)).await
 }
 
@@ -1902,7 +1921,12 @@ async fn upload_blob_chunk_2seg(
     Path(p): Path<UploadRef2>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
-    let params = UploadRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, uuid: p.uuid };
+    let params = UploadRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        uuid: p.uuid,
+    };
     upload_blob_chunk(state, claims, Path(params), body).await
 }
 
@@ -1913,7 +1937,12 @@ async fn complete_blob_upload_2seg(
     query: Query<DigestQuery>,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
-    let params = UploadRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, uuid: p.uuid };
+    let params = UploadRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        uuid: p.uuid,
+    };
     complete_blob_upload(state, claims, Path(params), query, body).await
 }
 
@@ -1922,7 +1951,12 @@ async fn image_status_2seg(
     claims: AuthenticatedClaims,
     Path(p): Path<ManifestRef2>,
 ) -> Result<axum::Json<serde_json::Value>, RegistryError> {
-    let params = ManifestRef { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name, reference: p.reference };
+    let params = ManifestRef {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+        reference: p.reference,
+    };
     image_status(state, claims, Path(params)).await
 }
 
@@ -1932,7 +1966,11 @@ async fn list_tags_2seg(
     Path(p): Path<RepoPath2>,
     pagination: Query<PaginationQuery>,
 ) -> Result<Response, RegistryError> {
-    let params = RepoPath { tenant: DEFAULT_TENANT.to_string(), project: p.project, name: p.name };
+    let params = RepoPath {
+        tenant: DEFAULT_TENANT.to_string(),
+        project: p.project,
+        name: p.name,
+    };
     list_tags(state, claims, Path(params), pagination).await
 }
 
@@ -1961,18 +1999,19 @@ async fn main() -> anyhow::Result<()> {
             });
         if let Some(path) = config_path {
             match std::fs::read_to_string(&path) {
-                Ok(contents) => {
-                    match serde_yaml::from_str::<RegistryConfig>(&contents) {
-                        Ok(cfg) => {
-                            eprintln!("Config loaded from {path}, multi_region: {}", cfg.multi_region.is_some());
-                            cfg
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: failed to parse config {path}: {e}, using defaults");
-                            RegistryConfig::default()
-                        }
+                Ok(contents) => match serde_yaml::from_str::<RegistryConfig>(&contents) {
+                    Ok(cfg) => {
+                        eprintln!(
+                            "Config loaded from {path}, multi_region: {}",
+                            cfg.multi_region.is_some()
+                        );
+                        cfg
                     }
-                }
+                    Err(e) => {
+                        eprintln!("Warning: failed to parse config {path}: {e}, using defaults");
+                        RegistryConfig::default()
+                    }
+                },
                 Err(e) => {
                     eprintln!("Warning: failed to read config {path}: {e}, using defaults");
                     RegistryConfig::default()
