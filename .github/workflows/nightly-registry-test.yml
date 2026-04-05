@@ -1,9 +1,8 @@
 name: "Nightly Registry Health Test"
 
-# Runs every night at 2am UTC, or manually.
-# Pushes a test image, pulls it back, verifies the round-trip,
-# checks the image status API, and tests the mirror.
-# Reports failures to Slack.
+# Comprehensive nightly test suite for NebulaCR registry.
+# Tests: health, auth, push/pull (3-seg + 2-seg), pull-through cache,
+# large image handling, catalog API, tag listing, metrics, dashboard, and mirror.
 #
 # Required GitHub Secrets:
 #   NEBULACR_USERNAME       - Registry username (e.g. "admin")
@@ -29,16 +28,18 @@ jobs:
   registry-health-test:
     name: Registry Health Test
     runs-on: [self-hosted, test]
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Cleanup stale images on self-hosted runner ─────────────
+      # ── Cleanup ────────────────────────────────────────────────
       - name: Cleanup old nightly images
         run: |
           docker images --filter "reference=*/${IMAGE_NAME}" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | \
+            xargs -r docker rmi 2>/dev/null || true
+          docker images --filter "reference=*/${IMAGE_NAME_2SEG}" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | \
             xargs -r docker rmi 2>/dev/null || true
 
       # ── Debug ───────────────────────────────────────────────────
@@ -128,6 +129,38 @@ jobs:
             echo "error=Primary=$P_OK Mirror=$M_OK" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── Dashboard ──────────────────────────────────────────────────
+      - name: Dashboard check
+        id: dashboard-check
+        run: |
+          P_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${PRIMARY}/dashboard" 2>&1)
+          M_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${MIRROR}/dashboard" 2>&1)
+          if [ "$P_DASH" = "200" ] && [ "$M_DASH" = "200" ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Primary=$P_DASH Mirror=$M_DASH" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Metrics ────────────────────────────────────────────────────
+      - name: Metrics endpoint check
+        id: metrics-check
+        run: |
+          METRICS=$(curl -sf --connect-timeout 10 "https://${PRIMARY}/metrics" 2>&1) || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Metrics endpoint unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          # Check for key metric names
+          HAS_REQUESTS=$(echo "$METRICS" | grep -c 'registry_http_requests_total\|http_requests_total' || true)
+          HAS_BLOBS=$(echo "$METRICS" | grep -c 'blob_upload_bytes\|storage_operations' || true)
+          if [ "$HAS_REQUESTS" -gt 0 ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=WARN" >> "$GITHUB_OUTPUT"
+            echo "error=Metrics returned but missing expected counters" >> "$GITHUB_OUTPUT"
+          fi
+
       # ── HA Status ─────────────────────────────────────────────────
       - name: HA status check
         id: ha-check
@@ -150,14 +183,10 @@ jobs:
             echo "result=SKIP" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Build & Push ──────────────────────────────────────────────
+      # ── Build & Push (3-segment) ──────────────────────────────────
       - name: Build test image
         id: build
         run: |
-          cat > /tmp/Dockerfile <<'DOCKERFILE'
-          FROM scratch
-          COPY Dockerfile /BUILD_INFO
-          DOCKERFILE
           echo "NebulaCR nightly test $(date -u +%Y-%m-%dT%H:%M:%SZ) run=${{ github.run_number }}" > /tmp/BUILD_INFO
           cp /tmp/BUILD_INFO /tmp/Dockerfile.info
           cat > /tmp/Dockerfile <<'DOCKERFILE'
@@ -174,24 +203,21 @@ jobs:
           echo "${{ secrets.NEBULACR_PASSWORD }}" | \
             docker login "https://${PRIMARY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
 
-      - name: Push image to primary
+      - name: Push image to primary (3-segment)
         id: push
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
-          PUSH_OUT=""
           for ATTEMPT in 1 2 3; do
             echo "Push attempt $ATTEMPT/3..."
-            if PUSH_OUT=$(docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1); then
-              echo "$PUSH_OUT"
+            if docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
               echo "result=PASS" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "Attempt $ATTEMPT failed:"
-            echo "$PUSH_OUT"
+            echo "Attempt $ATTEMPT failed"
             [ "$ATTEMPT" -lt 3 ] && sleep 5
           done
           echo "result=FAIL" >> "$GITHUB_OUTPUT"
-          echo "error=docker push failed after 3 attempts: $(echo "$PUSH_OUT" | tail -1)" >> "$GITHUB_OUTPUT"
+          echo "error=docker push failed after 3 attempts" >> "$GITHUB_OUTPUT"
 
       # ── Image Status API ──────────────────────────────────────────
       - name: Check image status on primary
@@ -206,49 +232,43 @@ jobs:
             exit 0
           }
           AVAILABLE=$(echo "$RESPONSE" | jq -r '.available')
-          MISSING=$(echo "$RESPONSE" | jq -r '.missing_layers')
           if [ "$AVAILABLE" = "true" ]; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
-            echo "error=available=false, missing_layers=$MISSING" >> "$GITHUB_OUTPUT"
+            echo "error=available=false" >> "$GITHUB_OUTPUT"
           fi
           echo "$RESPONSE" | jq .
 
-      # ── Pull ───────────────────────────────────────────────────────
+      # ── Pull & Verify ─────────────────────────────────────────────
       - name: Pull image from primary
         id: pull
         if: steps.push.outputs.result == 'PASS'
         run: |
           docker rmi "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
-          if PULL_OUT=$(docker pull "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1); then
-            echo "$PULL_OUT"
+          if docker pull "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
-            echo "$PULL_OUT"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
-            echo "error=docker pull failed: $(echo "$PULL_OUT" | tail -1)" >> "$GITHUB_OUTPUT"
+            echo "error=docker pull failed" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify pulled image
         id: verify
         if: steps.pull.outputs.result == 'PASS'
         run: |
-          if INSPECT=$(docker inspect "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1); then
-            echo "Image inspected successfully"
-            echo "$INSPECT" | jq '.[0].RepoTags'
+          if docker inspect "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" > /dev/null 2>&1; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
-            echo "$INSPECT"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Image inspect failed" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── 2-Segment Push/Pull (standard Docker path) ────────────
+      # ── 2-Segment Push/Pull ────────────────────────────────────────
       - name: Build 2-segment test image
         id: build-2seg
         run: |
-          echo "NebulaCR 2-seg nightly test $(date -u +%Y-%m-%dT%H:%M:%SZ) run=${{ github.run_number }}" > /tmp/BUILD_INFO_2SEG
+          echo "NebulaCR 2-seg test $(date -u +%Y-%m-%dT%H:%M:%SZ) run=${{ github.run_number }}" > /tmp/BUILD_INFO_2SEG
           cat > /tmp/Dockerfile.2seg <<'DOCKERFILE'
           FROM scratch
           COPY BUILD_INFO_2SEG /BUILD_INFO
@@ -256,46 +276,152 @@ jobs:
           docker build -t "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" -f /tmp/Dockerfile.2seg /tmp/
           echo "result=PASS" >> "$GITHUB_OUTPUT"
 
-      - name: Push 2-segment image to primary
+      - name: Push 2-segment image
         id: push-2seg
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
-          PUSH_OUT=""
           for ATTEMPT in 1 2 3; do
-            echo "Push attempt $ATTEMPT/3 (2-segment path)..."
-            if PUSH_OUT=$(docker push "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1); then
-              echo "$PUSH_OUT"
+            echo "Push attempt $ATTEMPT/3 (2-segment)..."
+            if docker push "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
               echo "result=PASS" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "Attempt $ATTEMPT failed:"
-            echo "$PUSH_OUT"
             [ "$ATTEMPT" -lt 3 ] && sleep 5
           done
           echo "result=FAIL" >> "$GITHUB_OUTPUT"
-          echo "error=2-segment docker push failed after 3 attempts: $(echo "$PUSH_OUT" | tail -1)" >> "$GITHUB_OUTPUT"
+          echo "error=2-segment push failed" >> "$GITHUB_OUTPUT"
 
-      - name: Pull 2-segment image from primary
+      - name: Pull 2-segment image
         id: pull-2seg
         if: steps.push-2seg.outputs.result == 'PASS'
         run: |
           docker rmi "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>/dev/null || true
-          if PULL_OUT=$(docker pull "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1); then
-            echo "$PULL_OUT"
+          if docker pull "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
-            echo "$PULL_OUT"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
-            echo "error=2-segment docker pull failed: $(echo "$PULL_OUT" | tail -1)" >> "$GITHUB_OUTPUT"
+            echo "error=2-segment pull failed" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Mirror Check ──────────────────────────────────────────────
-      - name: Check image status on mirror
+      # ── Pull-Through Cache Test ────────────────────────────────────
+      # Pull a real Docker Hub image through NebulaCR's cache.
+      # First pull goes to Docker Hub, second pull should be served from cache.
+      - name: "Pull-through cache: fetch from Docker Hub via NebulaCR"
+        id: cache-pull
+        if: steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          # Use bwalia/wslproxy as a real-world test image (~150MB)
+          CACHE_IMAGE="${PRIMARY}/library/alpine:3.20"
+          echo "Pulling ${CACHE_IMAGE} (should proxy from Docker Hub)..."
+          docker rmi "${CACHE_IMAGE}" 2>/dev/null || true
+
+          START=$(date +%s)
+          if docker pull "${CACHE_IMAGE}" 2>&1; then
+            ELAPSED=$(( $(date +%s) - START ))
+            echo "First pull took ${ELAPSED}s (fetched from Docker Hub)"
+            echo "first_pull_time=${ELAPSED}" >> "$GITHUB_OUTPUT"
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Pull-through cache fetch failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Pull-through cache: verify cached (second pull)"
+        id: cache-verify
+        if: steps.cache-pull.outputs.result == 'PASS'
+        run: |
+          CACHE_IMAGE="${PRIMARY}/library/alpine:3.20"
+          docker rmi "${CACHE_IMAGE}" 2>/dev/null || true
+
+          START=$(date +%s)
+          if docker pull "${CACHE_IMAGE}" 2>&1; then
+            ELAPSED=$(( $(date +%s) - START ))
+            echo "Second pull took ${ELAPSED}s (should be cached)"
+            FIRST=${{ steps.cache-pull.outputs.first_pull_time }}
+            if [ "$ELAPSED" -le "$FIRST" ] || [ "$ELAPSED" -le 10 ]; then
+              echo "result=PASS" >> "$GITHUB_OUTPUT"
+              echo "Cache working: second pull (${ELAPSED}s) <= first pull (${FIRST}s)"
+            else
+              echo "result=WARN" >> "$GITHUB_OUTPUT"
+              echo "error=Second pull (${ELAPSED}s) slower than first (${FIRST}s)" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Cached pull failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Pull-through cache: large image (wslproxy ~150MB)"
+        id: cache-large
+        if: steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          LARGE_IMAGE="${PRIMARY}/bwalia/wslproxy:latest"
+          echo "Pulling ${LARGE_IMAGE} (large image, tests blob size handling)..."
+          docker rmi "${LARGE_IMAGE}" 2>/dev/null || true
+
+          START=$(date +%s)
+          if docker pull "${LARGE_IMAGE}" 2>&1; then
+            ELAPSED=$(( $(date +%s) - START ))
+            SIZE=$(docker inspect "${LARGE_IMAGE}" --format '{{.Size}}' 2>/dev/null || echo 0)
+            SIZE_MB=$(( SIZE / 1024 / 1024 ))
+            echo "Pulled ${SIZE_MB}MB in ${ELAPSED}s"
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Large image pull-through failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Catalog API ────────────────────────────────────────────────
+      - name: Catalog API check
+        id: catalog-check
+        if: steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          CATALOG=$(curl -sf --connect-timeout 10 \
+            -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
+            "https://${PRIMARY}/v2/_catalog" 2>&1) || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Catalog API unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          REPO_COUNT=$(echo "$CATALOG" | jq '.repositories | length')
+          echo "Catalog has $REPO_COUNT repositories"
+          echo "$CATALOG" | jq '.repositories[:10]'
+          if [ "$REPO_COUNT" -gt 0 ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=WARN" >> "$GITHUB_OUTPUT"
+            echo "error=Catalog empty (0 repositories)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Tag Listing ────────────────────────────────────────────────
+      - name: Tag listing check
+        id: tags-check
+        if: steps.push.outputs.result == 'PASS' && steps.auth-primary.outputs.result == 'PASS'
+        run: |
+          TAGS=$(curl -sf --connect-timeout 10 \
+            -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
+            "https://${PRIMARY}/v2/${IMAGE_NAME}/tags/list" 2>&1) || {
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Tags API unreachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          TAG_COUNT=$(echo "$TAGS" | jq '.tags | length')
+          HAS_OUR_TAG=$(echo "$TAGS" | jq --arg t "${IMAGE_TAG}" '.tags | index($t) != null')
+          echo "Tags for ${IMAGE_NAME}: $TAG_COUNT total, our tag present: $HAS_OUR_TAG"
+          echo "$TAGS" | jq .
+          if [ "$HAS_OUR_TAG" = "true" ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=Tag ${IMAGE_TAG} not found in listing" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Mirror Replication ─────────────────────────────────────────
+      - name: Check image on mirror (replication)
         id: status-mirror
         if: steps.push.outputs.result == 'PASS' && steps.auth-mirror.outputs.result == 'PASS'
         run: |
-          # Allow time for replication
-          sleep 10
+          echo "Waiting 15s for replication..."
+          sleep 15
           RESPONSE=$(curl -sf --connect-timeout 10 \
             -H "Authorization: Bearer ${{ steps.auth-mirror.outputs.token }}" \
             "https://${MIRROR}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
@@ -342,26 +468,47 @@ jobs:
             fi
           }
 
-          check "Primary auth"       "${{ steps.auth-primary.outputs.result }}"   "${{ steps.auth-primary.outputs.error }}"
-          check "Mirror auth"        "${{ steps.auth-mirror.outputs.result }}"    "${{ steps.auth-mirror.outputs.error }}"
-          check "Primary health"     "${{ steps.health-primary.outputs.result }}" "${{ steps.health-primary.outputs.error }}"
-          check "Mirror health"      "${{ steps.health-mirror.outputs.result }}"  "${{ steps.health-mirror.outputs.error }}"
-          check "V2 API"             "${{ steps.v2-check.outputs.result }}"       "${{ steps.v2-check.outputs.error }}"
-          check "HA status"          "${{ steps.ha-check.outputs.result }}"       "${{ steps.ha-check.outputs.error }}"
-          check "Push image"         "${{ steps.push.outputs.result }}"           "${{ steps.push.outputs.error }}"
-          check "Image status API"   "${{ steps.status-primary.outputs.result }}" "${{ steps.status-primary.outputs.error }}"
-          check "Pull image"         "${{ steps.pull.outputs.result }}"           "${{ steps.pull.outputs.error }}"
-          check "Run container"      "${{ steps.verify.outputs.result }}"         "${{ steps.verify.outputs.error }}"
-          check "Push 2-seg image"   "${{ steps.push-2seg.outputs.result }}"     "${{ steps.push-2seg.outputs.error }}"
-          check "Pull 2-seg image"   "${{ steps.pull-2seg.outputs.result }}"     "${{ steps.pull-2seg.outputs.error }}"
+          # Core health
+          check "Primary auth"         "${{ steps.auth-primary.outputs.result }}"    "${{ steps.auth-primary.outputs.error }}"
+          check "Mirror auth"          "${{ steps.auth-mirror.outputs.result }}"     "${{ steps.auth-mirror.outputs.error }}"
+          check "Primary health"       "${{ steps.health-primary.outputs.result }}"  "${{ steps.health-primary.outputs.error }}"
+          check "Mirror health"        "${{ steps.health-mirror.outputs.result }}"   "${{ steps.health-mirror.outputs.error }}"
+          check "V2 API"               "${{ steps.v2-check.outputs.result }}"        "${{ steps.v2-check.outputs.error }}"
+          check "Dashboard"            "${{ steps.dashboard-check.outputs.result }}" "${{ steps.dashboard-check.outputs.error }}"
+          check "Metrics"              "${{ steps.metrics-check.outputs.result }}"   "${{ steps.metrics-check.outputs.error }}"
+          check "HA status"            "${{ steps.ha-check.outputs.result }}"        "${{ steps.ha-check.outputs.error }}"
+
+          # Push/pull (3-segment)
+          check "Push (3-seg)"         "${{ steps.push.outputs.result }}"            "${{ steps.push.outputs.error }}"
+          check "Image status API"     "${{ steps.status-primary.outputs.result }}"  "${{ steps.status-primary.outputs.error }}"
+          check "Pull (3-seg)"         "${{ steps.pull.outputs.result }}"            "${{ steps.pull.outputs.error }}"
+          check "Verify image"         "${{ steps.verify.outputs.result }}"          "${{ steps.verify.outputs.error }}"
+
+          # Push/pull (2-segment)
+          check "Push (2-seg)"         "${{ steps.push-2seg.outputs.result }}"       "${{ steps.push-2seg.outputs.error }}"
+          check "Pull (2-seg)"         "${{ steps.pull-2seg.outputs.result }}"       "${{ steps.pull-2seg.outputs.error }}"
+
+          # Pull-through cache
+          check "Cache: alpine"        "${{ steps.cache-pull.outputs.result }}"      "${{ steps.cache-pull.outputs.error }}"
+          check "Cache: verify"        "${{ steps.cache-verify.outputs.result }}"    "${{ steps.cache-verify.outputs.error }}"
+          check "Cache: large image"   "${{ steps.cache-large.outputs.result }}"     "${{ steps.cache-large.outputs.error }}"
+
+          # API features
+          check "Catalog API"          "${{ steps.catalog-check.outputs.result }}"   "${{ steps.catalog-check.outputs.error }}"
+          check "Tag listing"          "${{ steps.tags-check.outputs.result }}"      "${{ steps.tags-check.outputs.error }}"
+
+          # Mirror replication
+          check "Mirror replication"   "${{ steps.status-mirror.outputs.result }}"   "${{ steps.status-mirror.outputs.error }}"
 
           echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
           echo "pass=$PASS" >> "$GITHUB_OUTPUT"
           echo "fail=$FAIL" >> "$GITHUB_OUTPUT"
 
-          # Write report to file (multi-line)
           echo -e "$REPORT" > /tmp/report.txt
           echo "has_failures=$( [ "$FAIL" -gt 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+
+          echo "=== Test Results: ${PASS}/${TESTS} passed, ${FAIL} failed ==="
+          echo -e "$REPORT"
 
       - name: Notify Slack on failure
         if: always() && steps.results.outputs.has_failures == 'true'
@@ -419,7 +566,6 @@ jobs:
       - name: Notify Slack on success (weekly summary)
         if: always() && steps.results.outputs.has_failures == 'false' && github.event.schedule != ''
         run: |
-          # Only send success to Slack on Mondays for a weekly summary
           if [ "$(date +%u)" = "1" ]; then
             curl -sf -X POST -H 'Content-type: application/json' \
               --data "{\"text\":\":white_check_mark: NebulaCR weekly health check passed — ${{ steps.results.outputs.pass }}/${{ steps.results.outputs.tests }} tests OK. Primary: \`${PRIMARY}\` Mirror: \`${MIRROR}\`\"}" \
