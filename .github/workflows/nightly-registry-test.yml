@@ -37,22 +37,20 @@ jobs:
       # ── Detect registry URL ─────────────────────────────────────
       - name: Resolve registry URLs
         run: |
-          # Detect if we can reach the internal ClusterIP directly
-          if curl -sf --max-time 3 http://nebulacr-registry.acc.svc.cluster.local:5000/health > /dev/null 2>&1; then
-            echo "PRIMARY=nebulacr-registry.acc.svc.cluster.local:5000" >> "$GITHUB_ENV"
-            echo "PRIMARY_SCHEME=http" >> "$GITHUB_ENV"
-            echo "Using INTERNAL cluster registry (direct ClusterIP)"
-          elif curl -sf --max-time 3 http://192.168.1.211/health -H "Host: acc-nebulacr.diytaxreturn.co.uk" > /dev/null 2>&1; then
-            echo "PRIMARY=192.168.1.211" >> "$GITHUB_ENV"
-            echo "PRIMARY_SCHEME=http" >> "$GITHUB_ENV"
-            echo "Using INTERNAL ingress LB (192.168.1.211)"
-          else
-            echo "PRIMARY=${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
-            echo "PRIMARY_SCHEME=https" >> "$GITHUB_ENV"
-            echo "Using EXTERNAL registry"
-          fi
-          # Mirror is always external (separate cluster)
+          # Always use external URL for API calls (health, auth, status, catalog)
+          echo "PRIMARY=${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
+          echo "PRIMARY_SCHEME=https" >> "$GITHUB_ENV"
           echo "MIRROR=${MIRROR_EXTERNAL}" >> "$GITHUB_ENV"
+
+          # For Docker push/pull, detect if we can use the internal path
+          # (avoids external proxy issues with large blobs)
+          if curl -sf --max-time 3 http://nebulacr-registry.acc.svc.cluster.local:5000/health > /dev/null 2>&1; then
+            echo "DOCKER_REGISTRY=nebulacr-registry.acc.svc.cluster.local:5000" >> "$GITHUB_ENV"
+            echo "Using INTERNAL ClusterIP for Docker push/pull"
+          else
+            echo "DOCKER_REGISTRY=${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
+            echo "Using EXTERNAL registry for Docker push/pull"
+          fi
 
       # ── Cleanup ────────────────────────────────────────────────
       - name: Cleanup old nightly images
@@ -213,15 +211,15 @@ jobs:
           FROM scratch
           COPY Dockerfile.info /BUILD_INFO
           DOCKERFILE
-          docker build -t "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" /tmp/
+          docker build -t "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" /tmp/
           echo "result=PASS" >> "$GITHUB_OUTPUT"
 
       - name: Docker login
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
-          docker logout "${PRIMARY}" 2>/dev/null || true
+          docker logout "${DOCKER_REGISTRY}" 2>/dev/null || true
           echo "${{ secrets.NEBULACR_PASSWORD }}" | \
-            docker login "${PRIMARY_SCHEME}://${PRIMARY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
+            docker login "${DOCKER_REGISTRY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
 
       - name: Push image to primary (3-segment)
         id: push
@@ -230,7 +228,7 @@ jobs:
           PUSH_OK=false
           for ATTEMPT in 1 2 3; do
             echo "Push attempt $ATTEMPT/3..."
-            if docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
+            if docker push "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
               PUSH_OK=true
               break
             fi
@@ -270,8 +268,8 @@ jobs:
         id: pull
         if: steps.push.outputs.result == 'PASS'
         run: |
-          docker rmi "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
-          if docker pull "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
+          docker rmi "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
+          if docker pull "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
@@ -282,7 +280,7 @@ jobs:
         id: verify
         if: steps.pull.outputs.result == 'PASS'
         run: |
-          if docker inspect "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" > /dev/null 2>&1; then
+          if docker inspect "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" > /dev/null 2>&1; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
@@ -298,7 +296,7 @@ jobs:
           FROM scratch
           COPY BUILD_INFO_2SEG /BUILD_INFO
           DOCKERFILE
-          docker build -t "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" -f /tmp/Dockerfile.2seg /tmp/
+          docker build -t "${DOCKER_REGISTRY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" -f /tmp/Dockerfile.2seg /tmp/
           echo "result=PASS" >> "$GITHUB_OUTPUT"
 
       - name: Push 2-segment image
@@ -308,7 +306,7 @@ jobs:
           PUSH_OK=false
           for ATTEMPT in 1 2 3; do
             echo "Push attempt $ATTEMPT/3 (2-segment)..."
-            if docker push "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
+            if docker push "${DOCKER_REGISTRY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
               PUSH_OK=true
               break
             fi
@@ -325,8 +323,8 @@ jobs:
         id: pull-2seg
         if: steps.push-2seg.outputs.result == 'PASS'
         run: |
-          docker rmi "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>/dev/null || true
-          if docker pull "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
+          docker rmi "${DOCKER_REGISTRY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>/dev/null || true
+          if docker pull "${DOCKER_REGISTRY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
@@ -341,7 +339,7 @@ jobs:
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
           # Use bwalia/wslproxy as a real-world test image (~150MB)
-          CACHE_IMAGE="${PRIMARY}/library/alpine:3.20"
+          CACHE_IMAGE="${DOCKER_REGISTRY}/library/alpine:3.20"
           echo "Pulling ${CACHE_IMAGE} (should proxy from Docker Hub)..."
           docker rmi "${CACHE_IMAGE}" 2>/dev/null || true
 
@@ -360,7 +358,7 @@ jobs:
         id: cache-verify
         if: steps.cache-pull.outputs.result == 'PASS'
         run: |
-          CACHE_IMAGE="${PRIMARY}/library/alpine:3.20"
+          CACHE_IMAGE="${DOCKER_REGISTRY}/library/alpine:3.20"
           docker rmi "${CACHE_IMAGE}" 2>/dev/null || true
 
           START=$(date +%s)
@@ -384,7 +382,7 @@ jobs:
         id: cache-large
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
-          LARGE_IMAGE="${PRIMARY}/bwalia/wslproxy:latest"
+          LARGE_IMAGE="${DOCKER_REGISTRY}/bwalia/wslproxy:latest"
           echo "Pulling ${LARGE_IMAGE} (large image, tests blob size handling)..."
           docker rmi "${LARGE_IMAGE}" 2>/dev/null || true
 
@@ -468,7 +466,7 @@ jobs:
       - name: Docker logout
         if: always()
         run: |
-          docker logout "${PRIMARY}" 2>/dev/null || true
+          docker logout "${DOCKER_REGISTRY}" 2>/dev/null || true
           docker logout "${MIRROR}" 2>/dev/null || true
 
       # ── Report ─────────────────────────────────────────────────────
