@@ -27,7 +27,7 @@ env:
 jobs:
   registry-health-test:
     name: Registry Health Test
-    runs-on: [self-hosted, k3s-internal]
+    runs-on: [self-hosted, test]
     timeout-minutes: 15
 
     steps:
@@ -37,16 +37,18 @@ jobs:
       # ── Detect registry URL ─────────────────────────────────────
       - name: Resolve registry URLs
         run: |
-          # Use internal ClusterIP when running inside k3s (DinD runner)
-          if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+          # Detect if we can reach the internal ClusterIP directly
+          if curl -sf --max-time 3 http://nebulacr-registry.acc.svc.cluster.local:5000/health > /dev/null 2>&1; then
             echo "PRIMARY=nebulacr-registry.acc.svc.cluster.local:5000" >> "$GITHUB_ENV"
             echo "PRIMARY_SCHEME=http" >> "$GITHUB_ENV"
-            echo "AUTH_URL=http://nebulacr-auth.acc.svc.cluster.local:5001" >> "$GITHUB_ENV"
-            echo "Using INTERNAL cluster registry"
+            echo "Using INTERNAL cluster registry (direct ClusterIP)"
+          elif curl -sf --max-time 3 http://192.168.1.211/health -H "Host: acc-nebulacr.diytaxreturn.co.uk" > /dev/null 2>&1; then
+            echo "PRIMARY=192.168.1.211" >> "$GITHUB_ENV"
+            echo "PRIMARY_SCHEME=http" >> "$GITHUB_ENV"
+            echo "Using INTERNAL ingress LB (192.168.1.211)"
           else
             echo "PRIMARY=${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
             echo "PRIMARY_SCHEME=https" >> "$GITHUB_ENV"
-            echo "AUTH_URL=https://${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
             echo "Using EXTERNAL registry"
           fi
           # Mirror is always external (separate cluster)
