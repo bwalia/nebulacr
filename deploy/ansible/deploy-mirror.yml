@@ -168,6 +168,28 @@
             ip_rps: 50
             pull_rpm: 1000
             push_rpm: 500
+
+          multi_region:
+            enabled: true
+            local_region: "srv1423968-mirror"
+            health_check_interval_secs: 10
+            internal_port: 5002
+            replication:
+              mode: "async"
+              max_lag_secs: 60
+              batch_size: 50
+              sweep_interval_secs: 10
+            regions:
+              - name: "k3s0-primary"
+                endpoint: "https://{{ primary_registry }}"
+                internal_endpoint: "http://192.168.1.211:80"
+                is_primary: true
+                priority: 1
+              - name: "srv1423968-mirror"
+                endpoint: "http://187.77.179.206:{{ registry_port }}"
+                internal_endpoint: "http://127.0.0.1:5002"
+                is_primary: false
+                priority: 2
       notify: restart nebulacr-registry
 
     - name: Write auth config
