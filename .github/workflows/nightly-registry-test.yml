@@ -207,17 +207,22 @@ jobs:
         id: push
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
+          PUSH_OK=false
           for ATTEMPT in 1 2 3; do
             echo "Push attempt $ATTEMPT/3..."
             if docker push "${PRIMARY}/${IMAGE_NAME}:${IMAGE_TAG}" 2>&1; then
-              echo "result=PASS" >> "$GITHUB_OUTPUT"
-              exit 0
+              PUSH_OK=true
+              break
             fi
             echo "Attempt $ATTEMPT failed"
             [ "$ATTEMPT" -lt 3 ] && sleep 5
           done
-          echo "result=FAIL" >> "$GITHUB_OUTPUT"
-          echo "error=docker push failed after 3 attempts" >> "$GITHUB_OUTPUT"
+          if $PUSH_OK; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=docker push failed after 3 attempts" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── Image Status API ──────────────────────────────────────────
       - name: Check image status on primary
@@ -280,16 +285,21 @@ jobs:
         id: push-2seg
         if: steps.auth-primary.outputs.result == 'PASS'
         run: |
+          PUSH_OK=false
           for ATTEMPT in 1 2 3; do
             echo "Push attempt $ATTEMPT/3 (2-segment)..."
             if docker push "${PRIMARY}/${IMAGE_NAME_2SEG}:${IMAGE_TAG}" 2>&1; then
-              echo "result=PASS" >> "$GITHUB_OUTPUT"
-              exit 0
+              PUSH_OK=true
+              break
             fi
             [ "$ATTEMPT" -lt 3 ] && sleep 5
           done
-          echo "result=FAIL" >> "$GITHUB_OUTPUT"
-          echo "error=2-segment push failed" >> "$GITHUB_OUTPUT"
+          if $PUSH_OK; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "error=2-segment push failed" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Pull 2-segment image
         id: pull-2seg
