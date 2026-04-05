@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
 
 env:
-  PRIMARY: ${{ secrets.NEBULACR_REGISTRY }}
-  MIRROR: ${{ secrets.NEBULACR_MIRROR }}
+  PRIMARY_EXTERNAL: ${{ secrets.NEBULACR_REGISTRY }}
+  MIRROR_EXTERNAL: ${{ secrets.NEBULACR_MIRROR }}
   IMAGE_NAME: demo/default/nightly-test
   IMAGE_NAME_2SEG: nightly/test-2seg
   IMAGE_TAG: nightly-${{ github.run_number }}
@@ -27,12 +27,30 @@ env:
 jobs:
   registry-health-test:
     name: Registry Health Test
-    runs-on: [self-hosted, test]
+    runs-on: [self-hosted, k3s-internal]
     timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ── Detect registry URL ─────────────────────────────────────
+      - name: Resolve registry URLs
+        run: |
+          # Use internal ClusterIP when running inside k3s (DinD runner)
+          if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+            echo "PRIMARY=nebulacr-registry.acc.svc.cluster.local:5000" >> "$GITHUB_ENV"
+            echo "PRIMARY_SCHEME=http" >> "$GITHUB_ENV"
+            echo "AUTH_URL=http://nebulacr-auth.acc.svc.cluster.local:5001" >> "$GITHUB_ENV"
+            echo "Using INTERNAL cluster registry"
+          else
+            echo "PRIMARY=${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
+            echo "PRIMARY_SCHEME=https" >> "$GITHUB_ENV"
+            echo "AUTH_URL=https://${PRIMARY_EXTERNAL}" >> "$GITHUB_ENV"
+            echo "Using EXTERNAL registry"
+          fi
+          # Mirror is always external (separate cluster)
+          echo "MIRROR=${MIRROR_EXTERNAL}" >> "$GITHUB_ENV"
 
       # ── Cleanup ────────────────────────────────────────────────
       - name: Cleanup old nightly images
@@ -48,7 +66,7 @@ jobs:
           echo "PRIMARY=${PRIMARY}"
           echo "MIRROR=${MIRROR}"
           echo "Testing primary..."
-          curl -sv --connect-timeout 10 "https://${PRIMARY}/v2/" 2>&1 | tail -5
+          curl -sv --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/v2/" 2>&1 | tail -5
           echo "Testing mirror..."
           curl -sv --connect-timeout 10 "https://${MIRROR}/v2/" 2>&1 | tail -5
 
@@ -57,7 +75,7 @@ jobs:
         id: auth-primary
         run: |
           RESPONSE=$(curl -sf --connect-timeout 10 -u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}" \
-            "https://${PRIMARY}/auth/token?service=nebulacr-registry" 2>&1) || {
+            "${PRIMARY_SCHEME}://${PRIMARY}/auth/token?service=nebulacr-registry" 2>&1) || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Auth endpoint unreachable" >> "$GITHUB_OUTPUT"
             exit 0
@@ -96,7 +114,7 @@ jobs:
         id: health-primary
         run: |
           STATUS=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 \
-            "https://${PRIMARY}/health" 2>&1) || STATUS="000"
+            "${PRIMARY_SCHEME}://${PRIMARY}/health" 2>&1) || STATUS="000"
           if [ "$STATUS" = "200" ]; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
@@ -120,7 +138,7 @@ jobs:
       - name: Registry v2 API check
         id: v2-check
         run: |
-          PRIMARY_V2=$(curl -sf --connect-timeout 10 "https://${PRIMARY}/v2/" 2>&1) && P_OK=true || P_OK=false
+          PRIMARY_V2=$(curl -sf --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/v2/" 2>&1) && P_OK=true || P_OK=false
           MIRROR_V2=$(curl -sf --connect-timeout 10 "https://${MIRROR}/v2/" 2>&1) && M_OK=true || M_OK=false
           if $P_OK && $M_OK; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
@@ -133,7 +151,7 @@ jobs:
       - name: Dashboard check
         id: dashboard-check
         run: |
-          P_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${PRIMARY}/dashboard" 2>&1)
+          P_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/dashboard" 2>&1)
           M_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${MIRROR}/dashboard" 2>&1)
           if [ "$P_DASH" = "200" ] && [ "$M_DASH" = "200" ]; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
@@ -146,7 +164,7 @@ jobs:
       - name: Metrics endpoint check
         id: metrics-check
         run: |
-          METRICS=$(curl -sf --connect-timeout 10 "https://${PRIMARY}/metrics" 2>&1) || {
+          METRICS=$(curl -sf --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/metrics" 2>&1) || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Metrics endpoint unreachable" >> "$GITHUB_OUTPUT"
             exit 0
@@ -168,7 +186,7 @@ jobs:
         run: |
           HA=$(curl -sf --connect-timeout 10 \
             -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
-            "https://${PRIMARY}/api/ha-status" 2>&1) || {
+            "${PRIMARY_SCHEME}://${PRIMARY}/api/ha-status" 2>&1) || {
             echo "result=SKIP" >> "$GITHUB_OUTPUT"
             exit 0
           }
@@ -201,7 +219,7 @@ jobs:
         run: |
           docker logout "${PRIMARY}" 2>/dev/null || true
           echo "${{ secrets.NEBULACR_PASSWORD }}" | \
-            docker login "https://${PRIMARY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
+            docker login "${PRIMARY_SCHEME}://${PRIMARY}" -u "${{ secrets.NEBULACR_USERNAME }}" --password-stdin
 
       - name: Push image to primary (3-segment)
         id: push
@@ -231,7 +249,7 @@ jobs:
         run: |
           RESPONSE=$(curl -sf --connect-timeout 10 \
             -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
-            "https://${PRIMARY}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
+            "${PRIMARY_SCHEME}://${PRIMARY}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Status API unreachable" >> "$GITHUB_OUTPUT"
             exit 0
@@ -387,7 +405,7 @@ jobs:
         run: |
           CATALOG=$(curl -sf --connect-timeout 10 \
             -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
-            "https://${PRIMARY}/v2/_catalog" 2>&1) || {
+            "${PRIMARY_SCHEME}://${PRIMARY}/v2/_catalog" 2>&1) || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Catalog API unreachable" >> "$GITHUB_OUTPUT"
             exit 0
@@ -409,7 +427,7 @@ jobs:
         run: |
           TAGS=$(curl -sf --connect-timeout 10 \
             -H "Authorization: Bearer ${{ steps.auth-primary.outputs.token }}" \
-            "https://${PRIMARY}/v2/${IMAGE_NAME}/tags/list" 2>&1) || {
+            "${PRIMARY_SCHEME}://${PRIMARY}/v2/${IMAGE_NAME}/tags/list" 2>&1) || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Tags API unreachable" >> "$GITHUB_OUTPUT"
             exit 0
