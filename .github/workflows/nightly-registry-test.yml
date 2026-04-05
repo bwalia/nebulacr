@@ -27,7 +27,7 @@ env:
 jobs:
   registry-health-test:
     name: Registry Health Test
-    runs-on: [self-hosted, test]
+    runs-on: [self-hosted, k3s-internal]
     timeout-minutes: 15
 
     steps:
