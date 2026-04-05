@@ -1,0 +1,290 @@
+---
+# NebulaCR Mirror - Native deployment via Ansible
+# Installs nebula-registry and nebula-auth as systemd services on a bare-metal server.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml deploy-mirror.yml
+#   ansible-playbook -i inventory.yml deploy-mirror.yml -e nebulacr_version=latest
+#
+# The playbook:
+#   1. Downloads the NebulaCR container image from GHCR
+#   2. Extracts the binaries (nebula-registry, nebula-auth)
+#   3. Generates JWT keys if missing
+#   4. Creates systemd services
+#   5. Starts and enables both services
+
+- name: Deploy NebulaCR Mirror (native)
+  hosts: mirror
+  become: true
+  vars:
+    nebulacr_image: "ghcr.io/bwalia/nebulacr:latest"
+    nebulacr_version: "latest"
+    nebulacr_user: nebulacr
+    nebulacr_group: nebulacr
+    registry_port: "{{ nebulacr_registry_port | default('5050') }}"
+    auth_port: "{{ nebulacr_auth_port | default('5051') }}"
+    metrics_port: "{{ nebulacr_metrics_port | default('9095') }}"
+    data_dir: "{{ nebulacr_data_dir | default('/var/lib/nebulacr/data') }}"
+    config_dir: "{{ nebulacr_config_dir | default('/etc/nebulacr') }}"
+    keys_dir: "{{ nebulacr_keys_dir | default('/etc/nebulacr/keys') }}"
+    bin_dir: /usr/local/bin
+    primary_registry: "acc-nebulacr.diytaxreturn.co.uk"
+
+  tasks:
+    # ── System user ──────────────────────────────────────────
+    - name: Create nebulacr system user
+      user:
+        name: "{{ nebulacr_user }}"
+        group: "{{ nebulacr_group }}"
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+      register: user_created
+      ignore_errors: true
+
+    - name: Create nebulacr group
+      group:
+        name: "{{ nebulacr_group }}"
+        system: true
+      when: user_created is failed
+
+    - name: Retry create user after group
+      user:
+        name: "{{ nebulacr_user }}"
+        group: "{{ nebulacr_group }}"
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+      when: user_created is failed
+
+    # ── Directories ──────────────────────────────────────────
+    - name: Create directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ nebulacr_user }}"
+        group: "{{ nebulacr_group }}"
+        mode: "0750"
+      loop:
+        - "{{ data_dir }}"
+        - "{{ config_dir }}"
+        - "{{ keys_dir }}"
+
+    # ── Extract binaries from Docker image ───────────────────
+    - name: Pull NebulaCR image
+      command: docker pull {{ nebulacr_image }}
+      register: pull_result
+      changed_when: "'Downloaded newer image' in pull_result.stdout or 'Pull complete' in pull_result.stdout"
+
+    - name: Create temp container to extract binaries
+      command: docker create --name nebulacr-extract {{ nebulacr_image }}
+      register: create_result
+      changed_when: true
+
+    - name: Extract nebula-registry binary
+      command: docker cp nebulacr-extract:/usr/local/bin/nebula-registry {{ bin_dir }}/nebula-registry
+      changed_when: true
+
+    - name: Extract nebula-auth binary
+      command: docker cp nebulacr-extract:/usr/local/bin/nebula-auth {{ bin_dir }}/nebula-auth
+      changed_when: true
+
+    - name: Remove temp container
+      command: docker rm nebulacr-extract
+      changed_when: true
+
+    - name: Set binary permissions
+      file:
+        path: "{{ item }}"
+        mode: "0755"
+        owner: root
+        group: root
+      loop:
+        - "{{ bin_dir }}/nebula-registry"
+        - "{{ bin_dir }}/nebula-auth"
+
+    # ── JWT keys ─────────────────────────────────────────────
+    - name: Check if JWT keys exist
+      stat:
+        path: "{{ keys_dir }}/private.pem"
+      register: jwt_key
+
+    - name: Generate JWT RSA key pair
+      shell: |
+        openssl genrsa -out {{ keys_dir }}/private.pem 4096
+        openssl rsa -in {{ keys_dir }}/private.pem -pubout -out {{ keys_dir }}/public.pem
+        # Create signing/verification aliases
+        cp {{ keys_dir }}/private.pem {{ keys_dir }}/signing.pem
+        cp {{ keys_dir }}/public.pem {{ keys_dir }}/verification.pem
+        chown {{ nebulacr_user }}:{{ nebulacr_group }} {{ keys_dir }}/*.pem
+        chmod 640 {{ keys_dir }}/private.pem {{ keys_dir }}/signing.pem
+        chmod 644 {{ keys_dir }}/public.pem {{ keys_dir }}/verification.pem
+      when: not jwt_key.stat.exists
+
+    # ── Configuration ────────────────────────────────────────
+    - name: Write registry config
+      copy:
+        dest: "{{ config_dir }}/registry.yaml"
+        owner: "{{ nebulacr_user }}"
+        group: "{{ nebulacr_group }}"
+        mode: "0640"
+        content: |
+          server:
+            listen_addr: "0.0.0.0:{{ registry_port }}"
+            metrics_addr: "0.0.0.0:{{ metrics_port }}"
+
+          auth:
+            service_url: "http://127.0.0.1:{{ auth_port }}"
+            jwt:
+              access_token_ttl: 3600
+              refresh_token_ttl: 86400
+              signing_key_path: "{{ keys_dir }}/signing.pem"
+              verification_key_path: "{{ keys_dir }}/verification.pem"
+
+          storage:
+            backend: "filesystem"
+            filesystem:
+              root_directory: "{{ data_dir }}"
+
+          pull_through_cache:
+            enabled: true
+            default_upstream: "docker.io"
+            ttl: 86400
+            upstreams:
+              docker.io:
+                url: "https://registry-1.docker.io"
+              ghcr.io:
+                url: "https://ghcr.io"
+              quay.io:
+                url: "https://quay.io"
+              registry.k8s.io:
+                url: "https://registry.k8s.io"
+              # Pull-through from primary NebulaCR
+              primary:
+                url: "https://{{ primary_registry }}"
+
+          rate_limit:
+            default_rps: 100
+            ip_rps: 50
+            pull_rpm: 1000
+            push_rpm: 500
+      notify: restart nebulacr-registry
+
+    - name: Write auth config
+      copy:
+        dest: "{{ config_dir }}/auth.yaml"
+        owner: "{{ nebulacr_user }}"
+        group: "{{ nebulacr_group }}"
+        mode: "0640"
+        content: |
+          server:
+            auth_listen_addr: "0.0.0.0:{{ auth_port }}"
+
+          auth:
+            issuer: "nebulacr"
+            audience: "nebulacr-registry"
+            signing_algorithm: "RS256"
+            signing_key_path: "{{ keys_dir }}/signing.pem"
+            verification_key_path: "{{ keys_dir }}/verification.pem"
+            token_ttl_seconds: 300
+            bootstrap_admin:
+              username: "admin"
+              password_hash: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+
+          rate_limit:
+            token_issue_rpm: 60
+      notify: restart nebulacr-auth
+
+    # ── Systemd services ─────────────────────────────────────
+    - name: Install nebula-registry systemd service
+      copy:
+        dest: /etc/systemd/system/nebulacr-registry.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=NebulaCR OCI Registry
+          Documentation=https://github.com/bwalia/nebulacr
+          After=network-online.target nebulacr-auth.service
+          Wants=network-online.target
+          Requires=nebulacr-auth.service
+
+          [Service]
+          Type=simple
+          User={{ nebulacr_user }}
+          Group={{ nebulacr_group }}
+          ExecStart={{ bin_dir }}/nebula-registry --config={{ config_dir }}/registry.yaml
+          Restart=on-failure
+          RestartSec=5
+          LimitNOFILE=65536
+
+          Environment=RUST_LOG=info
+          Environment=NEBULACR_AUTH_SERVICE=nebulacr-registry
+          Environment=NEBULACR_AUTH_SERVICE_URL=http://127.0.0.1:{{ auth_port }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart nebulacr-registry
+
+    - name: Install nebula-auth systemd service
+      copy:
+        dest: /etc/systemd/system/nebulacr-auth.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=NebulaCR Auth Service
+          Documentation=https://github.com/bwalia/nebulacr
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ nebulacr_user }}
+          Group={{ nebulacr_group }}
+          ExecStart={{ bin_dir }}/nebula-auth --config={{ config_dir }}/auth.yaml
+          Restart=on-failure
+          RestartSec=5
+          LimitNOFILE=65536
+
+          Environment=RUST_LOG=info
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart nebulacr-auth
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
+
+    - name: Enable and start services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - nebulacr-auth
+        - nebulacr-registry
+
+    # ── Health check ─────────────────────────────────────────
+    - name: Wait for registry to be ready
+      uri:
+        url: "http://127.0.0.1:{{ registry_port }}/health"
+        return_content: true
+      register: health
+      retries: 10
+      delay: 3
+      until: health.status == 200
+
+    - name: Display health status
+      debug:
+        msg: "NebulaCR Mirror is healthy on port {{ registry_port }}: {{ health.json }}"
+
+  handlers:
+    - name: restart nebulacr-auth
+      systemd:
+        name: nebulacr-auth
+        state: restarted
+
+    - name: restart nebulacr-registry
+      systemd:
+        name: nebulacr-registry
+        state: restarted

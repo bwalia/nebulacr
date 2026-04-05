@@ -1,0 +1,11 @@
+all:
+  hosts:
+    mirror:
+      ansible_host: 187.77.179.206
+      ansible_user: root
+      nebulacr_registry_port: 5050
+      nebulacr_auth_port: 5051
+      nebulacr_metrics_port: 9095
+      nebulacr_data_dir: /var/lib/nebulacr/data
+      nebulacr_config_dir: /etc/nebulacr
+      nebulacr_keys_dir: /etc/nebulacr/keys
