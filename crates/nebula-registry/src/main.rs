@@ -504,26 +504,34 @@ async fn get_manifest(
     .increment(1);
     counter!("registry_manifest_pull_total").increment(1);
 
-    let path = resolve_manifest_path(
+    // Try local storage first, then upstream mirror, then failover
+    let data = match resolve_manifest_path(
         &state,
         &params.tenant,
         &params.project,
         &params.name,
         &params.reference,
     )
-    .await?;
-    let store_path = StorePath::from(path);
-
-    let data = match state.store.get(&store_path).await {
-        Ok(result) => result
-            .bytes()
-            .await
-            .map_err(|e| RegistryError::Storage(e.to_string()))?,
+    .await
+    {
+        Ok(path) => {
+            let store_path = StorePath::from(path);
+            state
+                .store
+                .get(&store_path)
+                .await
+                .map_err(|e| RegistryError::Storage(e.to_string()))?
+                .bytes()
+                .await
+                .map_err(|e| RegistryError::Storage(e.to_string()))?
+        }
         Err(_) => {
-            // Try mirror fallback
+            // Local miss — try pull-through mirror (upstream registries)
             if let Some(ref mirror) = state.mirror_service {
-                debug!(
+                info!(
                     tenant = %params.tenant,
+                    project = %params.project,
+                    name = %params.name,
                     reference = %params.reference,
                     "Local manifest miss, trying upstream mirror"
                 );
@@ -539,7 +547,7 @@ async fn get_manifest(
                 result.data
             } else if let Some(ref failover) = state.failover_manager {
                 // Try reading from another region
-                debug!(
+                info!(
                     tenant = %params.tenant,
                     reference = %params.reference,
                     "Local manifest miss, trying failover region"
