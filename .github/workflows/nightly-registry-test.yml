@@ -68,7 +68,7 @@ jobs:
           echo "Testing primary..."
           curl -sv --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/v2/" 2>&1 | tail -5
           echo "Testing mirror..."
-          curl -sv --connect-timeout 10 "https://${MIRROR}/v2/" 2>&1 | tail -5
+          curl -sv --connect-timeout 10 "${MIRROR}/v2/" 2>&1 | tail -5
 
       # ── Auth ──────────────────────────────────────────────────────
       - name: Authenticate to primary
@@ -94,7 +94,7 @@ jobs:
         id: auth-mirror
         run: |
           RESPONSE=$(curl -sf --connect-timeout 10 -u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}" \
-            "https://${MIRROR}/auth/token?service=nebulacr-registry" 2>&1) || {
+            "${MIRROR}/auth/token?service=nebulacr-registry" 2>&1) || {
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
             echo "error=Mirror auth unreachable" >> "$GITHUB_OUTPUT"
             exit 0
@@ -126,7 +126,7 @@ jobs:
         id: health-mirror
         run: |
           STATUS=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 \
-            "https://${MIRROR}/health" 2>&1) || STATUS="000"
+            "${MIRROR}/health" 2>&1) || STATUS="000"
           if [ "$STATUS" = "200" ]; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
@@ -139,7 +139,7 @@ jobs:
         id: v2-check
         run: |
           PRIMARY_V2=$(curl -sf --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/v2/" 2>&1) && P_OK=true || P_OK=false
-          MIRROR_V2=$(curl -sf --connect-timeout 10 "https://${MIRROR}/v2/" 2>&1) && M_OK=true || M_OK=false
+          MIRROR_V2=$(curl -sf --connect-timeout 10 "${MIRROR}/v2/" 2>&1) && M_OK=true || M_OK=false
           if $P_OK && $M_OK; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
@@ -152,7 +152,7 @@ jobs:
         id: dashboard-check
         run: |
           P_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "${PRIMARY_SCHEME}://${PRIMARY}/dashboard" 2>&1)
-          M_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "https://${MIRROR}/dashboard" 2>&1) || M_DASH="000"
+          M_DASH=$(curl -so /dev/null -w "%{http_code}" --connect-timeout 10 "${MIRROR}/dashboard" 2>&1) || M_DASH="000"
           if [ "$P_DASH" = "200" ]; then
             if [ "$M_DASH" = "200" ]; then
               echo "result=PASS" >> "$GITHUB_OUTPUT"
@@ -457,7 +457,7 @@ jobs:
           sleep 15
           RESPONSE=$(curl -sf --connect-timeout 10 \
             -H "Authorization: Bearer ${{ steps.auth-mirror.outputs.token }}" \
-            "https://${MIRROR}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
+            "${MIRROR}/v2/${IMAGE_NAME}/status/${IMAGE_TAG}" 2>&1) || {
             echo "result=SKIP" >> "$GITHUB_OUTPUT"
             echo "error=Mirror status API unreachable" >> "$GITHUB_OUTPUT"
             exit 0
