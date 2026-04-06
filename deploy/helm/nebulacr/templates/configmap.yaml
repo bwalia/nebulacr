@@ -59,16 +59,19 @@ data:
       {{- end }}
 
     {{- if .Values.pullThroughCache.enabled }}
-    pull_through_cache:
+    mirror:
       enabled: true
-      default_upstream: {{ .Values.pullThroughCache.defaultUpstream | quote }}
-      ttl: {{ .Values.pullThroughCache.ttl }}
+      cache_ttl_secs: {{ .Values.pullThroughCache.ttl }}
       upstreams:
         {{- range $name, $upstream := .Values.pullThroughCache.upstreams }}
-        {{ $name }}:
+        - name: {{ $name | quote }}
           url: {{ $upstream.url | quote }}
-          {{- if or $upstream.existingSecret $upstream.username }}
-          credentials_env_prefix: {{ $name | upper | replace "." "_" | replace "-" "_" | quote }}
+          {{- if $upstream.username }}
+          username: {{ $upstream.username | quote }}
+          password: {{ $upstream.password | quote }}
+          {{- end }}
+          {{- if $upstream.cacheTtl }}
+          cache_ttl_secs: {{ $upstream.cacheTtl }}
           {{- end }}
         {{- end }}
     {{- end }}
