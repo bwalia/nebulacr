@@ -431,57 +431,31 @@ async fn head_manifest(
         Action::Pull,
     )?;
 
-    // Try local, then mirror (same fallback pattern as get_manifest)
-    let data = match resolve_manifest_path(
+    // HEAD only checks local storage — no mirror fallback.
+    // Docker will follow up with GET on miss, which has mirror fallback.
+    let path = resolve_manifest_path(
         &state,
         &params.tenant,
         &params.project,
         &params.name,
         &params.reference,
     )
-    .await
-    {
-        Ok(path) => {
-            let store_path = StorePath::from(path);
-            state
-                .store
-                .get(&store_path)
-                .await
-                .map_err(|_| RegistryError::ManifestUnknown {
-                    reference: params.reference.clone(),
-                })?
-                .bytes()
-                .await
-                .map_err(|e| RegistryError::Storage(e.to_string()))?
-        }
-        Err(_) => {
-            if let Some(ref mirror) = state.mirror_service {
-                let result = mirror
-                    .fetch_manifest(
-                        &params.tenant,
-                        &params.project,
-                        &params.name,
-                        &params.reference,
-                    )
-                    .await
-                    .map_err(|e| RegistryError::UpstreamError(e.to_string()))?;
-                result.data
-            } else {
-                return Err(RegistryError::ManifestUnknown {
-                    reference: params.reference.clone(),
-                });
-            }
-        }
-    };
+    .await?;
+    let store_path = StorePath::from(path);
+
+    let data = state
+        .store
+        .get(&store_path)
+        .await
+        .map_err(|_| RegistryError::ManifestUnknown {
+            reference: params.reference.clone(),
+        })?
+        .bytes()
+        .await
+        .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
     let digest = sha256_digest(&data);
-    let size = data.len();
-
-    // Detect media type
-    let media_type = serde_json::from_slice::<serde_json::Value>(&data)
-        .ok()
-        .and_then(|v| v.get("mediaType").and_then(|m| m.as_str()).map(String::from))
-        .unwrap_or_else(|| "application/vnd.docker.distribution.manifest.v2+json".to_string());
+    let media_type = detect_manifest_media_type(&data);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -494,7 +468,7 @@ async fn head_manifest(
     );
     headers.insert(
         header::CONTENT_LENGTH,
-        HeaderValue::from_str(&size.to_string()).unwrap(),
+        HeaderValue::from_str(&data.len().to_string()).unwrap(),
     );
 
     Ok((StatusCode::OK, headers).into_response())
@@ -893,34 +867,16 @@ async fn head_blob(
     );
     let store_path = StorePath::from(path);
 
-    // Try local first, then fetch from upstream mirror on miss
-    let size = match state.store.head(&store_path).await {
-        Ok(meta) => meta.size,
-        Err(_) => {
-            // Local miss — try pull-through mirror to fetch and cache the blob
-            if let Some(ref mirror) = state.mirror_service {
-                info!(
-                    tenant = %params.tenant,
-                    digest = %params.digest,
-                    "Local blob miss on HEAD, fetching from upstream mirror"
-                );
-                let result = mirror
-                    .fetch_blob(
-                        &params.tenant,
-                        &params.project,
-                        &params.name,
-                        &params.digest,
-                    )
-                    .await
-                    .map_err(|e| RegistryError::UpstreamError(e.to_string()))?;
-                result.data.len()
-            } else {
-                return Err(RegistryError::BlobUnknown {
-                    digest: params.digest.clone(),
-                });
-            }
-        }
-    };
+    // HEAD only checks local storage — no mirror fallback.
+    // Docker will follow up with GET on miss, which has mirror fallback.
+    let meta = state
+        .store
+        .head(&store_path)
+        .await
+        .map_err(|_| RegistryError::BlobUnknown {
+            digest: params.digest.clone(),
+        })?;
+    let size = meta.size;
 
     let mut headers = HeaderMap::new();
     headers.insert(
