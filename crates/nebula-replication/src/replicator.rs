@@ -70,8 +70,8 @@ impl Replicator {
             .filter(|r| r.name != config.local_region)
             .map(|r| {
                 let client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(600))
+                    .connect_timeout(Duration::from_secs(30))
                     .build()
                     .expect("failed to build HTTP client");
 
