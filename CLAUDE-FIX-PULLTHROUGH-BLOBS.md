@@ -28,43 +28,51 @@ The manifest references blobs by digest (e.g., `sha256:abc123`), but the blob st
 ### Scenario C: HEAD blob returns 404 before GET blob tries mirror
 Docker first sends HEAD requests to check blob existence. The `head_blob` handler does NOT have mirror fallback — it only checks local storage. If HEAD returns 404, Docker may skip the blob entirely instead of trying GET.
 
-## What Needs to Be Fixed
+## What Has Been Tried
 
-### 1. Add mirror fallback to `head_blob` handler (CRITICAL)
+- Adding mirror fallback to `head_manifest` and `head_blob` caused ALL locally-pushed
+  images to trigger slow upstream lookups (5 registries tried sequentially) on every
+  pull, breaking push-pull round trips. This was reverted in commit ccb02b3.
+- The `get_manifest` handler correctly falls through to mirror on local miss (commit 71086e8).
+- The `get_blob` handler already has mirror fallback and `fetch_blob` correctly downloads
+  and caches blobs from upstream.
 
-File: `crates/nebula-registry/src/main.rs`, function `head_blob` (~line 782)
+## What Actually Needs to Be Fixed
 
-Currently `head_blob` only checks local storage. It needs to:
-- On local miss, call `mirror.fetch_blob()` to download from upstream
-- Cache the blob locally
-- Return the correct HEAD response (Content-Length, Docker-Content-Digest)
+### The Core Problem: Docker sends HEAD before GET for pull-through
 
-This is the most likely fix — Docker sends HEAD first, gets 404, and gives up.
+Docker's pull flow: HEAD manifest -> if 404, give up (does NOT try GET).
+The `head_manifest` handler only checks local storage. For pull-through images that
+haven't been cached yet, HEAD returns 404 and Docker stops.
 
-### 2. Verify `fetch_blob` downloads and stores correctly
+### Fix Option A: Smart HEAD fallback (RECOMMENDED)
 
-File: `crates/nebula-mirror/src/service.rs`, function `fetch_blob` (line 173)
+Add mirror fallback to `head_manifest` and `head_blob` BUT only for paths that
+look like upstream images. Use the mirror service's `resolve_upstreams(tenant)` to
+check if the tenant has any upstream routing. For the default tenant `_`, check if
+the project name matches a known upstream registry prefix (e.g., `library`, `docker.io`).
 
-Check that:
-- The blob is downloaded from the upstream registry
-- It is stored locally at the correct path: `blob_path(tenant, project, name, digest)`
-- The digest matches what the manifest references
-- Large blobs (100MB+) are handled via streaming, not buffered in memory
+For locally-pushed images (tenant `demo`, `_` with custom project names), skip mirror.
 
-### 3. Verify `get_blob` mirror fallback works end-to-end
+### Fix Option B: Pre-fetch on GET manifest
 
-File: `crates/nebula-registry/src/main.rs`, function `get_blob` (~line 900)
+When `get_manifest` fetches a manifest from upstream, parse it and pre-fetch all
+referenced blobs in the background. This way when Docker subsequently requests blobs
+via HEAD, they're already cached locally.
 
-The mirror fallback at line ~940 should:
-- Call `mirror.fetch_blob(tenant, project, name, digest)`
-- Return the blob data with correct headers
-- Cache the blob locally for subsequent requests
+### Fix Option C: Transparent proxy mode
+
+Instead of returning 404 on HEAD miss, return a redirect (307) to the upstream
+registry. Docker will follow the redirect and pull directly. This avoids caching
+but makes pull-through work immediately.
 
 ### 4. Handle manifest-list/index responses
 
-When Docker pulls a multi-arch image, the first manifest returned is often a manifest list (index). The registry needs to:
+When Docker pulls a multi-arch image, the first manifest returned is often a manifest
+list (index). The registry needs to:
 - Cache the manifest list
-- When Docker requests a platform-specific manifest (by digest from the list), also proxy that from upstream
+- When Docker requests a platform-specific manifest (by digest from the list), also
+  proxy that from upstream
 - Then proxy the blobs referenced by the platform-specific manifest
 
 ## Key Files
