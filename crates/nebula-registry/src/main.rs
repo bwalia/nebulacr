@@ -1403,9 +1403,15 @@ async fn resolve_manifest_path(
     name: &str,
     reference: &str,
 ) -> Result<String, RegistryError> {
-    if reference.starts_with("sha256:") {
+    // Handle digest references: sha256:abc... or sha256-abc... (OCI dash encoding)
+    let normalized_ref = if reference.starts_with("sha256-") {
+        reference.replacen("sha256-", "sha256:", 1)
+    } else {
+        reference.to_string()
+    };
+    if normalized_ref.starts_with("sha256:") {
         // Direct digest reference
-        Ok(manifest_path(tenant, project, name, reference))
+        Ok(manifest_path(tenant, project, name, &normalized_ref))
     } else {
         // Tag reference: read the tag link to get the digest
         let tag_p = tag_link_path(tenant, project, name, reference);
