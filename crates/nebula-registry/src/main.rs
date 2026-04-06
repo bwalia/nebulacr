@@ -1720,23 +1720,23 @@ async fn image_status(
     let mut missing_layers: u32 = 0;
 
     // Check config blob if present
-    if let Some(config) = manifest_json.get("config") {
-        if let (Some(cfg_digest), Some(cfg_size)) = (
+    if let Some(config) = manifest_json.get("config")
+        && let (Some(cfg_digest), Some(cfg_size)) = (
             config.get("digest").and_then(|d| d.as_str()),
             config.get("size").and_then(|s| s.as_u64()),
-        ) {
-            let cfg_path = blob_path(&params.tenant, &params.project, &params.name, cfg_digest);
-            let cfg_exists = state.store.head(&StorePath::from(cfg_path)).await.is_ok();
-            if !cfg_exists {
-                missing_layers += 1;
-            }
-            total_size += cfg_size;
-            config_status = serde_json::json!({
-                "digest": cfg_digest,
-                "size": cfg_size,
-                "available": cfg_exists
-            });
+        )
+    {
+        let cfg_path = blob_path(&params.tenant, &params.project, &params.name, cfg_digest);
+        let cfg_exists = state.store.head(&StorePath::from(cfg_path)).await.is_ok();
+        if !cfg_exists {
+            missing_layers += 1;
         }
+        total_size += cfg_size;
+        config_status = serde_json::json!({
+            "digest": cfg_digest,
+            "size": cfg_size,
+            "available": cfg_exists
+        });
     }
 
     // Check each layer
