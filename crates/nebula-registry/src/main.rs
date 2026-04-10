@@ -2438,7 +2438,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(public_routes)
         .merge(dashboard_routes)
         .merge(registry_routes)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)) // 2 GiB for large container image layers
+        .layer(DefaultBodyLimit::disable()) // No limit — OCI blob sizes are unbounded
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2462,7 +2462,7 @@ async fn main() -> anyhow::Result<()> {
             "/internal/replication/status",
             get(internal_replication_status),
         )
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state);
 
     let internal_addr = format!("0.0.0.0:{internal_port}");
