@@ -2434,20 +2434,8 @@ async fn main() -> anyhow::Result<()> {
         // Catalog
         .route("/v2/_catalog", get(catalog));
 
-    let app = Router::new()
-        .merge(public_routes)
-        .merge(dashboard_routes)
-        .merge(registry_routes)
-        .layer(DefaultBodyLimit::disable()) // No limit — OCI blob sizes are unbounded
-        .layer(middleware::from_fn(request_id_middleware))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit_middleware,
-        ))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
-
-    // Internal replication API (separate listener for security)
+    // Internal replication routes — served on both the main port (for cross-cluster
+    // access via proxy) and the dedicated internal port (for intra-cluster use).
     let internal_routes = Router::new()
         .route(
             "/internal/replicate/manifest",
@@ -2461,7 +2449,23 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/internal/replication/status",
             get(internal_replication_status),
-        )
+        );
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(dashboard_routes)
+        .merge(registry_routes)
+        .merge(internal_routes.clone())
+        .layer(DefaultBodyLimit::disable()) // No limit — OCI blob sizes are unbounded
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state.clone());
+
+    let internal_app = internal_routes
         .layer(DefaultBodyLimit::disable())
         .with_state(state);
 
@@ -2471,7 +2475,7 @@ async fn main() -> anyhow::Result<()> {
     let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
     info!(addr = %internal_addr, "Internal replication API listening");
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(internal_listener, internal_routes).await {
+        if let Err(e) = axum::serve(internal_listener, internal_app).await {
             error!(error = %e, "Internal replication API error");
         }
     });

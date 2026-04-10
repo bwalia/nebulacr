@@ -116,7 +116,7 @@ multiRegion:
       priority: 1
     - name: "srv1423968-mirror"
       endpoint: "https://acc-nebulacr-mirror.diytaxreturn.co.uk"
-      internalEndpoint: "http://nebulacr-registry.acc.svc.cluster.local:5002"
+      internalEndpoint: "http://localhost:5002"
       isPrimary: false
       priority: 2
 storage:

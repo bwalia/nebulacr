@@ -108,8 +108,8 @@ multiRegion:
       isPrimary: true
       priority: 1
     - name: "srv1423968-mirror"
-      endpoint: "http://187.77.179.206:5050"
-      internalEndpoint: "http://187.77.179.206:5002"
+      endpoint: "http://187.77.179.206:30080"
+      internalEndpoint: "http://187.77.179.206:30080"
       isPrimary: false
       priority: 2
 storage:
