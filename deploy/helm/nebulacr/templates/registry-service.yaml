@@ -16,5 +16,11 @@ spec:
       port: {{ .Values.registry.metricsPort }}
       targetPort: metrics
       protocol: TCP
+    {{- if .Values.multiRegion.enabled }}
+    - name: replication
+      port: {{ .Values.multiRegion.internalPort }}
+      targetPort: {{ .Values.multiRegion.internalPort }}
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "nebulacr.registry.selectorLabels" . | nindent 4 }}

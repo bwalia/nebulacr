@@ -93,4 +93,18 @@ spec:
         - port: {{ $.Values.registry.port }}
           protocol: TCP
     {{- end }}
+    {{- if $.Values.multiRegion.enabled }}
+    # Allow internal replication traffic between registry peers
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "nebulacr.registry.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ $.Values.multiRegion.internalPort }}
+          protocol: TCP
+    # Allow replication from any source (cross-cluster mirrors)
+    - ports:
+        - port: {{ $.Values.multiRegion.internalPort }}
+          protocol: TCP
+    {{- end }}
 {{- end }}
