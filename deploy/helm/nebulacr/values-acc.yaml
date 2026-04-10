@@ -81,6 +81,8 @@ registry:
   image:
     tag: "latest"
   replicas: 1
+  nodeSelector:
+    kubernetes.io/hostname: debian001
   resources:
     limits:
       cpu: "2"
