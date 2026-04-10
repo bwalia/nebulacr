@@ -16,6 +16,8 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
+use futures::TryStreamExt;
+use object_store::{ObjectStore, path::Path as StorePath};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
@@ -26,6 +28,7 @@ use nebula_replication::failover::FailoverManager;
 #[derive(Clone)]
 pub struct DashboardState {
     pub audit_log: Arc<RegistryAuditLog>,
+    pub store: Arc<dyn ObjectStore>,
     pub start_time: std::time::Instant,
     pub failover_manager: Option<Arc<FailoverManager>>,
 }
@@ -226,6 +229,184 @@ pub async fn api_ha_status(State(state): State<DashboardState>) -> Json<HaStatus
             local_is_primary: None,
             regions: None,
         }),
+    }
+}
+
+// ── Image Browser API ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ImageQuery {
+    /// Search term — supports substring and wildcard (*) matching.
+    pub q: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct ImageEntry {
+    pub repository: String,
+    pub tenant: String,
+    pub project: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub tag_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct ImageListResponse {
+    pub images: Vec<ImageEntry>,
+    pub total: usize,
+}
+
+/// GET /api/images?q=search&limit=100 — List all repositories from storage with optional search.
+pub async fn api_images(
+    State(state): State<DashboardState>,
+    Query(query): Query<ImageQuery>,
+) -> Json<ImageListResponse> {
+    let limit = query.limit.unwrap_or(200).min(1000);
+    let search = query.q.unwrap_or_default().to_lowercase();
+
+    // Walk the store to discover tenant/project/repo structures by finding tags/ prefixes.
+    let mut images: Vec<ImageEntry> = Vec::new();
+
+    // List top-level tenant prefixes
+    let tenants = state
+        .store
+        .list_with_delimiter(None)
+        .await
+        .ok().unwrap_or_else(|| object_store::ListResult { common_prefixes: vec![], objects: vec![] });
+
+    for tenant_prefix in &tenants.common_prefixes {
+        let tenant = tenant_prefix.as_ref().trim_end_matches('/').to_string();
+        // Skip internal prefixes (allow "_" default tenant, skip _replication etc)
+        if tenant.starts_with("_replication") {
+            continue;
+        }
+
+        // List project prefixes under tenant
+        let projects = state
+            .store
+            .list_with_delimiter(Some(tenant_prefix))
+            .await
+            .ok().unwrap_or_else(|| object_store::ListResult { common_prefixes: vec![], objects: vec![] });
+
+        for project_prefix in &projects.common_prefixes {
+            let project_path = project_prefix.as_ref().trim_end_matches('/');
+            let project = project_path
+                .strip_prefix(&format!("{tenant}/"))
+                .unwrap_or(project_path)
+                .to_string();
+
+            // List repo prefixes under project
+            let repos = state
+                .store
+                .list_with_delimiter(Some(project_prefix))
+                .await
+                .ok().unwrap_or_else(|| object_store::ListResult { common_prefixes: vec![], objects: vec![] });
+
+            for repo_prefix in &repos.common_prefixes {
+                let repo_path = repo_prefix.as_ref().trim_end_matches('/');
+                let name = repo_path
+                    .strip_prefix(&format!("{tenant}/{project}/"))
+                    .unwrap_or(repo_path)
+                    .to_string();
+
+                let repository = format!("{tenant}/{project}/{name}");
+
+                // Apply search filter
+                if !search.is_empty() && !matches_search(&repository, &search) {
+                    continue;
+                }
+
+                // List tags for this repo
+                let tags_path = StorePath::from(format!("{tenant}/{project}/{name}/tags/"));
+                let tag_objects: Vec<_> = state
+                    .store
+                    .list(Some(&tags_path))
+                    .try_collect()
+                    .await
+                    .unwrap_or_default();
+
+                let tags: Vec<String> = tag_objects
+                    .iter()
+                    .filter_map(|meta| {
+                        let full = meta.location.to_string();
+                        let prefix = format!("{tenant}/{project}/{name}/tags/");
+                        full.strip_prefix(&prefix)
+                            .filter(|t| !t.is_empty())
+                            .map(|t| t.to_string())
+                    })
+                    .collect();
+
+                let tag_count = tags.len();
+
+                images.push(ImageEntry {
+                    repository,
+                    tenant: tenant.clone(),
+                    project: project.clone(),
+                    name,
+                    tags,
+                    tag_count,
+                });
+
+                if images.len() >= limit {
+                    break;
+                }
+            }
+            if images.len() >= limit {
+                break;
+            }
+        }
+        if images.len() >= limit {
+            break;
+        }
+    }
+
+    images.sort_by(|a, b| a.repository.cmp(&b.repository));
+    let total = images.len();
+
+    Json(ImageListResponse { images, total })
+}
+
+/// Match a repository name against a search term supporting wildcards (*).
+fn matches_search(repo: &str, search: &str) -> bool {
+    let repo_lower = repo.to_lowercase();
+
+    if search.contains('*') {
+        // Convert wildcard pattern to simple matching
+        let parts: Vec<&str> = search.split('*').collect();
+        if parts.len() == 1 {
+            return repo_lower.contains(parts[0]);
+        }
+        // Check that all parts appear in order
+        let mut pos = 0;
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                continue;
+            }
+            if let Some(found) = repo_lower[pos..].find(part) {
+                if i == 0 && found != 0 {
+                    // First segment must be at start if pattern doesn't start with *
+                    if !search.starts_with('*') {
+                        return false;
+                    }
+                }
+                pos += found + part.len();
+            } else {
+                return false;
+            }
+        }
+        // If pattern doesn't end with *, last segment must be at end
+        if !search.ends_with('*') {
+            if let Some(last) = parts.last() {
+                if !last.is_empty() {
+                    return repo_lower.ends_with(last);
+                }
+            }
+        }
+        true
+    } else {
+        // Simple substring match
+        repo_lower.contains(search)
     }
 }
 
@@ -471,6 +652,19 @@ tr:hover {{ background: var(--surface2); }}
 
     <div class="section">
         <div class="section-header">
+            <h2>Image Browser</h2>
+            <div class="controls">
+                <input type="text" id="image-search" placeholder="Search images... (e.g. fastapi or _/diy*)" oninput="searchImages()" style="width:300px;">
+                <button class="refresh-btn" onclick="searchImages()">Search</button>
+            </div>
+        </div>
+        <div id="image-results">
+            <div class="empty" id="image-loading">Loading images...</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-header">
             <h2>Recent Activity &amp; Audit Log</h2>
             <div class="controls">
                 <select id="filter-type" onchange="filterTable()">
@@ -515,6 +709,7 @@ tr:hover {{ background: var(--surface2); }}
                 <tr><td><code>/api/stats</code></td><td>Summary statistics JSON</td></tr>
                 <tr><td><code>/api/system</code></td><td>System metrics (CPU, RAM, disk) JSON</td></tr>
                 <tr><td><code>/api/ha-status</code></td><td>HA multi-region peer health JSON</td></tr>
+                <tr><td><code>/api/images?q=search&amp;limit=200</code></td><td>Image browser with wildcard search</td></tr>
                 <tr><td><code>/api/activity?limit=50&amp;type=manifest.push</code></td><td>Recent activity feed (filterable)</td></tr>
                 <tr><td><code>/api/audit?limit=100&amp;subject=user</code></td><td>Full audit log (filterable)</td></tr>
                 <tr><td><code>/dashboard</code></td><td>This dashboard</td></tr>
@@ -541,6 +736,43 @@ function setupAutoRefresh(sec) {{
     if (sec > 0) refreshTimer = setInterval(() => location.reload(), sec * 1000);
 }}
 setupAutoRefresh(30);
+
+// Image browser
+let searchTimeout;
+function searchImages() {{
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(doSearch, 300);
+}}
+
+async function doSearch() {{
+    const q = document.getElementById('image-search').value.trim();
+    const container = document.getElementById('image-results');
+    container.innerHTML = '<div class="empty">Searching...</div>';
+    try {{
+        const url = q ? `/api/images?q=${{encodeURIComponent(q)}}&limit=200` : '/api/images?limit=200';
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (data.total === 0) {{
+            container.innerHTML = '<div class="empty">No images found.</div>';
+            return;
+        }}
+        let html = `<table><thead><tr><th>Repository</th><th>Tags</th><th>Tag Count</th></tr></thead><tbody>`;
+        for (const img of data.images) {{
+            const tagBadges = img.tags.slice(0, 10).map(t =>
+                `<span class="badge badge-push">${{t}}</span>`
+            ).join(' ');
+            const more = img.tags.length > 10 ? ` <span class="badge badge-other">+${{img.tags.length - 10}} more</span>` : '';
+            html += `<tr><td><strong>${{img.repository}}</strong></td><td>${{tagBadges}}${{more}}</td><td>${{img.tag_count}}</td></tr>`;
+        }}
+        html += `</tbody></table>`;
+        html += `<div style="padding:10px 16px;color:var(--text-muted);font-size:12px;">Showing ${{data.total}} repositor${{data.total === 1 ? 'y' : 'ies'}}</div>`;
+        container.innerHTML = html;
+    }} catch(e) {{
+        container.innerHTML = `<div class="empty">Error loading images: ${{e.message}}</div>`;
+    }}
+}}
+// Load images on page load
+doSearch();
 
 function filterTable() {{
     const typeFilter = document.getElementById('filter-type').value.toLowerCase();

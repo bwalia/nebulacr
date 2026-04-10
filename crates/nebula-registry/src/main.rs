@@ -2353,6 +2353,7 @@ async fn main() -> anyhow::Result<()> {
     // Dashboard state (shared with dashboard handlers)
     let dashboard_state = dashboard::DashboardState {
         audit_log: audit_log.clone(),
+        store: state.store.clone(),
         start_time,
         failover_manager,
     };
@@ -2373,6 +2374,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/audit", get(dashboard::api_audit))
         .route("/api/system", get(dashboard::api_system))
         .route("/api/ha-status", get(dashboard::api_ha_status))
+        .route("/api/images", get(dashboard::api_images))
         .with_state(dashboard_state);
 
     // Authenticated registry routes
