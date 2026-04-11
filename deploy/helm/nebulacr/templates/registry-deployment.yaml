@@ -87,6 +87,10 @@ spec:
               value: {{ .Values.observability.logLevel | quote }}
             - name: NEBULACR_AUTH_REALM
               value: "/auth/token"
+            {{- if .Values.ingress.host }}
+            - name: NEBULACR_EXTERNAL_URL
+              value: "https://{{ .Values.ingress.host }}"
+            {{- end }}
             {{- if and .Values.oidc.enabled .Values.oidc.clientSecret }}
             - name: NEBULACR_OIDC_CLIENT_SECRET
               valueFrom:

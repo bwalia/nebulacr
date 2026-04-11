@@ -227,7 +227,13 @@ async fn request_id_middleware(mut request: Request, next: Next) -> Response {
     if response.status() == StatusCode::UNAUTHORIZED {
         let service_name = std::env::var("NEBULACR_AUTH_SERVICE")
             .unwrap_or_else(|_| "nebulacr-registry".to_string());
-        let realm = format!("{scheme}://{host}/auth/token");
+        // Build the realm URL: prefer NEBULACR_EXTERNAL_URL env var for explicit
+        // control, otherwise construct from request headers.
+        let realm = if let Ok(ext_url) = std::env::var("NEBULACR_EXTERNAL_URL") {
+            format!("{}/auth/token", ext_url.trim_end_matches('/'))
+        } else {
+            format!("{scheme}://{host}/auth/token")
+        };
         let header_val = format!("Bearer realm=\"{realm}\",service=\"{service_name}\"");
         if let Ok(val) = HeaderValue::from_str(&header_val) {
             response.headers_mut().insert("www-authenticate", val);
