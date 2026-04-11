@@ -213,7 +213,7 @@ async fn request_id_middleware(mut request: Request, next: Next) -> Response {
         .headers()
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("http")
+        .unwrap_or("https")
         .to_string();
 
     let mut response = next.run(request).await;
