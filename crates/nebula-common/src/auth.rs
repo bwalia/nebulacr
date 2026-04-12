@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -76,6 +78,25 @@ pub struct OidcProviderConfig {
     pub subject_claim: String,
     /// Claim used to resolve tenant membership.
     pub tenant_claim: Option<String>,
+    /// Claim name containing user groups (e.g., "groups" for Azure AD).
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    /// Claim name for email.
+    #[serde(default = "default_email_claim")]
+    pub email_claim: String,
+    /// Restrict login to users in these groups. Empty = allow all.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// Display name for the provider (shown on login page).
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+fn default_groups_claim() -> String {
+    "groups".to_string()
+}
+fn default_email_claim() -> String {
+    "email".to_string()
 }
 
 // ── GitHub Actions OIDC ───────────────────────────────────────────
@@ -145,6 +166,12 @@ pub struct AuditEvent {
     pub reason: String,
     pub request_id: String,
     pub source_ip: String,
+    /// Authentication method used (basic, oidc, robot, ci_oidc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+    /// Groups the subject belongs to (from OIDC claims).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,4 +225,207 @@ pub struct Jwk {
     pub n: String,
     /// RSA exponent (base64url-encoded).
     pub e: String,
+}
+
+// ── Enterprise Auth Types ────────────────────────────────────────
+
+/// Extended OIDC claims including groups for enterprise SSO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcUserClaims {
+    pub sub: String,
+    #[serde(default)]
+    pub iss: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub exp: Option<i64>,
+}
+
+/// Group-to-role mapping rule for enterprise AD integration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupRoleMapping {
+    /// AD/OIDC group name pattern (exact or glob with *).
+    pub group: String,
+    /// NebulaCR tenant to grant access to.
+    pub tenant: String,
+    /// Optional project restriction.
+    pub project: Option<String>,
+    /// Role assigned to members of this group.
+    pub role: Role,
+}
+
+/// A provisioned user record (auto-created on first OIDC login).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRecord {
+    pub subject: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub groups: Vec<String>,
+    pub auth_method: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_login: DateTime<Utc>,
+    pub login_count: u64,
+}
+
+/// OIDC authorization code flow session state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcSession {
+    pub state: String,
+    pub pkce_verifier: String,
+    pub provider_name: String,
+    pub redirect_uri: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Robot/service account for machine identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RobotAccount {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub tenant: String,
+    pub project: Option<String>,
+    pub role: Role,
+    pub secret_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used: Option<DateTime<Utc>>,
+    pub enabled: bool,
+}
+
+/// CI OIDC provider configuration (generalized for GitHub, GitLab, k8s).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiOidcProvider {
+    pub name: String,
+    pub issuer_url: String,
+    pub audience: String,
+    /// Prefix for subject identity (e.g., "github:", "gitlab:", "k8s:").
+    pub subject_prefix: String,
+    /// Claim filters: claim_name -> allowed values.
+    #[serde(default)]
+    pub allowed_claims: HashMap<String, Vec<String>>,
+    pub default_role: String,
+    /// Max token TTL in seconds.
+    #[serde(default = "default_ci_max_ttl")]
+    pub max_ttl_seconds: u64,
+}
+
+fn default_ci_max_ttl() -> u64 {
+    900
+}
+
+/// Refresh token record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshToken {
+    pub id: String,
+    pub subject: String,
+    pub tenant_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub role: Role,
+    pub scopes: Vec<TokenScope>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked: bool,
+}
+
+// ── CI-specific token claims ─────────────────────────────────────
+
+/// Claims extracted from a GitLab CI OIDC JWT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitLabTokenClaims {
+    pub sub: String,
+    #[serde(default)]
+    pub iss: String,
+    #[serde(default)]
+    pub aud: Option<String>,
+    #[serde(default)]
+    pub exp: Option<i64>,
+    #[serde(default)]
+    pub iat: Option<i64>,
+    /// e.g. "group/project"
+    #[serde(default)]
+    pub project_path: String,
+    /// e.g. "group"
+    #[serde(default)]
+    pub namespace_path: String,
+    /// Pipeline source (push, web, schedule, etc.)
+    #[serde(default)]
+    pub pipeline_source: String,
+    /// Git ref (branch or tag)
+    #[serde(default, rename = "ref")]
+    pub git_ref: String,
+    /// The user that triggered the pipeline.
+    #[serde(default)]
+    pub user_login: String,
+    /// The pipeline ID.
+    #[serde(default)]
+    pub pipeline_id: String,
+    /// The job ID.
+    #[serde(default)]
+    pub job_id: String,
+}
+
+/// Claims extracted from a Kubernetes service account OIDC JWT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KubernetesTokenClaims {
+    pub sub: String,
+    #[serde(default)]
+    pub iss: String,
+    #[serde(default)]
+    pub aud: Option<String>,
+    #[serde(default)]
+    pub exp: Option<i64>,
+    #[serde(default)]
+    pub iat: Option<i64>,
+    /// Kubernetes namespace.
+    #[serde(default)]
+    pub namespace: String,
+    /// Service account name.
+    #[serde(default)]
+    pub serviceaccount: String,
+    /// Pod name.
+    #[serde(default)]
+    pub pod: String,
+}
+
+/// Generic CI token exchange request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiTokenRequest {
+    /// The CI OIDC JWT.
+    pub token: String,
+    /// Provider name (e.g., "github", "gitlab", "k8s", or custom name).
+    pub provider: String,
+    /// Requested NebulaCR scope.
+    pub scope: CiTokenScope,
+}
+
+/// Scope for CI token exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiTokenScope {
+    pub tenant: String,
+    pub project: String,
+    pub actions: Vec<Action>,
+}
+
+/// Credential exchange request for Docker credential helpers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialExchangeRequest {
+    /// OIDC session token or refresh token.
+    pub session_token: String,
+    /// Registry host to generate credentials for.
+    pub registry_host: Option<String>,
+}
+
+/// Credential exchange response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialExchangeResponse {
+    pub username: String,
+    pub password: String,
+    pub expires_at: DateTime<Utc>,
 }

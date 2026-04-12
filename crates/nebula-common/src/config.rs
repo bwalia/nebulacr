@@ -17,6 +17,9 @@ pub struct RegistryConfig {
     pub mirror: Option<MirrorConfig>,
     pub multi_region: Option<MultiRegionConfig>,
     pub webhooks: Option<WebhookConfig>,
+    /// Enterprise authentication and identity configuration.
+    #[serde(default)]
+    pub enterprise: EnterpriseAuthConfig,
 }
 
 // ── Resilience configuration ─────────────────────────────────────
@@ -342,6 +345,39 @@ impl Default for WebhookConfig {
     }
 }
 
+// ── Enterprise Auth configuration ───────────────────────────────
+
+/// Enterprise identity configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnterpriseAuthConfig {
+    /// Group-to-role mappings for OIDC/AD groups.
+    pub group_role_mappings: Vec<crate::auth::GroupRoleMapping>,
+    /// CI OIDC providers (GitLab, k8s, etc.).
+    pub ci_providers: Vec<crate::auth::CiOidcProvider>,
+    /// Whether to auto-provision users on first OIDC login.
+    pub auto_provision_users: bool,
+    /// Default role for auto-provisioned users with no group mapping.
+    pub default_role: String,
+    /// Refresh token TTL in seconds (default: 24 hours).
+    pub refresh_token_ttl_seconds: u64,
+    /// Whether robot accounts are enabled.
+    pub robot_accounts_enabled: bool,
+}
+
+impl Default for EnterpriseAuthConfig {
+    fn default() -> Self {
+        Self {
+            group_role_mappings: vec![],
+            ci_providers: vec![],
+            auto_provision_users: true,
+            default_role: "reader".to_string(),
+            refresh_token_ttl_seconds: 86400,
+            robot_accounts_enabled: true,
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -442,6 +478,7 @@ impl Default for RegistryConfig {
             mirror: None,
             multi_region: None,
             webhooks: None,
+            enterprise: EnterpriseAuthConfig::default(),
         }
     }
 }

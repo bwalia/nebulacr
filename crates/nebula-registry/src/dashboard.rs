@@ -19,6 +19,7 @@ use axum::{
 use futures::TryStreamExt;
 use object_store::{ObjectStore, path::Path as StorePath};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use sysinfo::{Disks, System};
 
 use crate::audit::{AuditStats, RegistryAuditLog};
@@ -31,6 +32,8 @@ pub struct DashboardState {
     pub store: Arc<dyn ObjectStore>,
     pub start_time: std::time::Instant,
     pub failover_manager: Option<Arc<FailoverManager>>,
+    /// Optional auth service URL for proxying identity/access management requests.
+    pub auth_service_url: Option<String>,
 }
 
 // ── JSON API ────────────────────────────────────────────────────────────
@@ -367,6 +370,53 @@ pub async fn api_images(
     Json(ImageListResponse { images, total })
 }
 
+// ── Identity & Access Management API (proxies to auth service) ─────────
+
+/// GET /api/users — Proxy to auth service /api/v1/users.
+pub async fn api_users(State(state): State<DashboardState>) -> impl IntoResponse {
+    proxy_to_auth(&state, "/api/v1/users").await
+}
+
+/// GET /api/groups — Proxy to auth service /api/v1/groups.
+pub async fn api_groups(State(state): State<DashboardState>) -> impl IntoResponse {
+    proxy_to_auth(&state, "/api/v1/groups").await
+}
+
+/// GET /api/robot-accounts — Proxy to auth service /api/v1/robot-accounts.
+pub async fn api_robot_accounts(State(state): State<DashboardState>) -> impl IntoResponse {
+    proxy_to_auth(&state, "/api/v1/robot-accounts").await
+}
+
+/// Proxy a GET request to the auth service.
+async fn proxy_to_auth(state: &DashboardState, path: &str) -> Response {
+    let Some(ref auth_url) = state.auth_service_url else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "auth service URL not configured"})),
+        )
+            .into_response();
+    };
+
+    let url = format!("{}{}", auth_url.trim_end_matches('/'), path);
+    match reqwest::get(&url).await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let body = resp.text().await.unwrap_or_default();
+            (
+                status,
+                [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("failed to proxy to auth service: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// Match a repository name against a search term supporting wildcards (*).
 fn matches_search(repo: &str, search: &str) -> bool {
     let repo_lower = repo.to_lowercase();
@@ -665,6 +715,23 @@ tr:hover {{ background: var(--surface2); }}
 
     <div class="section">
         <div class="section-header">
+            <h2>Identity &amp; Access</h2>
+            <div class="controls">
+                <button class="refresh-btn" onclick="loadIAM()" style="font-size:12px;">Refresh</button>
+            </div>
+        </div>
+        <div style="padding:10px 16px;">
+            <div class="controls" style="margin-bottom:12px;">
+                <button class="refresh-btn" onclick="showIAMTab('users')" id="tab-users" style="font-size:12px;">Users</button>
+                <button class="refresh-btn" onclick="showIAMTab('groups')" id="tab-groups" style="font-size:12px;opacity:0.6;">Groups</button>
+                <button class="refresh-btn" onclick="showIAMTab('robots')" id="tab-robots" style="font-size:12px;opacity:0.6;">Service Accounts</button>
+            </div>
+            <div id="iam-content"><div class="empty">Loading identity data...</div></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-header">
             <h2>Recent Activity &amp; Audit Log</h2>
             <div class="controls">
                 <select id="filter-type" onchange="filterTable()">
@@ -712,7 +779,18 @@ tr:hover {{ background: var(--surface2); }}
                 <tr><td><code>/api/images?q=search&amp;limit=200</code></td><td>Image browser with wildcard search</td></tr>
                 <tr><td><code>/api/activity?limit=50&amp;type=manifest.push</code></td><td>Recent activity feed (filterable)</td></tr>
                 <tr><td><code>/api/audit?limit=100&amp;subject=user</code></td><td>Full audit log (filterable)</td></tr>
+                <tr><td><code>/api/users</code></td><td>Provisioned users (proxied from auth service)</td></tr>
+                <tr><td><code>/api/groups</code></td><td>Group role mappings and active memberships</td></tr>
+                <tr><td><code>/api/robot-accounts</code></td><td>Robot/service accounts list</td></tr>
                 <tr><td><code>/dashboard</code></td><td>This dashboard</td></tr>
+                <tr><td colspan="2" style="color:var(--text-muted);font-size:11px;padding-top:12px;"><strong>Auth Service Endpoints</strong></td></tr>
+                <tr><td><code>POST /auth/credential-exchange</code></td><td>Exchange OIDC session for short-lived docker login credentials (for credential helpers)</td></tr>
+                <tr><td><code>GET /auth/oidc/login</code></td><td>OIDC authorization code flow login redirect</td></tr>
+                <tr><td><code>POST /auth/ci/token</code></td><td>Generic CI OIDC token exchange (GitHub, GitLab, k8s)</td></tr>
+                <tr><td><code>POST /auth/token/refresh</code></td><td>Exchange refresh token for new access token</td></tr>
+                <tr><td><code>POST /auth/token/revoke</code></td><td>Revoke a token by JTI</td></tr>
+                <tr><td><code>POST /api/v1/robot-accounts</code></td><td>Create robot/service account</td></tr>
+                <tr><td><code>POST /auth/audit/export</code></td><td>Export all audit events as JSONL</td></tr>
             </tbody>
         </table>
     </div>
@@ -773,6 +851,84 @@ async function doSearch() {{
 }}
 // Load images on page load
 doSearch();
+
+// Identity & Access Management tabs
+let currentIAMTab = 'users';
+let iamData = {{}};
+
+function showIAMTab(tab) {{
+    currentIAMTab = tab;
+    document.querySelectorAll('[id^=tab-]').forEach(b => b.style.opacity = '0.6');
+    const btn = document.getElementById('tab-' + tab);
+    if (btn) btn.style.opacity = '1';
+    renderIAMTab();
+}}
+
+async function loadIAM() {{
+    try {{
+        const [usersResp, groupsResp, robotsResp] = await Promise.all([
+            fetch('/api/users').then(r => r.json()).catch(() => []),
+            fetch('/api/groups').then(r => r.json()).catch(() => ({{mappings:[], unmapped_groups:[]}})),
+            fetch('/api/robot-accounts').then(r => r.json()).catch(() => []),
+        ]);
+        iamData.users = usersResp;
+        iamData.groups = groupsResp;
+        iamData.robots = robotsResp;
+        renderIAMTab();
+    }} catch(e) {{
+        document.getElementById('iam-content').innerHTML = '<div class="empty">Failed to load identity data.</div>';
+    }}
+}}
+
+function renderIAMTab() {{
+    const container = document.getElementById('iam-content');
+    if (currentIAMTab === 'users') {{
+        const users = iamData.users || [];
+        if (users.length === 0) {{
+            container.innerHTML = '<div class="empty">No provisioned users yet. Users appear after OIDC login.</div>';
+            return;
+        }}
+        let html = '<table><thead><tr><th>Subject</th><th>Email</th><th>Groups</th><th>Auth Method</th><th>Last Login</th><th>Logins</th></tr></thead><tbody>';
+        for (const u of users) {{
+            const groups = (u.groups || []).map(g => '<span class="badge badge-push">' + g + '</span>').join(' ');
+            html += '<tr><td>' + u.subject + '</td><td>' + (u.email || '-') + '</td><td>' + (groups || '-') + '</td><td>' + u.auth_method + '</td><td>' + (u.last_login || '-') + '</td><td>' + u.login_count + '</td></tr>';
+        }}
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }} else if (currentIAMTab === 'groups') {{
+        const data = iamData.groups || {{}};
+        const mappings = data.mappings || [];
+        const unmapped = data.unmapped_groups || [];
+        if (mappings.length === 0 && unmapped.length === 0) {{
+            container.innerHTML = '<div class="empty">No group mappings configured. Add group_role_mappings to enterprise config.</div>';
+            return;
+        }}
+        let html = '<table><thead><tr><th>Group</th><th>Role</th><th>Tenant</th><th>Project</th><th>Members</th></tr></thead><tbody>';
+        for (const m of mappings) {{
+            html += '<tr><td>' + m.group + '</td><td><span class="badge badge-push">' + (m.role || 'N/A') + '</span></td><td>' + (m.tenant || '-') + '</td><td>' + (m.project || '*') + '</td><td>' + m.member_count + '</td></tr>';
+        }}
+        for (const m of unmapped) {{
+            html += '<tr><td>' + m.group + '</td><td><span class="badge badge-other">unmapped</span></td><td>-</td><td>-</td><td>' + m.member_count + '</td></tr>';
+        }}
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }} else if (currentIAMTab === 'robots') {{
+        const robots = iamData.robots || [];
+        if (robots.length === 0) {{
+            container.innerHTML = '<div class="empty">No service accounts. Create via POST /api/v1/robot-accounts.</div>';
+            return;
+        }}
+        let html = '<table><thead><tr><th>Name</th><th>Tenant</th><th>Role</th><th>Last Used</th><th>Status</th><th>Expires</th></tr></thead><tbody>';
+        for (const r of robots) {{
+            const status = r.enabled ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Disabled</span>';
+            html += '<tr><td>' + r.name + '</td><td>' + r.tenant + '</td><td>' + JSON.stringify(r.role) + '</td><td>' + (r.last_used || 'Never') + '</td><td>' + status + '</td><td>' + (r.expires_at || 'Never') + '</td></tr>';
+        }}
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }}
+}}
+
+loadIAM();
 
 function filterTable() {{
     const typeFilter = document.getElementById('filter-type').value.toLowerCase();

@@ -2357,11 +2357,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Dashboard state (shared with dashboard handlers)
+    let auth_service_url = format!(
+        "http://{}",
+        state.config.server.auth_listen_addr
+    );
     let dashboard_state = dashboard::DashboardState {
         audit_log: audit_log.clone(),
         store: state.store.clone(),
         start_time,
         failover_manager,
+        auth_service_url: Some(auth_service_url),
     };
 
     // Build the router
@@ -2381,6 +2386,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/system", get(dashboard::api_system))
         .route("/api/ha-status", get(dashboard::api_ha_status))
         .route("/api/images", get(dashboard::api_images))
+        // Identity & Access Management (proxy to auth service)
+        .route("/api/users", get(dashboard::api_users))
+        .route("/api/groups", get(dashboard::api_groups))
+        .route("/api/robot-accounts", get(dashboard::api_robot_accounts))
         .with_state(dashboard_state);
 
     // Authenticated registry routes
