@@ -363,6 +363,38 @@ pub struct EnterpriseAuthConfig {
     pub refresh_token_ttl_seconds: u64,
     /// Whether robot accounts are enabled.
     pub robot_accounts_enabled: bool,
+    /// SCIM 2.0 provisioning configuration.
+    #[serde(default)]
+    pub scim: ScimConfig,
+}
+
+/// SCIM 2.0 provisioning configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScimConfig {
+    /// Whether SCIM provisioning is enabled.
+    pub enabled: bool,
+    /// Bearer token for SCIM API authentication.
+    /// IdPs (Azure AD, Okta) use this to authenticate SCIM requests.
+    pub bearer_token: Option<String>,
+    /// Default tenant for SCIM-provisioned users.
+    pub default_tenant: String,
+    /// Default role for SCIM-provisioned users (before group mapping).
+    pub default_role: String,
+    /// Whether to automatically deactivate registry access when SCIM sets active=false.
+    pub auto_deactivate: bool,
+}
+
+impl Default for ScimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bearer_token: None,
+            default_tenant: "_".to_string(),
+            default_role: "reader".to_string(),
+            auto_deactivate: true,
+        }
+    }
 }
 
 impl Default for EnterpriseAuthConfig {
@@ -374,6 +406,7 @@ impl Default for EnterpriseAuthConfig {
             default_role: "reader".to_string(),
             refresh_token_ttl_seconds: 86400,
             robot_accounts_enabled: true,
+            scim: ScimConfig::default(),
         }
     }
 }

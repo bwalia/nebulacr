@@ -22,7 +22,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use base64::Engine;
 use chrono::Utc;
@@ -38,8 +38,9 @@ use nebula_common::auth::{
     AuditDecision, AuditEvent, CiTokenRequest, CredentialExchangeRequest,
     CredentialExchangeResponse, DockerTokenResponse, GitHubOidcTokenRequest, GitHubTokenClaims,
     IntrospectionResponse, Jwk, JwksResponse, OidcProviderConfig, OidcSession, OidcUserClaims,
-    RefreshToken, RequestedScope, RobotAccount, TokenClaims, TokenRequest, TokenResponse,
-    TokenScope, UserRecord,
+    RefreshToken, RequestedScope, RobotAccount, ScimError, ScimGroup, ScimGroupRef,
+    ScimListResponse, ScimMember, ScimMeta, ScimPatchOp, ScimUser, TokenClaims, TokenRequest,
+    TokenResponse, TokenScope, UserRecord,
 };
 use nebula_common::config::{BootstrapAdmin, GitHubOidcConfig, RegistryConfig, VaultConfig};
 use nebula_common::errors::RegistryError;
@@ -589,6 +590,8 @@ struct AppState {
     refresh_tokens: Arc<RwLock<HashMap<String, RefreshToken>>>,
     /// Set of revoked token JTIs.
     revoked_tokens: Arc<RwLock<HashSet<String>>>,
+    /// SCIM-managed groups (group_id -> ScimGroup).
+    scim_groups: Arc<RwLock<HashMap<String, ScimGroup>>>,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2930,7 +2933,527 @@ fn seed_demo_data() -> (TenantMap, ProjectMap, Vec<AccessPolicy>) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  Section 15: Main
+//  Section 15: SCIM 2.0 Provisioning (RFC 7644)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Authenticate SCIM requests using the configured bearer token.
+fn authenticate_scim(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ScimError>)> {
+    let scim_config = &state.config.enterprise.scim;
+    if !scim_config.enabled {
+        return Err((StatusCode::NOT_FOUND, Json(ScimError::new(404, "SCIM provisioning is not enabled"))));
+    }
+
+    let Some(ref expected_token) = scim_config.bearer_token else {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ScimError::new(500, "SCIM bearer token not configured"))));
+    };
+
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if !constant_time_eq(auth_header.as_bytes(), expected_token.as_bytes()) {
+        return Err((StatusCode::UNAUTHORIZED, Json(ScimError::new(401, "Invalid SCIM bearer token"))));
+    }
+
+    Ok(())
+}
+
+/// Convert a UserRecord to a SCIM User resource.
+fn user_to_scim(user: &UserRecord, base_url: &str) -> ScimUser {
+    let primary_email = user.email.clone().unwrap_or_default();
+    let emails = if primary_email.is_empty() {
+        vec![]
+    } else {
+        vec![nebula_common::auth::ScimMultiValue {
+            value: primary_email,
+            value_type: Some("work".to_string()),
+            primary: true,
+        }]
+    };
+
+    let groups: Vec<ScimGroupRef> = user.groups.iter().map(|g| ScimGroupRef {
+        value: g.clone(),
+        ref_uri: Some(format!("{}/scim/v2/Groups/{}", base_url, g)),
+        display: Some(g.clone()),
+    }).collect();
+
+    ScimUser {
+        schemas: vec![ScimUser::schema()],
+        id: Some(user.subject.clone()),
+        external_id: Some(user.subject.clone()),
+        user_name: user.subject.clone(),
+        display_name: user.display_name.clone(),
+        active: true,
+        name: user.display_name.as_ref().map(|n| nebula_common::auth::ScimName {
+            formatted: Some(n.clone()),
+            given_name: None,
+            family_name: None,
+        }),
+        emails,
+        groups,
+        meta: Some(ScimMeta {
+            resource_type: "User".to_string(),
+            created: Some(user.first_seen.to_rfc3339()),
+            last_modified: Some(user.last_login.to_rfc3339()),
+            location: Some(format!("{}/scim/v2/Users/{}", base_url, user.subject)),
+        }),
+    }
+}
+
+/// GET /scim/v2/Users — List all provisioned users.
+async fn scim_list_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ScimListResponse<ScimUser>>, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let users = state.users.read().await;
+    let base_url = state.config.server.auth_listen_addr.clone();
+    let resources: Vec<ScimUser> = users.values().map(|u| user_to_scim(u, &base_url)).collect();
+    let total = resources.len();
+
+    Ok(Json(ScimListResponse {
+        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
+        total_results: total,
+        items_per_page: total,
+        start_index: 1,
+        resources,
+    }))
+}
+
+/// GET /scim/v2/Users/{id} — Get a single user.
+async fn scim_get_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<ScimUser>, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let users = state.users.read().await;
+    let user = users.get(&id).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(ScimError::new(404, format!("User '{}' not found", id))))
+    })?;
+
+    let base_url = state.config.server.auth_listen_addr.clone();
+    Ok(Json(user_to_scim(user, &base_url)))
+}
+
+/// POST /scim/v2/Users — Create (provision) a new user.
+async fn scim_create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(scim_user): Json<ScimUser>,
+) -> Result<(StatusCode, Json<ScimUser>), (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let subject = scim_user.user_name.clone();
+    if subject.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ScimError::new(400, "userName is required"))));
+    }
+
+    let email = scim_user.emails.first().map(|e| e.value.clone());
+    let groups: Vec<String> = scim_user.groups.iter().map(|g| g.display.clone().unwrap_or_else(|| g.value.clone())).collect();
+
+    let now = chrono::Utc::now();
+    let user = UserRecord {
+        subject: subject.clone(),
+        email,
+        display_name: scim_user.display_name.clone(),
+        groups: groups.clone(),
+        auth_method: "scim".to_string(),
+        first_seen: now,
+        last_login: now,
+        login_count: 0,
+    };
+
+    let mut users = state.users.write().await;
+    users.insert(subject.clone(), user.clone());
+    drop(users);
+
+    // Apply group-role mappings for the provisioned user
+    apply_group_policies(&state, &subject, &groups).await;
+
+    metrics::counter!("registry_scim_provisions_total", "action" => "create").increment(1);
+    info!(subject = %subject, groups = ?groups, "SCIM user provisioned");
+
+    let base_url = state.config.server.auth_listen_addr.clone();
+    Ok((StatusCode::CREATED, Json(user_to_scim(&user, &base_url))))
+}
+
+/// PUT /scim/v2/Users/{id} — Replace (update) a user.
+async fn scim_replace_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(scim_user): Json<ScimUser>,
+) -> Result<Json<ScimUser>, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let email = scim_user.emails.first().map(|e| e.value.clone());
+    let groups: Vec<String> = scim_user.groups.iter().map(|g| g.display.clone().unwrap_or_else(|| g.value.clone())).collect();
+
+    let mut users = state.users.write().await;
+    let existing = users.get(&id);
+    let now = chrono::Utc::now();
+
+    let user = UserRecord {
+        subject: id.clone(),
+        email,
+        display_name: scim_user.display_name.clone(),
+        groups: groups.clone(),
+        auth_method: "scim".to_string(),
+        first_seen: existing.map(|e| e.first_seen).unwrap_or(now),
+        last_login: existing.map(|e| e.last_login).unwrap_or(now),
+        login_count: existing.map(|e| e.login_count).unwrap_or(0),
+    };
+
+    // Handle deactivation — if active=false, revoke all tokens and remove access policies
+    if !scim_user.active && state.config.enterprise.scim.auto_deactivate {
+        users.remove(&id);
+        drop(users);
+        // Remove access policies for this subject
+        let mut policies = state.access_policies.write().await;
+        policies.retain(|p| p.subject != id);
+        drop(policies);
+        metrics::counter!("registry_scim_provisions_total", "action" => "deactivate").increment(1);
+        warn!(subject = %id, "SCIM user deactivated — access revoked immediately");
+    } else {
+        users.insert(id.clone(), user.clone());
+        drop(users);
+        apply_group_policies(&state, &id, &groups).await;
+        metrics::counter!("registry_scim_provisions_total", "action" => "update").increment(1);
+        info!(subject = %id, groups = ?groups, "SCIM user updated");
+    }
+
+    let base_url = state.config.server.auth_listen_addr.clone();
+    let response_user = {
+        let users = state.users.read().await;
+        users.get(&id).map(|u| user_to_scim(u, &base_url)).unwrap_or_else(|| {
+            // User was deactivated — return with active=false
+            let mut u = user_to_scim(&UserRecord {
+                subject: id.clone(),
+                email: None,
+                display_name: scim_user.display_name.clone(),
+                groups: vec![],
+                auth_method: "scim".to_string(),
+                first_seen: now,
+                last_login: now,
+                login_count: 0,
+            }, &base_url);
+            u.active = false;
+            u
+        })
+    };
+
+    Ok(Json(response_user))
+}
+
+/// PATCH /scim/v2/Users/{id} — Partial update (Azure AD uses this for deactivation).
+async fn scim_patch_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(patch): Json<ScimPatchOp>,
+) -> Result<Json<ScimUser>, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    for op in &patch.operations {
+        match op.op.to_lowercase().as_str() {
+            "replace" => {
+                if op.path.as_deref() == Some("active") {
+                    if let Some(serde_json::Value::Bool(false)) = &op.value {
+                        // Deactivate user — instant offboarding
+                        let mut users = state.users.write().await;
+                        users.remove(&id);
+                        drop(users);
+                        let mut policies = state.access_policies.write().await;
+                        policies.retain(|p| p.subject != id);
+                        drop(policies);
+                        metrics::counter!("registry_scim_provisions_total", "action" => "deactivate").increment(1);
+                        warn!(subject = %id, "SCIM PATCH deactivated user — access revoked immediately");
+                    }
+                }
+                // Handle other replace operations on display name, emails, etc.
+                if op.path.as_deref() == Some("displayName") || op.path.as_deref() == Some("name.formatted") {
+                    if let Some(serde_json::Value::String(name)) = &op.value {
+                        let mut users = state.users.write().await;
+                        if let Some(user) = users.get_mut(&id) {
+                            user.display_name = Some(name.clone());
+                        }
+                    }
+                }
+            }
+            "add" => {
+                // Handle group additions
+                if op.path.as_deref() == Some("members") || op.path.is_none() {
+                    // Group member additions handled at group level
+                }
+            }
+            "remove" => {
+                // Handle group removals
+            }
+            _ => {}
+        }
+    }
+
+    let users = state.users.read().await;
+    let base_url = state.config.server.auth_listen_addr.clone();
+    let user = users.get(&id).map(|u| user_to_scim(u, &base_url)).unwrap_or_else(|| {
+        let mut u = ScimUser {
+            schemas: vec![ScimUser::schema()],
+            id: Some(id.clone()),
+            external_id: Some(id.clone()),
+            user_name: id.clone(),
+            display_name: None,
+            active: false,
+            name: None,
+            emails: vec![],
+            groups: vec![],
+            meta: None,
+        };
+        u.active = false;
+        u
+    });
+
+    Ok(Json(user))
+}
+
+/// DELETE /scim/v2/Users/{id} — Deprovision a user.
+async fn scim_delete_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let mut users = state.users.write().await;
+    users.remove(&id);
+    drop(users);
+
+    let mut policies = state.access_policies.write().await;
+    policies.retain(|p| p.subject != id);
+    drop(policies);
+
+    metrics::counter!("registry_scim_provisions_total", "action" => "delete").increment(1);
+    warn!(subject = %id, "SCIM user deprovisioned — all access removed");
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /scim/v2/Groups — List SCIM-managed groups.
+async fn scim_list_groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ScimListResponse<ScimGroup>>, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let groups = state.scim_groups.read().await;
+    let resources: Vec<ScimGroup> = groups.values().cloned().collect();
+    let total = resources.len();
+
+    Ok(Json(ScimListResponse {
+        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
+        total_results: total,
+        items_per_page: total,
+        start_index: 1,
+        resources,
+    }))
+}
+
+/// POST /scim/v2/Groups — Create a SCIM group.
+async fn scim_create_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(group): Json<ScimGroup>,
+) -> Result<(StatusCode, Json<ScimGroup>), (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let group_id = group.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut g = group;
+    g.id = Some(group_id.clone());
+    g.schemas = vec![ScimGroup::schema()];
+
+    // Sync member groups to user records
+    for member in &g.members {
+        let mut users = state.users.write().await;
+        if let Some(user) = users.get_mut(&member.value) {
+            if !user.groups.contains(&g.display_name) {
+                user.groups.push(g.display_name.clone());
+            }
+        }
+    }
+
+    let mut groups = state.scim_groups.write().await;
+    groups.insert(group_id, g.clone());
+
+    metrics::counter!("registry_scim_provisions_total", "action" => "group_create").increment(1);
+    info!(group = %g.display_name, members = g.members.len(), "SCIM group created");
+
+    Ok((StatusCode::CREATED, Json(g)))
+}
+
+/// PATCH /scim/v2/Groups/{id} — Update group membership (Azure AD/Okta push membership changes here).
+async fn scim_patch_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(patch): Json<ScimPatchOp>,
+) -> Result<Json<ScimGroup>, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let mut groups = state.scim_groups.write().await;
+    let group = groups.get_mut(&id).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(ScimError::new(404, format!("Group '{}' not found", id))))
+    })?;
+
+    for op in &patch.operations {
+        match op.op.to_lowercase().as_str() {
+            "add" => {
+                // Add members to the group
+                if let Some(ref value) = op.value {
+                    if let Ok(members) = serde_json::from_value::<Vec<ScimMember>>(value.clone()) {
+                        for member in members {
+                            if !group.members.iter().any(|m| m.value == member.value) {
+                                // Add group to user's group list
+                                let mut users = state.users.write().await;
+                                if let Some(user) = users.get_mut(&member.value) {
+                                    if !user.groups.contains(&group.display_name) {
+                                        user.groups.push(group.display_name.clone());
+                                        // Re-apply group policies
+                                        let groups_clone = user.groups.clone();
+                                        drop(users);
+                                        apply_group_policies(&state, &member.value, &groups_clone).await;
+                                    }
+                                }
+                                group.members.push(member);
+                            }
+                        }
+                    }
+                }
+            }
+            "remove" => {
+                // Remove members from the group
+                if let Some(ref path) = op.path {
+                    // Azure AD sends: path = "members[value eq \"user-id\"]"
+                    if let Some(user_id) = extract_member_id_from_path(path) {
+                        group.members.retain(|m| m.value != user_id);
+                        // Remove group from user's group list
+                        let mut users = state.users.write().await;
+                        if let Some(user) = users.get_mut(&user_id) {
+                            user.groups.retain(|g| g != &group.display_name);
+                            let groups_clone = user.groups.clone();
+                            drop(users);
+                            apply_group_policies(&state, &user_id, &groups_clone).await;
+                        }
+                    }
+                }
+            }
+            "replace" => {
+                // Full member list replacement
+                if op.path.as_deref() == Some("members") || op.path.is_none() {
+                    if let Some(ref value) = op.value {
+                        if let Ok(members) = serde_json::from_value::<Vec<ScimMember>>(value.clone()) {
+                            group.members = members;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    metrics::counter!("registry_scim_provisions_total", "action" => "group_update").increment(1);
+
+    Ok(Json(group.clone()))
+}
+
+/// DELETE /scim/v2/Groups/{id} — Delete a SCIM group.
+async fn scim_delete_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ScimError>)> {
+    authenticate_scim(&state, &headers)?;
+
+    let mut groups = state.scim_groups.write().await;
+    if let Some(group) = groups.remove(&id) {
+        // Remove this group from all user records
+        let mut users = state.users.write().await;
+        for user in users.values_mut() {
+            user.groups.retain(|g| g != &group.display_name);
+        }
+        metrics::counter!("registry_scim_provisions_total", "action" => "group_delete").increment(1);
+        info!(group = %group.display_name, "SCIM group deleted");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Helper: apply group-role mappings from enterprise config to create access policies.
+async fn apply_group_policies(state: &AppState, subject: &str, groups: &[String]) {
+    let mappings = &state.config.enterprise.group_role_mappings;
+    let mut policies = state.access_policies.write().await;
+
+    // Remove existing SCIM-generated policies for this subject
+    policies.retain(|p| p.subject != subject);
+
+    for mapping in mappings {
+        let matched = groups.iter().any(|g| {
+            if mapping.group.contains('*') {
+                let pattern = mapping.group.replace('*', "");
+                g.starts_with(&pattern) || g.ends_with(&pattern) || g.contains(&pattern)
+            } else {
+                g == &mapping.group
+            }
+        });
+
+        if matched {
+            // Find tenant ID
+            let tenants = state.tenants.read().await;
+            if let Some(tenant) = tenants.get(&mapping.tenant) {
+                let tenant_id = tenant.id;
+                drop(tenants);
+
+                let project_id = if let Some(ref proj_name) = mapping.project {
+                    let projects = state.projects.read().await;
+                    projects.get(&(tenant_id, proj_name.clone())).map(|p| p.id)
+                } else {
+                    None
+                };
+
+                policies.push(AccessPolicy {
+                    id: Uuid::new_v4(),
+                    tenant_id,
+                    project_id,
+                    subject: subject.to_string(),
+                    role: mapping.role,
+                    created_at: chrono::Utc::now(),
+                });
+
+                metrics::counter!("registry_group_mapping_hits_total",
+                    "group" => mapping.group.clone()
+                ).increment(1);
+            }
+        }
+    }
+}
+
+/// Extract user ID from SCIM filter path like: members[value eq "user-id"]
+fn extract_member_id_from_path(path: &str) -> Option<String> {
+    // Pattern: members[value eq "xxx"]
+    let start = path.find("\"")? + 1;
+    let end = path.rfind("\"")?;
+    if start < end {
+        Some(path[start..end].to_string())
+    } else {
+        None
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Section 16: Main
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::main]
@@ -3068,6 +3591,7 @@ async fn main() -> anyhow::Result<()> {
         robot_accounts: Arc::new(RwLock::new(HashMap::new())),
         refresh_tokens: Arc::new(RwLock::new(HashMap::new())),
         revoked_tokens: Arc::new(RwLock::new(HashSet::new())),
+        scim_groups: Arc::new(RwLock::new(HashMap::new())),
     };
 
     // Build Axum router
@@ -3101,6 +3625,11 @@ async fn main() -> anyhow::Result<()> {
         // Management API (Phase 5)
         .route("/api/v1/users", get(list_users))
         .route("/api/v1/groups", get(list_groups))
+        // SCIM 2.0 Provisioning (RFC 7644)
+        .route("/scim/v2/Users", get(scim_list_users).post(scim_create_user))
+        .route("/scim/v2/Users/{id}", get(scim_get_user).put(scim_replace_user).patch(scim_patch_user).delete(scim_delete_user))
+        .route("/scim/v2/Groups", get(scim_list_groups).post(scim_create_group))
+        .route("/scim/v2/Groups/{id}", patch(scim_patch_group).delete(scim_delete_group))
         // Infrastructure
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))

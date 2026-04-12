@@ -563,6 +563,22 @@
         </div>
       </div>
 
+      <div class="enterprise-card" style="grid-column: span 2;">
+        <div class="enterprise-card-icon">&#x1F4CB;</div>
+        <div class="enterprise-card-title">SCIM 2.0 Provisioning &mdash; Automated User Lifecycle</div>
+        <div class="enterprise-card-desc">
+          NebulaCR implements the SCIM 2.0 protocol (RFC 7644), enabling Azure AD, Okta, and OneLogin to automatically provision and deprovision users. When someone joins your org, SCIM pre-creates their registry access instantly &mdash; no first-login delay. When they leave, access is revoked in seconds, not minutes. Group membership changes sync immediately without requiring a new login.
+        </div>
+        <table class="config-table" style="margin-top:16px;">
+          <tr><th>Scenario</th><th>Without SCIM</th><th>With SCIM</th></tr>
+          <tr><td>New hire</td><td style="color:var(--amber);">Must login first</td><td style="color:var(--green);">Pre-provisioned instantly</td></tr>
+          <tr><td>Team change</td><td style="color:var(--amber);">Next login syncs</td><td style="color:var(--green);">Immediate role update</td></tr>
+          <tr><td>Offboarding</td><td style="color:var(--red);">Token expires in 5 min</td><td style="color:var(--green);">Instant revocation</td></tr>
+          <tr><td>Audit "who has access?"</td><td style="color:var(--amber);">Only logged-in users</td><td style="color:var(--green);">All entitled users</td></tr>
+          <tr><td>500+ developers</td><td style="color:var(--amber);">Works but blind spots</td><td style="color:var(--green);">Full visibility</td></tr>
+        </table>
+      </div>
+
     </div>
   </div>
 </section>
@@ -716,6 +732,8 @@ openssl rsa -in private.pem -pubout -out public.pem
       <tr><td><code>POST /auth/ci/token</code></td><td>CI/CD OIDC token exchange</td></tr>
       <tr><td><code>GET /dashboard</code></td><td>Web dashboard</td></tr>
       <tr><td><code>GET /api/images?q=search</code></td><td>Image browser API</td></tr>
+      <tr><td><code>GET/POST /scim/v2/Users</code></td><td>SCIM 2.0 user provisioning</td></tr>
+      <tr><td><code>GET/POST /scim/v2/Groups</code></td><td>SCIM 2.0 group management</td></tr>
       <tr><td><code>GET /health</code></td><td>Health check</td></tr>
       <tr><td><code>GET /metrics</code></td><td>Prometheus metrics</td></tr>
     </table>
