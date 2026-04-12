@@ -291,19 +291,25 @@ async fn request_id_middleware(mut request: Request, next: Next) -> Response {
     // Override Www-Authenticate realm to use the request's own host/scheme.
     // The registry proxies /auth/token to the auth service, so Docker always
     // follows the realm back to the same host it connected to.
+    // Skip if the response already has a Basic auth challenge (e.g., dashboard auth).
     if response.status() == StatusCode::UNAUTHORIZED {
-        let service_name = std::env::var("NEBULACR_AUTH_SERVICE")
-            .unwrap_or_else(|_| "nebulacr-registry".to_string());
-        // Build the realm URL: prefer NEBULACR_EXTERNAL_URL env var for explicit
-        // control, otherwise construct from request headers.
-        let realm = if let Ok(ext_url) = std::env::var("NEBULACR_EXTERNAL_URL") {
-            format!("{}/auth/token", ext_url.trim_end_matches('/'))
-        } else {
-            format!("{scheme}://{host}/auth/token")
-        };
-        let header_val = format!("Bearer realm=\"{realm}\",service=\"{service_name}\"");
-        if let Ok(val) = HeaderValue::from_str(&header_val) {
-            response.headers_mut().insert("www-authenticate", val);
+        let existing_auth = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !existing_auth.starts_with("Basic ") {
+            let service_name = std::env::var("NEBULACR_AUTH_SERVICE")
+                .unwrap_or_else(|_| "nebulacr-registry".to_string());
+            let realm = if let Ok(ext_url) = std::env::var("NEBULACR_EXTERNAL_URL") {
+                format!("{}/auth/token", ext_url.trim_end_matches('/'))
+            } else {
+                format!("{scheme}://{host}/auth/token")
+            };
+            let header_val = format!("Bearer realm=\"{realm}\",service=\"{service_name}\"");
+            if let Ok(val) = HeaderValue::from_str(&header_val) {
+                response.headers_mut().insert("www-authenticate", val);
+            }
         }
     }
     response
