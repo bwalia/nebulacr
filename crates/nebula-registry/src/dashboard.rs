@@ -252,6 +252,14 @@ pub struct ImageEntry {
     pub name: String,
     pub tags: Vec<String>,
     pub tag_count: usize,
+    /// Total size of all blobs in bytes.
+    pub total_size_bytes: u64,
+    /// Human-readable total size.
+    pub total_size: String,
+    /// Number of blob objects.
+    pub blob_count: usize,
+    /// Number of manifests.
+    pub manifest_count: usize,
 }
 
 #[derive(Serialize)]
@@ -342,6 +350,27 @@ pub async fn api_images(
 
                 let tag_count = tags.len();
 
+                // Calculate blob sizes
+                let blobs_path = StorePath::from(format!("{tenant}/{project}/{name}/blobs/"));
+                let blob_objects: Vec<_> = state
+                    .store
+                    .list(Some(&blobs_path))
+                    .try_collect()
+                    .await
+                    .unwrap_or_default();
+                let total_size_bytes: u64 = blob_objects.iter().map(|m| m.size as u64).sum();
+                let blob_count = blob_objects.len();
+
+                // Count manifests
+                let manifests_path = StorePath::from(format!("{tenant}/{project}/{name}/manifests/"));
+                let manifest_objects: Vec<_> = state
+                    .store
+                    .list(Some(&manifests_path))
+                    .try_collect()
+                    .await
+                    .unwrap_or_default();
+                let manifest_count = manifest_objects.len();
+
                 images.push(ImageEntry {
                     repository,
                     tenant: tenant.clone(),
@@ -349,6 +378,10 @@ pub async fn api_images(
                     name,
                     tags,
                     tag_count,
+                    total_size_bytes,
+                    total_size: format_bytes(total_size_bytes),
+                    blob_count,
+                    manifest_count,
                 });
 
                 if images.len() >= limit {
@@ -834,16 +867,20 @@ async function doSearch() {{
             container.innerHTML = '<div class="empty">No images found.</div>';
             return;
         }}
-        let html = `<table><thead><tr><th>Repository</th><th>Tags</th><th>Tag Count</th></tr></thead><tbody>`;
+        let totalSize = 0;
+        data.images.forEach(img => totalSize += img.total_size_bytes);
+        let html = `<table><thead><tr><th>Repository</th><th>Size</th><th>Blobs</th><th>Manifests</th><th>Tags</th><th>Tag Names</th></tr></thead><tbody>`;
         for (const img of data.images) {{
-            const tagBadges = img.tags.slice(0, 10).map(t =>
+            const tagBadges = img.tags.slice(0, 8).map(t =>
                 `<span class="badge badge-push">${{t}}</span>`
             ).join(' ');
-            const more = img.tags.length > 10 ? ` <span class="badge badge-other">+${{img.tags.length - 10}} more</span>` : '';
-            html += `<tr><td><strong>${{img.repository}}</strong></td><td>${{tagBadges}}${{more}}</td><td>${{img.tag_count}}</td></tr>`;
+            const more = img.tags.length > 8 ? ` <span class="badge badge-other">+${{img.tags.length - 8}} more</span>` : '';
+            const sizeClass = img.total_size_bytes > 1073741824 ? 'red' : img.total_size_bytes > 104857600 ? 'yellow' : 'green';
+            html += `<tr><td><strong>${{img.repository}}</strong><br><span style="font-size:11px;color:var(--text-muted)">${{img.tenant}} / ${{img.project}} / ${{img.name}}</span></td><td><span class="value ${{sizeClass}}" style="font-size:13px;font-weight:600">${{img.total_size}}</span></td><td>${{img.blob_count}}</td><td>${{img.manifest_count}}</td><td>${{img.tag_count}}</td><td>${{tagBadges}}${{more}}</td></tr>`;
         }}
         html += `</tbody></table>`;
-        html += `<div style="padding:10px 16px;color:var(--text-muted);font-size:12px;">Showing ${{data.total}} repositor${{data.total === 1 ? 'y' : 'ies'}}</div>`;
+        const totalFormatted = totalSize >= 1073741824 ? (totalSize/1073741824).toFixed(1)+' GB' : totalSize >= 1048576 ? (totalSize/1048576).toFixed(1)+' MB' : totalSize >= 1024 ? (totalSize/1024).toFixed(1)+' KB' : totalSize+' B';
+        html += `<div style="padding:10px 16px;color:var(--text-muted);font-size:12px;">Showing ${{data.total}} repositor${{data.total === 1 ? 'y' : 'ies'}} &middot; Total storage: ${{totalFormatted}}</div>`;
         container.innerHTML = html;
     }} catch(e) {{
         container.innerHTML = `<div class="empty">Error loading images: ${{e.message}}</div>`;
