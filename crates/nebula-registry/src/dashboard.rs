@@ -260,6 +260,8 @@ pub struct ImageEntry {
     pub blob_count: usize,
     /// Number of manifests.
     pub manifest_count: usize,
+    /// Last modified timestamp (most recent blob or manifest).
+    pub last_pushed: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -371,6 +373,14 @@ pub async fn api_images(
                     .unwrap_or_default();
                 let manifest_count = manifest_objects.len();
 
+                // Find the most recent modification time across blobs and manifests
+                let last_pushed = blob_objects
+                    .iter()
+                    .chain(manifest_objects.iter())
+                    .map(|m| m.last_modified)
+                    .max()
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+
                 images.push(ImageEntry {
                     repository,
                     tenant: tenant.clone(),
@@ -382,6 +392,7 @@ pub async fn api_images(
                     total_size: format_bytes(total_size_bytes),
                     blob_count,
                     manifest_count,
+                    last_pushed,
                 });
 
                 if images.len() >= limit {
@@ -870,14 +881,15 @@ async function doSearch() {{
         }}
         let totalSize = 0;
         data.images.forEach(img => totalSize += img.total_size_bytes);
-        let html = `<table><thead><tr><th>Repository</th><th>Size</th><th>Blobs</th><th>Manifests</th><th>Tags</th><th>Tag Names</th></tr></thead><tbody>`;
+        let html = `<table><thead><tr><th>Repository</th><th>Size</th><th>Blobs</th><th>Manifests</th><th>Tags</th><th>Last Pushed</th><th>Tag Names</th></tr></thead><tbody>`;
         for (const img of data.images) {{
             const tagBadges = img.tags.slice(0, 8).map(t =>
                 `<span class="badge badge-push">${{t}}</span>`
             ).join(' ');
             const more = img.tags.length > 8 ? ` <span class="badge badge-other">+${{img.tags.length - 8}} more</span>` : '';
             const sizeClass = img.total_size_bytes > 1073741824 ? 'red' : img.total_size_bytes > 104857600 ? 'yellow' : 'green';
-            html += `<tr><td><strong>${{img.repository}}</strong><br><span style="font-size:11px;color:var(--text-muted)">${{img.tenant}} / ${{img.project}} / ${{img.name}}</span></td><td><span class="value ${{sizeClass}}" style="font-size:13px;font-weight:600">${{img.total_size}}</span></td><td>${{img.blob_count}}</td><td>${{img.manifest_count}}</td><td>${{img.tag_count}}</td><td>${{tagBadges}}${{more}}</td></tr>`;
+            const pushed = img.last_pushed || '-';
+            html += `<tr><td><strong>${{img.repository}}</strong><br><span style="font-size:11px;color:var(--text-muted)">${{img.tenant}} / ${{img.project}} / ${{img.name}}</span></td><td><span class="value ${{sizeClass}}" style="font-size:13px;font-weight:600">${{img.total_size}}</span></td><td>${{img.blob_count}}</td><td>${{img.manifest_count}}</td><td>${{img.tag_count}}</td><td style="font-size:12px;color:var(--text-muted);white-space:nowrap">${{pushed}}</td><td>${{tagBadges}}${{more}}</td></tr>`;
         }}
         html += `</tbody></table>`;
         const totalFormatted = totalSize >= 1073741824 ? (totalSize/1073741824).toFixed(1)+' GB' : totalSize >= 1048576 ? (totalSize/1048576).toFixed(1)+' MB' : totalSize >= 1024 ? (totalSize/1024).toFixed(1)+' KB' : totalSize+' B';
