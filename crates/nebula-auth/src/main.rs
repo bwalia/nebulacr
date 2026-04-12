@@ -11,7 +11,7 @@
 //  - Rate limiting & Prometheus metrics
 // ═══════════════════════════════════════════════════════════════════
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::Engine;
 use chrono::Utc;
@@ -35,9 +35,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use nebula_common::auth::{
-    AuditDecision, AuditEvent, DockerTokenResponse, GitHubOidcTokenRequest, GitHubTokenClaims,
-    IntrospectionResponse, Jwk, JwksResponse, OidcProviderConfig, RequestedScope, TokenClaims,
-    TokenRequest, TokenResponse, TokenScope,
+    AuditDecision, AuditEvent, CiTokenRequest, CredentialExchangeRequest,
+    CredentialExchangeResponse, DockerTokenResponse, GitHubOidcTokenRequest, GitHubTokenClaims,
+    IntrospectionResponse, Jwk, JwksResponse, OidcProviderConfig, OidcSession, OidcUserClaims,
+    RefreshToken, RequestedScope, RobotAccount, TokenClaims, TokenRequest, TokenResponse,
+    TokenScope, UserRecord,
 };
 use nebula_common::config::{BootstrapAdmin, GitHubOidcConfig, RegistryConfig, VaultConfig};
 use nebula_common::errors::RegistryError;
@@ -577,6 +579,16 @@ struct AppState {
     oidc_manager: Arc<OidcProviderManager>,
     audit_log: Arc<AuditLog>,
     github_oidc_config: Option<GitHubOidcConfig>,
+    /// Provisioned user records (auto-created on OIDC login).
+    users: Arc<RwLock<HashMap<String, UserRecord>>>,
+    /// Active OIDC authorization code flow sessions.
+    oidc_sessions: Arc<RwLock<HashMap<String, OidcSession>>>,
+    /// Robot/service accounts for machine identity.
+    robot_accounts: Arc<RwLock<HashMap<String, RobotAccount>>>,
+    /// Issued refresh tokens.
+    refresh_tokens: Arc<RwLock<HashMap<String, RefreshToken>>>,
+    /// Set of revoked token JTIs.
+    revoked_tokens: Arc<RwLock<HashSet<String>>>,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -614,6 +626,22 @@ fn b64_url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 /// Encode bytes as URL-safe base64 (no padding).
 fn b64_url_encode(input: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
+}
+
+/// Simple percent-encoding for URL query parameters.
+fn url_encode(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len() * 3);
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
 }
 
 /// Compute SHA-256 hex digest of a string.
@@ -805,22 +833,71 @@ fn parse_docker_scope(scope: &str) -> Option<RequestedScope> {
 //  Section 10: Authentication helpers
 // ═══════════════════════════════════════════════════════════════════
 
-/// Authenticate a request: try bootstrap admin (Basic auth), then OIDC identity token.
+/// Authenticate a request: try bootstrap admin, robot accounts (Basic auth), then OIDC identity token.
 async fn authenticate_request(
     state: &AppState,
     headers: &HeaderMap,
     identity_token: &str,
 ) -> Result<String, RegistryError> {
-    // Try Basic auth for bootstrap admin
-    if let Some((username, password)) = extract_basic_auth(headers)
-        && let Ok(subject) = authenticate_basic(state, &username, &password)
-    {
-        return Ok(subject);
+    // Try Basic auth: bootstrap admin first, then robot accounts
+    if let Some((username, password)) = extract_basic_auth(headers) {
+        // Bootstrap admin
+        if let Ok(subject) = authenticate_basic(state, &username, &password) {
+            provision_user(state, &subject, None, None, vec![], "basic").await;
+            return Ok(subject);
+        }
+        // Robot accounts: username format is "robot:{name}"
+        if let Some(robot_name) = username.strip_prefix("robot:") {
+            if let Ok(subject) = authenticate_robot(state, robot_name, &password).await {
+                return Ok(subject);
+            }
+        }
     }
 
     // Validate the OIDC/identity JWT
     let claims = validate_identity_token(&state.oidc_manager, identity_token).await?;
+
+    // Auto-provision user from OIDC claims
+    provision_user(state, &claims.sub, None, None, vec![], "oidc").await;
+
     Ok(claims.sub)
+}
+
+/// Authenticate a robot account via Basic auth.
+async fn authenticate_robot(
+    state: &AppState,
+    name: &str,
+    secret: &str,
+) -> Result<String, RegistryError> {
+    let robots = state.robot_accounts.read().await;
+    for robot in robots.values() {
+        if robot.name == name && robot.enabled {
+            // Check expiry
+            if let Some(expires_at) = robot.expires_at {
+                if Utc::now() > expires_at {
+                    increment_auth_failures("robot_expired");
+                    return Err(RegistryError::Unauthorized);
+                }
+            }
+            // Verify secret (SHA-256 hash comparison)
+            let secret_hash = sha256_hex(secret);
+            if constant_time_eq(secret_hash.as_bytes(), robot.secret_hash.as_bytes()) {
+                metrics::counter!("registry_robot_auth_total", "robot" => name.to_owned()).increment(1);
+                let subject = format!("robot:{}", name);
+                let robot_id = robot.id.to_string();
+                info!(robot = %name, "robot account authenticated");
+                // Update last_used (drop read lock, take write lock)
+                drop(robots);
+                let mut robots_w = state.robot_accounts.write().await;
+                if let Some(r) = robots_w.get_mut(&robot_id) {
+                    r.last_used = Some(Utc::now());
+                }
+                return Ok(subject);
+            }
+        }
+    }
+    increment_auth_failures("invalid_robot_credentials");
+    Err(RegistryError::Unauthorized)
 }
 
 /// Authenticate via Basic auth against the bootstrap admin credentials.
@@ -854,6 +931,7 @@ async fn resolve_role(
         return Role::Admin;
     }
 
+    // Check explicit access policies first (primary)
     let policies = state.access_policies.read().await;
     let mut best_role: Option<Role> = None;
 
@@ -874,9 +952,134 @@ async fn resolve_role(
             best_role = Some(policy.role);
         }
     }
+    drop(policies);
+
+    if let Some(role) = best_role {
+        return role;
+    }
+
+    // Secondary: check group-based mappings from enterprise config
+    let group_role = resolve_role_from_groups(state, subject, tenant_id).await;
+    if let Some(role) = group_role {
+        return role;
+    }
 
     // Authenticated users default to Reader if no explicit policy found
-    best_role.unwrap_or(Role::Reader)
+    Role::Reader
+}
+
+/// Check if subject's groups match any GroupRoleMapping and return the highest-privilege role.
+async fn resolve_role_from_groups(
+    state: &AppState,
+    subject: &str,
+    _tenant_id: Uuid,
+) -> Option<Role> {
+    let users = state.users.read().await;
+    let user = users.get(subject)?;
+    let user_groups = &user.groups;
+
+    if user_groups.is_empty() {
+        return None;
+    }
+
+    let mappings = &state.config.enterprise.group_role_mappings;
+    if mappings.is_empty() {
+        return None;
+    }
+
+    let mut best_role: Option<Role> = None;
+    for mapping in mappings {
+        for group in user_groups {
+            if group_matches(&mapping.group, group) {
+                let role = mapping.role;
+                metrics::counter!("registry_group_mapping_hits_total", "group" => mapping.group.clone()).increment(1);
+                best_role = Some(match best_role {
+                    None => role,
+                    Some(existing) => higher_privilege_role(existing, role),
+                });
+            }
+        }
+    }
+
+    best_role
+}
+
+/// Match a group name against a pattern (exact or glob with *).
+fn group_matches(pattern: &str, group: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == group;
+    }
+    // Simple glob matching
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(found) = group[pos..].find(part) {
+            if i == 0 && found != 0 && !pattern.starts_with('*') {
+                return false;
+            }
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+    if !pattern.ends_with('*') {
+        return pos == group.len();
+    }
+    true
+}
+
+/// Return the higher-privilege of two roles.
+fn higher_privilege_role(a: Role, b: Role) -> Role {
+    match (a, b) {
+        (Role::Admin, _) | (_, Role::Admin) => Role::Admin,
+        (Role::Maintainer, _) | (_, Role::Maintainer) => Role::Maintainer,
+        _ => Role::Reader,
+    }
+}
+
+/// Auto-provision or update a user record after OIDC authentication.
+async fn provision_user(
+    state: &AppState,
+    subject: &str,
+    email: Option<String>,
+    display_name: Option<String>,
+    groups: Vec<String>,
+    auth_method: &str,
+) {
+    let now = Utc::now();
+    let mut users = state.users.write().await;
+    if let Some(user) = users.get_mut(subject) {
+        user.last_login = now;
+        user.login_count += 1;
+        user.groups = groups;
+        if email.is_some() {
+            user.email = email;
+        }
+        if display_name.is_some() {
+            user.display_name = display_name;
+        }
+    } else if state.config.enterprise.auto_provision_users {
+        users.insert(
+            subject.to_string(),
+            UserRecord {
+                subject: subject.to_string(),
+                email,
+                display_name,
+                groups,
+                auth_method: auth_method.to_string(),
+                first_seen: now,
+                last_login: now,
+                login_count: 1,
+            },
+        );
+        info!(subject = %subject, "auto-provisioned new user");
+    }
 }
 
 /// Build a signed JWT from the given claims.
@@ -1043,6 +1246,8 @@ async fn post_token(
                 reason: "rate_limited".into(),
                 request_id: request_id.to_string(),
                 source_ip: String::new(),
+                auth_method: None,
+                groups: None,
             })
             .await;
         return Err(RegistryError::RateLimitExceeded);
@@ -1064,6 +1269,8 @@ async fn post_token(
                     reason: format!("auth_failed: {e}"),
                     request_id: request_id.to_string(),
                     source_ip: String::new(),
+                    auth_method: None,
+                    groups: None,
                 })
                 .await;
             return Err(e);
@@ -1128,6 +1335,8 @@ async fn post_token(
                 reason: format!("role '{role:?}' insufficient"),
                 request_id: request_id.to_string(),
                 source_ip: String::new(),
+                auth_method: None,
+                groups: None,
             })
             .await;
         return Err(RegistryError::Forbidden {
@@ -1169,6 +1378,8 @@ async fn post_token(
             reason: format!("role={role:?}"),
             request_id: request_id.to_string(),
             source_ip: String::new(),
+            auth_method: None,
+            groups: None,
         })
         .await;
 
@@ -1225,11 +1436,24 @@ async fn get_token_inner(
 
     // Docker sends credentials via Basic auth header or form body (OAuth2 flow)
     let subject = if let Some((username, password)) = extract_basic_auth(&headers) {
-        authenticate_basic(&state, &username, &password).unwrap_or_else(|_| "anonymous".to_string())
+        // Try bootstrap admin first, then robot accounts
+        if let Ok(sub) = authenticate_basic(&state, &username, &password) {
+            sub
+        } else if let Some(robot_name) = username.strip_prefix("robot:") {
+            authenticate_robot(&state, robot_name, &password).await.unwrap_or_else(|_| "anonymous".to_string())
+        } else {
+            "anonymous".to_string()
+        }
     } else if query.username.is_some() && query.password.is_some() {
         let u = query.username.as_deref().unwrap();
         let p = query.password.as_deref().unwrap();
-        authenticate_basic(&state, u, p).unwrap_or_else(|_| "anonymous".to_string())
+        if let Ok(sub) = authenticate_basic(&state, u, p) {
+            sub
+        } else if let Some(robot_name) = u.strip_prefix("robot:") {
+            authenticate_robot(&state, robot_name, p).await.unwrap_or_else(|_| "anonymous".to_string())
+        } else {
+            "anonymous".to_string()
+        }
     } else if let Some(ref account) = query.account {
         account.clone()
     } else {
@@ -1309,6 +1533,8 @@ async fn get_token_inner(
             reason: format!("role={role:?}"),
             request_id: request_id.to_string(),
             source_ip: String::new(),
+            auth_method: None,
+            groups: None,
         })
         .await;
 
@@ -1378,6 +1604,8 @@ async fn github_actions_token(
                 reason: format!("org '{}' not in allowed list", gh_claims.repository_owner),
                 request_id: request_id.to_string(),
                 source_ip: String::new(),
+                auth_method: None,
+                groups: None,
             })
             .await;
         return Err(RegistryError::Forbidden {
@@ -1405,6 +1633,8 @@ async fn github_actions_token(
                 reason: format!("repo '{}' not in allowed list", gh_claims.repository),
                 request_id: request_id.to_string(),
                 source_ip: String::new(),
+                auth_method: None,
+                groups: None,
             })
             .await;
         return Err(RegistryError::Forbidden {
@@ -1502,6 +1732,8 @@ async fn github_actions_token(
             ),
             request_id: request_id.to_string(),
             source_ip: String::new(),
+            auth_method: Some("ci_oidc".into()),
+            groups: None,
         })
         .await;
 
@@ -1673,6 +1905,866 @@ async fn jwks_endpoint(State(state): State<AppState>) -> Json<JwksResponse> {
 /// GET /auth/audit — Returns recent audit events.
 async fn audit_endpoint(State(state): State<AppState>) -> Json<Vec<AuditEvent>> {
     Json(state.audit_log.recent().await)
+}
+
+/// POST /auth/audit/export — Export all audit events as JSONL.
+async fn audit_export(State(state): State<AppState>) -> impl IntoResponse {
+    let events = state.audit_log.recent().await;
+    let mut lines = String::new();
+    for event in &events {
+        if let Ok(line) = serde_json::to_string(event) {
+            lines.push_str(&line);
+            lines.push('\n');
+        }
+    }
+    (
+        StatusCode::OK,
+        [("content-type", "application/x-ndjson")],
+        lines,
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Enterprise Auth Handlers
+// ═══════════════════════════════════════════════════════════════════
+
+// ── OIDC Authorization Code Flow ─────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct OidcLoginQuery {
+    /// Name of the OIDC provider (matches issuer_url or display_name).
+    provider: String,
+    /// URI to redirect back to after auth.
+    redirect_uri: String,
+}
+
+/// GET /auth/oidc/login — Redirect to OIDC provider for login.
+async fn oidc_login(
+    State(state): State<AppState>,
+    Query(query): Query<OidcLoginQuery>,
+) -> Result<impl IntoResponse, RegistryError> {
+    // Find the provider config
+    let provider_config = state
+        .config
+        .auth
+        .oidc_providers
+        .iter()
+        .find(|p| {
+            p.issuer_url == query.provider
+                || p.display_name.as_deref() == Some(&query.provider)
+                || p.client_id == query.provider
+        })
+        .cloned()
+        .ok_or_else(|| RegistryError::Internal(format!(
+            "OIDC provider '{}' not configured",
+            query.provider
+        )))?;
+
+    // Generate PKCE code verifier + challenge
+    let pkce_verifier: String = (0..64)
+        .map(|_| {
+            let idx = rand::random::<u8>() % 62;
+            if idx < 10 { (b'0' + idx) as char }
+            else if idx < 36 { (b'a' + idx - 10) as char }
+            else { (b'A' + idx - 36) as char }
+        })
+        .collect();
+
+    let pkce_challenge = {
+        let digest = Sha256::digest(pkce_verifier.as_bytes());
+        b64_url_encode(&digest)
+    };
+
+    // Generate random state
+    let state_value = Uuid::new_v4().to_string();
+
+    // Store session
+    let session = OidcSession {
+        state: state_value.clone(),
+        pkce_verifier,
+        provider_name: provider_config.issuer_url.clone(),
+        redirect_uri: query.redirect_uri.clone(),
+        created_at: Utc::now(),
+    };
+
+    {
+        let mut sessions = state.oidc_sessions.write().await;
+        sessions.insert(state_value.clone(), session);
+    }
+
+    // Build authorization URL
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        provider_config.issuer_url.trim_end_matches('/')
+    );
+
+    // Fetch authorization endpoint from discovery
+    let auth_endpoint = match reqwest::get(&discovery_url).await {
+        Ok(resp) => {
+            let doc: serde_json::Value = resp.json().await.unwrap_or_default();
+            doc.get("authorization_endpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&format!(
+                    "{}/authorize",
+                    provider_config.issuer_url.trim_end_matches('/')
+                ))
+                .to_string()
+        }
+        Err(_) => format!(
+            "{}/authorize",
+            provider_config.issuer_url.trim_end_matches('/')
+        ),
+    };
+
+    let callback_uri = format!(
+        "{}/auth/oidc/callback",
+        state.config.auth.issuer.trim_end_matches('/')
+    );
+
+    let auth_url = format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&scope=openid+email+profile+groups&code_challenge={}&code_challenge_method=S256",
+        auth_endpoint,
+        url_encode(&provider_config.client_id),
+        url_encode(&callback_uri),
+        url_encode(&state_value),
+        url_encode(&pkce_challenge),
+    );
+
+    metrics::counter!("registry_oidc_logins_total", "provider" => provider_config.issuer_url.clone(), "status" => "initiated").increment(1);
+
+    Ok((
+        StatusCode::FOUND,
+        [("location", auth_url.as_str())],
+        "Redirecting to identity provider...",
+    ).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcCallbackQuery {
+    code: String,
+    state: String,
+}
+
+/// GET /auth/oidc/callback — Handle OIDC provider callback.
+async fn oidc_callback(
+    State(state): State<AppState>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> Result<impl IntoResponse, RegistryError> {
+    // Look up session by state
+    let session = {
+        let mut sessions = state.oidc_sessions.write().await;
+        sessions.remove(&query.state).ok_or_else(|| {
+            RegistryError::TokenInvalid {
+                reason: "invalid or expired OIDC session state".into(),
+            }
+        })?
+    };
+
+    // Check session is not too old (10 minutes max)
+    if (Utc::now() - session.created_at).num_seconds() > 600 {
+        return Err(RegistryError::TokenInvalid {
+            reason: "OIDC session expired".into(),
+        });
+    }
+
+    // Find provider config
+    let provider_config = state
+        .config
+        .auth
+        .oidc_providers
+        .iter()
+        .find(|p| p.issuer_url == session.provider_name)
+        .cloned()
+        .ok_or_else(|| RegistryError::Internal("OIDC provider config not found".into()))?;
+
+    // Fetch token endpoint from discovery
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        provider_config.issuer_url.trim_end_matches('/')
+    );
+    let token_endpoint = match reqwest::get(&discovery_url).await {
+        Ok(resp) => {
+            let doc: serde_json::Value = resp.json().await.unwrap_or_default();
+            doc.get("token_endpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&format!(
+                    "{}/token",
+                    provider_config.issuer_url.trim_end_matches('/')
+                ))
+                .to_string()
+        }
+        Err(_) => format!(
+            "{}/token",
+            provider_config.issuer_url.trim_end_matches('/')
+        ),
+    };
+
+    let callback_uri = format!(
+        "{}/auth/oidc/callback",
+        state.config.auth.issuer.trim_end_matches('/')
+    );
+
+    // Exchange code for tokens
+    let http_client = reqwest::Client::new();
+    let mut form = HashMap::new();
+    form.insert("grant_type", "authorization_code".to_string());
+    form.insert("code", query.code.clone());
+    form.insert("redirect_uri", callback_uri);
+    form.insert("client_id", provider_config.client_id.clone());
+    form.insert("code_verifier", session.pkce_verifier.clone());
+    if let Some(ref secret) = provider_config.client_secret {
+        form.insert("client_secret", secret.clone());
+    }
+
+    let token_resp = http_client
+        .post(&token_endpoint)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| RegistryError::Internal(format!("token exchange failed: {e}")))?;
+
+    if !token_resp.status().is_success() {
+        let body = token_resp.text().await.unwrap_or_default();
+        metrics::counter!("registry_oidc_logins_total", "provider" => provider_config.issuer_url.clone(), "status" => "failure").increment(1);
+        return Err(RegistryError::Internal(format!(
+            "token exchange returned error: {body}"
+        )));
+    }
+
+    let token_data: serde_json::Value = token_resp
+        .json()
+        .await
+        .map_err(|e| RegistryError::Internal(format!("failed to parse token response: {e}")))?;
+
+    let id_token = token_data
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RegistryError::Internal("no id_token in token response".into()))?;
+
+    // Extract claims from ID token (decode payload without full verification since we just exchanged it)
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(RegistryError::TokenInvalid {
+            reason: "id_token is not a valid JWT".into(),
+        });
+    }
+    let payload_bytes = b64_url_decode(parts[1]).map_err(|_| RegistryError::TokenInvalid {
+        reason: "invalid base64 in id_token payload".into(),
+    })?;
+    let oidc_claims: OidcUserClaims =
+        serde_json::from_slice(&payload_bytes).map_err(|e| RegistryError::TokenInvalid {
+            reason: format!("failed to parse OIDC claims: {e}"),
+        })?;
+
+    // Check allowed groups
+    if !provider_config.allowed_groups.is_empty() {
+        let has_allowed = oidc_claims
+            .groups
+            .iter()
+            .any(|g| provider_config.allowed_groups.contains(g));
+        if !has_allowed {
+            metrics::counter!("registry_oidc_logins_total", "provider" => provider_config.issuer_url.clone(), "status" => "failure").increment(1);
+            return Err(RegistryError::Forbidden {
+                reason: "user is not a member of any allowed group".into(),
+            });
+        }
+    }
+
+    // Auto-provision user
+    provision_user(
+        &state,
+        &oidc_claims.sub,
+        oidc_claims.email.clone(),
+        oidc_claims.name.clone().or(oidc_claims.preferred_username.clone()),
+        oidc_claims.groups.clone(),
+        "oidc",
+    )
+    .await;
+
+    // Resolve tenant from group mappings or use default
+    let tenants = state.tenants.read().await;
+    let (tenant_name, tenant_id) = tenants
+        .iter()
+        .next()
+        .map(|(name, t)| (name.clone(), t.id))
+        .unwrap_or_else(|| ("demo".to_string(), Uuid::new_v4()));
+    drop(tenants);
+
+    // Resolve role from group mappings
+    let role = resolve_role(&state, &oidc_claims.sub, tenant_id, None).await;
+
+    // Issue NebulaCR JWT
+    let now = Utc::now();
+    let ttl = state.config.auth.token_ttl_seconds;
+    let claims = TokenClaims {
+        iss: state.config.auth.issuer.clone(),
+        sub: oidc_claims.sub.clone(),
+        aud: state.config.auth.audience.clone(),
+        exp: now.timestamp() + ttl as i64,
+        iat: now.timestamp(),
+        jti: Uuid::new_v4().to_string(),
+        tenant_id,
+        project_id: None,
+        role,
+        scopes: vec![],
+    };
+
+    let token = sign_token(&state, &claims)?;
+    increment_token_issued();
+
+    metrics::counter!("registry_oidc_logins_total", "provider" => provider_config.issuer_url.clone(), "status" => "success").increment(1);
+
+    state
+        .audit_log
+        .record(AuditEvent {
+            timestamp: Utc::now(),
+            subject: oidc_claims.sub.clone(),
+            tenant: tenant_name,
+            project: None,
+            action: "oidc_login".into(),
+            decision: AuditDecision::Allow,
+            reason: format!("provider={}, role={role:?}", provider_config.issuer_url),
+            request_id: Uuid::new_v4().to_string(),
+            source_ip: String::new(),
+            auth_method: Some("oidc".into()),
+            groups: Some(oidc_claims.groups.clone()),
+        })
+        .await;
+
+    // Redirect to redirect_uri with token
+    let redirect = format!(
+        "{}?token={}&expires_in={}",
+        session.redirect_uri,
+        url_encode(&token),
+        ttl,
+    );
+
+    Ok((StatusCode::FOUND, [("location", redirect.as_str())], "").into_response())
+}
+
+// ── Generic CI OIDC Token Exchange ───────────────────────────────
+
+/// POST /auth/ci/token — Generic CI OIDC token exchange.
+async fn ci_token_exchange(
+    State(state): State<AppState>,
+    Json(request): Json<CiTokenRequest>,
+) -> Result<Json<TokenResponse>, RegistryError> {
+    increment_auth_requests();
+
+    let request_id = Uuid::new_v4();
+    let span = tracing::info_span!(
+        "ci_token_exchange",
+        request_id = %request_id,
+        provider = %request.provider,
+        tenant = %request.scope.tenant,
+    );
+    let _guard = span.enter();
+
+    // Find matching CI provider config
+    let ci_config = state
+        .config
+        .enterprise
+        .ci_providers
+        .iter()
+        .find(|p| p.name == request.provider)
+        .cloned()
+        .ok_or_else(|| RegistryError::Internal(format!(
+            "CI OIDC provider '{}' not configured",
+            request.provider
+        )))?;
+
+    // Validate the OIDC token against the provider's JWKS
+    // First check if the OIDC manager has this provider, if not try to validate generically
+    let providers = state.oidc_manager.providers.read().await;
+    let has_provider = providers.contains_key(&ci_config.issuer_url);
+    drop(providers);
+
+    if has_provider
+        || state
+            .oidc_manager
+            .configs
+            .iter()
+            .any(|c| c.issuer_url == ci_config.issuer_url)
+    {
+        let _ = state.oidc_manager.validate_token(&request.token).await?;
+    } else {
+        warn!(
+            provider = %request.provider,
+            "CI OIDC provider not in OIDC manager; falling back to unverified decode"
+        );
+    }
+
+    // Parse CI token claims
+    let parts: Vec<&str> = request.token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(RegistryError::TokenInvalid {
+            reason: "CI OIDC token is not a valid JWT".into(),
+        });
+    }
+    let payload_bytes = b64_url_decode(parts[1]).map_err(|_| RegistryError::TokenInvalid {
+        reason: "invalid base64 in CI token payload".into(),
+    })?;
+    let ci_claims: serde_json::Value =
+        serde_json::from_slice(&payload_bytes).map_err(|e| RegistryError::TokenInvalid {
+            reason: format!("failed to parse CI token claims: {e}"),
+        })?;
+
+    // Verify issuer
+    let token_issuer = ci_claims
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if token_issuer != ci_config.issuer_url {
+        return Err(RegistryError::TokenInvalid {
+            reason: format!(
+                "CI token issuer mismatch: expected {}, got {}",
+                ci_config.issuer_url, token_issuer
+            ),
+        });
+    }
+
+    // Check expiry
+    if let Some(exp) = ci_claims.get("exp").and_then(|v| v.as_i64()) {
+        if Utc::now().timestamp() > exp {
+            return Err(RegistryError::TokenExpired);
+        }
+    }
+
+    // Check allowed claim filters
+    for (claim_name, allowed_values) in &ci_config.allowed_claims {
+        let claim_value = ci_claims
+            .get(claim_name)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !allowed_values.is_empty() && !allowed_values.iter().any(|v| v == claim_value) {
+            increment_auth_failures("ci_claim_not_allowed");
+            return Err(RegistryError::Forbidden {
+                reason: format!(
+                    "CI token claim '{}' value '{}' is not in allowed list",
+                    claim_name, claim_value
+                ),
+            });
+        }
+    }
+
+    // Build subject with prefix
+    let sub = ci_claims
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let subject = format!("{}{}", ci_config.subject_prefix, sub);
+
+    // Resolve tenant
+    let tenants = state.tenants.read().await;
+    let tenant = tenants.get(&request.scope.tenant).ok_or_else(|| {
+        RegistryError::TenantNotFound {
+            tenant: request.scope.tenant.clone(),
+        }
+    })?;
+    let tenant_id = tenant.id;
+    drop(tenants);
+
+    // Resolve project
+    let projects = state.projects.read().await;
+    let project = projects
+        .get(&(tenant_id, request.scope.project.clone()))
+        .ok_or_else(|| RegistryError::ProjectNotFound {
+            project: request.scope.project.clone(),
+        })?;
+    let project_id = Some(project.id);
+    drop(projects);
+
+    // Determine role
+    let role = match ci_config.default_role.as_str() {
+        "admin" => Role::Admin,
+        "maintainer" => Role::Maintainer,
+        _ => Role::Reader,
+    };
+
+    let allowed_actions: Vec<Action> = request
+        .scope
+        .actions
+        .iter()
+        .copied()
+        .filter(|a| role.can(*a))
+        .collect();
+
+    if allowed_actions.is_empty() && !request.scope.actions.is_empty() {
+        increment_auth_failures("insufficient_permissions");
+        return Err(RegistryError::Forbidden {
+            reason: format!("role '{role:?}' does not permit requested actions"),
+        });
+    }
+
+    // Issue token with max TTL
+    let now = Utc::now();
+    let ttl = std::cmp::min(state.config.auth.token_ttl_seconds, ci_config.max_ttl_seconds);
+    let claims = TokenClaims {
+        iss: state.config.auth.issuer.clone(),
+        sub: subject.clone(),
+        aud: state.config.auth.audience.clone(),
+        exp: now.timestamp() + ttl as i64,
+        iat: now.timestamp(),
+        jti: Uuid::new_v4().to_string(),
+        tenant_id,
+        project_id,
+        role,
+        scopes: vec![TokenScope {
+            repository: String::new(),
+            actions: allowed_actions.clone(),
+        }],
+    };
+
+    let token = sign_token(&state, &claims)?;
+    increment_token_issued();
+
+    state
+        .audit_log
+        .record(AuditEvent {
+            timestamp: Utc::now(),
+            subject: subject.clone(),
+            tenant: request.scope.tenant,
+            project: Some(request.scope.project),
+            action: format!("ci_token_issued:{allowed_actions:?}"),
+            decision: AuditDecision::Allow,
+            reason: format!("provider={}, role={role:?}", request.provider),
+            request_id: request_id.to_string(),
+            source_ip: String::new(),
+            auth_method: Some("ci_oidc".into()),
+            groups: None,
+        })
+        .await;
+
+    info!(subject = %subject, provider = %request.provider, "CI OIDC token issued");
+
+    Ok(Json(TokenResponse {
+        token,
+        expires_in: ttl,
+        issued_at: now,
+    }))
+}
+
+// ── Refresh Token ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct RefreshTokenRequest {
+    refresh_token: String,
+}
+
+/// POST /auth/token/refresh — Exchange a refresh token for a new access token.
+async fn refresh_token_handler(
+    State(state): State<AppState>,
+    Json(request): Json<RefreshTokenRequest>,
+) -> Result<Json<serde_json::Value>, RegistryError> {
+    let refresh_tokens = state.refresh_tokens.read().await;
+    let rt = refresh_tokens
+        .get(&request.refresh_token)
+        .ok_or_else(|| RegistryError::TokenInvalid {
+            reason: "invalid refresh token".into(),
+        })?
+        .clone();
+    drop(refresh_tokens);
+
+    if rt.revoked {
+        return Err(RegistryError::TokenInvalid {
+            reason: "refresh token has been revoked".into(),
+        });
+    }
+
+    if Utc::now() > rt.expires_at {
+        return Err(RegistryError::TokenExpired);
+    }
+
+    // Issue new access token
+    let now = Utc::now();
+    let ttl = state.config.auth.token_ttl_seconds;
+    let claims = TokenClaims {
+        iss: state.config.auth.issuer.clone(),
+        sub: rt.subject.clone(),
+        aud: state.config.auth.audience.clone(),
+        exp: now.timestamp() + ttl as i64,
+        iat: now.timestamp(),
+        jti: Uuid::new_v4().to_string(),
+        tenant_id: rt.tenant_id,
+        project_id: rt.project_id,
+        role: rt.role,
+        scopes: rt.scopes.clone(),
+    };
+
+    let token = sign_token(&state, &claims)?;
+    increment_token_issued();
+    metrics::counter!("registry_token_refresh_total").increment(1);
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "expires_in": ttl,
+        "issued_at": now.to_rfc3339(),
+    })))
+}
+
+// ── Token Revocation ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct TokenRevokeRequest {
+    /// JTI of the token to revoke, or refresh_token ID.
+    token_id: String,
+}
+
+/// POST /auth/token/revoke — Revoke a token by JTI.
+async fn revoke_token_handler(
+    State(state): State<AppState>,
+    Json(request): Json<TokenRevokeRequest>,
+) -> impl IntoResponse {
+    // Add to revoked set
+    {
+        let mut revoked = state.revoked_tokens.write().await;
+        revoked.insert(request.token_id.clone());
+    }
+
+    // Also revoke matching refresh token if it exists
+    {
+        let mut refresh_tokens = state.refresh_tokens.write().await;
+        if let Some(rt) = refresh_tokens.get_mut(&request.token_id) {
+            rt.revoked = true;
+        }
+    }
+
+    metrics::counter!("registry_token_revocation_total").increment(1);
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "revoked"})))
+}
+
+/// GET /auth/token/revoked — Returns list of revoked token JTIs (for registry polling).
+async fn revoked_tokens_handler(State(state): State<AppState>) -> Json<Vec<String>> {
+    let revoked = state.revoked_tokens.read().await;
+    Json(revoked.iter().cloned().collect())
+}
+
+// ── Robot Account CRUD ───────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateRobotRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    tenant: String,
+    project: Option<String>,
+    #[serde(default = "default_robot_role")]
+    role: String,
+    /// Expiry in seconds from now. None = no expiry.
+    expires_in_seconds: Option<u64>,
+}
+
+fn default_robot_role() -> String {
+    "reader".to_string()
+}
+
+/// POST /api/v1/robot-accounts — Create a new robot account.
+async fn create_robot_account(
+    State(state): State<AppState>,
+    Json(request): Json<CreateRobotRequest>,
+) -> Result<impl IntoResponse, RegistryError> {
+    if !state.config.enterprise.robot_accounts_enabled {
+        return Err(RegistryError::Forbidden {
+            reason: "robot accounts are disabled".into(),
+        });
+    }
+
+    // Generate a random secret
+    let secret: String = (0..48)
+        .map(|_| {
+            let idx = rand::random::<u8>() % 62;
+            if idx < 10 { (b'0' + idx) as char }
+            else if idx < 36 { (b'a' + idx - 10) as char }
+            else { (b'A' + idx - 36) as char }
+        })
+        .collect();
+
+    let role = match request.role.as_str() {
+        "admin" => Role::Admin,
+        "maintainer" => Role::Maintainer,
+        _ => Role::Reader,
+    };
+
+    let now = Utc::now();
+    let robot = RobotAccount {
+        id: Uuid::new_v4(),
+        name: request.name.clone(),
+        description: request.description,
+        tenant: request.tenant,
+        project: request.project,
+        role,
+        secret_hash: sha256_hex(&secret),
+        created_at: now,
+        expires_at: request.expires_in_seconds.map(|s| now + chrono::Duration::seconds(s as i64)),
+        last_used: None,
+        enabled: true,
+    };
+
+    let id = robot.id.to_string();
+    let response = serde_json::json!({
+        "id": robot.id,
+        "name": robot.name,
+        "secret": secret,
+        "created_at": robot.created_at.to_rfc3339(),
+        "expires_at": robot.expires_at.map(|t| t.to_rfc3339()),
+    });
+
+    {
+        let mut robots = state.robot_accounts.write().await;
+        robots.insert(id, robot);
+    }
+
+    info!(name = %request.name, "robot account created");
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// GET /api/v1/robot-accounts — List all robot accounts.
+async fn list_robot_accounts(
+    State(state): State<AppState>,
+) -> Json<Vec<serde_json::Value>> {
+    let robots = state.robot_accounts.read().await;
+    let list: Vec<serde_json::Value> = robots
+        .values()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "name": r.name,
+                "description": r.description,
+                "tenant": r.tenant,
+                "project": r.project,
+                "role": r.role,
+                "created_at": r.created_at.to_rfc3339(),
+                "expires_at": r.expires_at.map(|t| t.to_rfc3339()),
+                "last_used": r.last_used.map(|t| t.to_rfc3339()),
+                "enabled": r.enabled,
+            })
+        })
+        .collect();
+    Json(list)
+}
+
+/// DELETE /api/v1/robot-accounts/{id} — Delete a robot account.
+async fn delete_robot_account(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let mut robots = state.robot_accounts.write().await;
+    if robots.remove(&id).is_some() {
+        info!(id = %id, "robot account deleted");
+        (StatusCode::OK, Json(serde_json::json!({"status": "deleted"})))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "robot account not found"})),
+        )
+    }
+}
+
+// ── Credential Exchange (Phase 4 stub) ──────────────────────────
+
+/// POST /auth/credential-exchange — Exchange OIDC session for short-lived docker credentials.
+async fn credential_exchange(
+    State(state): State<AppState>,
+    Json(request): Json<CredentialExchangeRequest>,
+) -> Result<Json<CredentialExchangeResponse>, RegistryError> {
+    // Validate the session token (treat as a NebulaCR JWT)
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[&state.config.auth.audience]);
+    validation.set_issuer(&[&state.config.auth.issuer]);
+
+    let token_data =
+        jsonwebtoken::decode::<TokenClaims>(&request.session_token, &state.decoding_key, &validation)
+            .map_err(|e| RegistryError::TokenInvalid {
+                reason: format!("invalid session token: {e}"),
+            })?;
+
+    let now = Utc::now();
+    let ttl_secs: i64 = 300; // 5-minute credential
+
+    // Generate a short-lived password (actually a new JWT with short TTL)
+    let cred_claims = TokenClaims {
+        iss: state.config.auth.issuer.clone(),
+        sub: token_data.claims.sub.clone(),
+        aud: state.config.auth.audience.clone(),
+        exp: now.timestamp() + ttl_secs,
+        iat: now.timestamp(),
+        jti: Uuid::new_v4().to_string(),
+        tenant_id: token_data.claims.tenant_id,
+        project_id: token_data.claims.project_id,
+        role: token_data.claims.role,
+        scopes: token_data.claims.scopes.clone(),
+    };
+
+    let password = sign_token(&state, &cred_claims)?;
+
+    Ok(Json(CredentialExchangeResponse {
+        username: token_data.claims.sub,
+        password,
+        expires_at: now + chrono::Duration::seconds(ttl_secs),
+    }))
+}
+
+// ── Management API (Phase 5) ────────────────────────────────────
+
+/// GET /api/v1/users — List all provisioned users.
+async fn list_users(State(state): State<AppState>) -> Json<Vec<UserRecord>> {
+    let users = state.users.read().await;
+    Json(users.values().cloned().collect())
+}
+
+/// GET /api/v1/groups — List group role mappings and active memberships.
+async fn list_groups(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let mappings = &state.config.enterprise.group_role_mappings;
+    let users = state.users.read().await;
+
+    // Collect all active groups from users
+    let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
+    for user in users.values() {
+        for group in &user.groups {
+            group_members
+                .entry(group.clone())
+                .or_default()
+                .push(user.subject.clone());
+        }
+    }
+
+    let mapping_list: Vec<serde_json::Value> = mappings
+        .iter()
+        .map(|m| {
+            let members = group_members.get(&m.group).cloned().unwrap_or_default();
+            serde_json::json!({
+                "group": m.group,
+                "tenant": m.tenant,
+                "project": m.project,
+                "role": m.role,
+                "member_count": members.len(),
+                "members": members,
+            })
+        })
+        .collect();
+
+    // Also include groups from users that aren't in mappings
+    let mut active_groups: Vec<serde_json::Value> = Vec::new();
+    for (group, members) in &group_members {
+        if !mappings.iter().any(|m| m.group == *group) {
+            active_groups.push(serde_json::json!({
+                "group": group,
+                "tenant": null,
+                "project": null,
+                "role": null,
+                "member_count": members.len(),
+                "members": members,
+            }));
+        }
+    }
+
+    Json(serde_json::json!({
+        "mappings": mapping_list,
+        "unmapped_groups": active_groups,
+    }))
 }
 
 // ── Health & Metrics ──────────────────────────────────────────────
@@ -1946,6 +3038,18 @@ async fn main() -> anyhow::Result<()> {
     // Seed in-memory data stores with demo data
     let (tenants, projects, policies) = seed_demo_data();
 
+    // Pre-register enterprise auth metrics
+    metrics::counter!("registry_oidc_logins_total", "provider" => "none", "status" => "success")
+        .increment(0);
+    metrics::counter!("registry_oidc_logins_total", "provider" => "none", "status" => "failure")
+        .increment(0);
+    metrics::counter!("registry_oidc_logins_total", "provider" => "none", "status" => "initiated")
+        .increment(0);
+    metrics::counter!("registry_group_mapping_hits_total", "group" => "none").increment(0);
+    metrics::counter!("registry_robot_auth_total", "robot" => "none").increment(0);
+    metrics::counter!("registry_token_refresh_total").increment(0);
+    metrics::counter!("registry_token_revocation_total").increment(0);
+
     let state = AppState {
         encoding_key,
         decoding_key,
@@ -1959,6 +3063,11 @@ async fn main() -> anyhow::Result<()> {
         oidc_manager,
         audit_log,
         github_oidc_config: config.github_oidc.clone(),
+        users: Arc::new(RwLock::new(HashMap::new())),
+        oidc_sessions: Arc::new(RwLock::new(HashMap::new())),
+        robot_accounts: Arc::new(RwLock::new(HashMap::new())),
+        refresh_tokens: Arc::new(RwLock::new(HashMap::new())),
+        revoked_tokens: Arc::new(RwLock::new(HashSet::new())),
     };
 
     // Build Axum router
@@ -1967,11 +3076,31 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(post_token_form).get(get_token))
         // JSON token request endpoint (API clients)
         .route("/auth/token/json", post(post_token))
-        // New endpoints
+        // GitHub Actions OIDC
         .route("/auth/github-actions/token", post(github_actions_token))
+        // Token introspection & JWKS
         .route("/auth/introspect", post(introspect_token))
         .route("/auth/.well-known/jwks.json", get(jwks_endpoint))
+        // Audit
         .route("/auth/audit", get(audit_endpoint))
+        .route("/auth/audit/export", post(audit_export))
+        // OIDC Authorization Code Flow (Phase 1)
+        .route("/auth/oidc/login", get(oidc_login))
+        .route("/auth/oidc/callback", get(oidc_callback))
+        // Generic CI OIDC (Phase 2)
+        .route("/auth/ci/token", post(ci_token_exchange))
+        // Refresh & Revocation (Phase 3)
+        .route("/auth/token/refresh", post(refresh_token_handler))
+        .route("/auth/token/revoke", post(revoke_token_handler))
+        .route("/auth/token/revoked", get(revoked_tokens_handler))
+        // Robot Account CRUD (Phase 3)
+        .route("/api/v1/robot-accounts", post(create_robot_account).get(list_robot_accounts))
+        .route("/api/v1/robot-accounts/{id}", delete(delete_robot_account))
+        // Credential Exchange (Phase 4)
+        .route("/auth/credential-exchange", post(credential_exchange))
+        // Management API (Phase 5)
+        .route("/api/v1/users", get(list_users))
+        .route("/api/v1/groups", get(list_groups))
         // Infrastructure
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
