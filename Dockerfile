@@ -42,7 +42,9 @@ RUN rm -rf crates/nebula-common/src crates/nebula-auth/src crates/nebula-registr
 # Copy the actual source code
 COPY crates/ crates/
 
-# Build the real binaries
+# Build the real binaries (embed git SHA as build hash)
+ARG NEBULACR_BUILD_HASH=dev
+ENV NEBULACR_BUILD_HASH=${NEBULACR_BUILD_HASH}
 RUN cargo build --release --bin nebula-auth --bin nebula-registry
 
 # ── Runtime stage ────────────────────────────────────────────────────────────

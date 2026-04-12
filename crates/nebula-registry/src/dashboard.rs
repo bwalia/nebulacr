@@ -830,7 +830,8 @@ tr:hover {{ background: var(--surface2); }}
 </div>
 
 <div class="footer">
-    NebulaCR Registry &mdash; Prometheus endpoint at <a href="/metrics" style="color:var(--accent)">/metrics</a>
+    NebulaCR Registry v{version} (build {build_hash})
+    &mdash; Prometheus endpoint at <a href="/metrics" style="color:var(--accent)">/metrics</a>
     &bull; Auto-refresh: <select onchange="setupAutoRefresh(this.value)" style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px;">
         <option value="0">Off</option>
         <option value="5">5s</option>
@@ -1035,6 +1036,8 @@ function filterTable() {{
         } else {
             ""
         },
+        version = env!("CARGO_PKG_VERSION"),
+        build_hash = option_env!("NEBULACR_BUILD_HASH").unwrap_or("dev"),
     );
 
     (
