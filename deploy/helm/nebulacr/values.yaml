@@ -30,6 +30,14 @@ fullnameOverride: ""
 
 imagePullSecrets: []
 
+## -- Dashboard authentication --
+dashboardAuth:
+  enabled: true
+  username: admin
+  # SHA-256 hash of "admin" — change this in production!
+  passwordHash: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+  realm: "NebulaCR Dashboard"
+
 ## -- Registry service --
 registry:
   image:

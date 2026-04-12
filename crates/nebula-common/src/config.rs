@@ -178,6 +178,38 @@ pub struct ServerConfig {
     pub auth_listen_addr: String,
     /// Bind address for metrics endpoint.
     pub metrics_addr: String,
+    /// Dashboard authentication config.
+    pub dashboard_auth: DashboardAuthConfig,
+}
+
+/// Authentication configuration for the /dashboard and /api/* endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardAuthConfig {
+    /// Whether dashboard authentication is enabled.
+    pub enabled: bool,
+    /// Username for dashboard login.
+    pub username: String,
+    /// SHA-256 hex hash of the dashboard password.
+    pub password_hash: String,
+    /// Realm shown in the browser's Basic auth prompt.
+    pub realm: String,
+}
+
+impl Default for DashboardAuthConfig {
+    fn default() -> Self {
+        // Default: enabled with admin/admin (same as bootstrap admin)
+        let password_hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(b"admin"))
+        };
+        Self {
+            enabled: true,
+            username: "admin".to_string(),
+            password_hash,
+            realm: "NebulaCR Dashboard".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +449,7 @@ impl Default for ServerConfig {
             listen_addr: "0.0.0.0:5000".into(),
             auth_listen_addr: "0.0.0.0:5001".into(),
             metrics_addr: "0.0.0.0:9090".into(),
+            dashboard_auth: DashboardAuthConfig::default(),
         }
     }
 }
@@ -472,11 +505,7 @@ impl Default for RateLimitConfig {
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
-            server: ServerConfig {
-                listen_addr: "0.0.0.0:5000".into(),
-                auth_listen_addr: "0.0.0.0:5001".into(),
-                metrics_addr: "0.0.0.0:9090".into(),
-            },
+            server: ServerConfig::default(),
             auth: AuthConfig {
                 oidc_providers: vec![],
                 signing_algorithm: "RS256".into(),

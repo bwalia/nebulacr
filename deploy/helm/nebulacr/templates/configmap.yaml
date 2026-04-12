@@ -10,6 +10,11 @@ data:
     server:
       listen_addr: "0.0.0.0:{{ .Values.registry.port }}"
       metrics_addr: "0.0.0.0:{{ .Values.registry.metricsPort }}"
+      dashboard_auth:
+        enabled: {{ .Values.dashboardAuth.enabled }}
+        username: {{ .Values.dashboardAuth.username | quote }}
+        password_hash: {{ .Values.dashboardAuth.passwordHash | quote }}
+        realm: {{ .Values.dashboardAuth.realm | quote }}
 
     auth:
       service_url: "http://{{ include "nebulacr.fullname" . }}-auth:{{ .Values.auth.port }}"

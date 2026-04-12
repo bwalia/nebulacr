@@ -26,6 +26,7 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
+base64 = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 metrics = { workspace = true }

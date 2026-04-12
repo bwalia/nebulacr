@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, head, patch, post},
 };
+use base64::Engine as _;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use governor::{Quota, RateLimiter, clock::DefaultClock, state::keyed::DefaultKeyedStateStore};
@@ -192,6 +193,72 @@ fn authorize(
     }
 
     Ok(())
+}
+
+// ── Dashboard Auth Middleware ────────────────────────────────────────────────
+
+/// Basic auth middleware for dashboard and API routes.
+async fn dashboard_auth_middleware(
+    State(config): State<Arc<nebula_common::config::DashboardAuthConfig>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !config.enabled {
+        return next.run(request).await;
+    }
+
+    // Extract Basic auth credentials
+    let auth_header = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Basic "));
+
+    let authenticated = if let Some(encoded) = auth_header {
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+            if let Ok(cred_str) = String::from_utf8(decoded) {
+                if let Some((user, pass)) = cred_str.split_once(':') {
+                    let pass_hash = {
+                        use sha2::{Digest, Sha256};
+                        hex::encode(Sha256::digest(pass.as_bytes()))
+                    };
+                    user == config.username
+                        && constant_time_compare(pass_hash.as_bytes(), config.password_hash.as_bytes())
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if authenticated {
+        next.run(request).await
+    } else {
+        let realm = format!("Basic realm=\"{}\"", config.realm);
+        let mut response = (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        if let Ok(val) = HeaderValue::from_str(&realm) {
+            response.headers_mut().insert("www-authenticate", val);
+        }
+        response
+    }
+}
+
+/// Constant-time byte comparison to avoid timing attacks.
+fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ── Request ID Middleware ────────────────────────────────────────────────────
@@ -2377,7 +2444,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics_handler))
         .route("/auth/token", get(proxy_auth_token).post(proxy_auth_token));
 
-    // Dashboard and API routes (no auth - internal use)
+    // Dashboard and API routes (protected by Basic auth)
+    let dashboard_auth_config = Arc::new(state.config.server.dashboard_auth.clone());
     let dashboard_routes = Router::new()
         .route("/dashboard", get(dashboard::dashboard_html))
         .route("/api/stats", get(dashboard::api_stats))
@@ -2390,6 +2458,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users", get(dashboard::api_users))
         .route("/api/groups", get(dashboard::api_groups))
         .route("/api/robot-accounts", get(dashboard::api_robot_accounts))
+        .layer(middleware::from_fn_with_state(
+            dashboard_auth_config,
+            dashboard_auth_middleware,
+        ))
         .with_state(dashboard_state);
 
     // Authenticated registry routes
