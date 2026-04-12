@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="NebulaCR API Reference — OCI Registry, Authentication, SCIM, and Enterprise Identity APIs" />
+  <title>NebulaCR API Reference</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0a0a1a; --surface: #12122a; --surface-2: #1a1a35; --card: #222245;
+      --border: rgba(255,255,255,0.08); --border-hover: rgba(56,189,248,0.3);
+      --text: #e0e0ff; --text-secondary: #8888aa; --text-muted: #666688;
+      --cyan: #38bdf8; --cyan-light: #7dd3fc; --green: #4ade80; --amber: #fbbf24;
+      --red: #f87171; --purple: #a78bfa; --blue: #3b82f6;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; font-size: 17px; }
+    body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; line-height: 1.6; }
+    a { color: var(--cyan); text-decoration: none; } a:hover { color: var(--cyan-light); }
+    code { font-family: 'JetBrains Mono', monospace; font-size: 0.85em; background: rgba(56,189,248,0.08); padding: 2px 6px; border-radius: 4px; }
+
+    .nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; padding: 14px 32px; background: rgba(10,10,26,0.9); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .nav-logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.2rem; }
+    .nav-logo-icon { color: var(--cyan); font-size: 1.5rem; }
+    .nav-links { display: flex; gap: 24px; align-items: center; }
+    .nav-links a { color: var(--text-secondary); font-size: 0.8rem; font-weight: 500; } .nav-links a:hover { color: var(--text); }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 40px 32px; }
+    .page-header { margin-bottom: 48px; }
+    .page-header h1 { font-size: 2rem; font-weight: 800; margin-bottom: 12px; background: linear-gradient(135deg, var(--cyan), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .page-header p { color: var(--text-secondary); font-size: 0.95rem; max-width: 700px; }
+
+    .toc { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 48px; }
+    .toc h3 { font-size: 0.85rem; font-weight: 700; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .toc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .toc a { display: block; padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 500; color: var(--text-secondary); transition: all 0.15s; }
+    .toc a:hover { background: rgba(56,189,248,0.08); color: var(--cyan); }
+
+    .api-section { margin-bottom: 56px; }
+    .api-section-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+    .api-section-header h2 { font-size: 1.3rem; font-weight: 800; }
+    .api-section-badge { padding: 4px 12px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.5px; }
+    .badge-public { background: rgba(74,222,128,0.12); color: var(--green); }
+    .badge-auth { background: rgba(251,191,36,0.12); color: var(--amber); }
+    .badge-scim { background: rgba(167,139,250,0.12); color: var(--purple); }
+    .badge-internal { background: rgba(248,113,113,0.12); color: var(--red); }
+
+    .endpoint { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; transition: border-color 0.2s; }
+    .endpoint:hover { border-color: var(--border-hover); }
+    .endpoint-header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; cursor: pointer; }
+    .endpoint-method { padding: 4px 10px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.5px; min-width: 60px; text-align: center; }
+    .method-get { background: rgba(74,222,128,0.15); color: var(--green); }
+    .method-post { background: rgba(56,189,248,0.15); color: var(--cyan); }
+    .method-put { background: rgba(251,191,36,0.15); color: var(--amber); }
+    .method-patch { background: rgba(167,139,250,0.15); color: var(--purple); }
+    .method-delete { background: rgba(248,113,113,0.15); color: var(--red); }
+    .endpoint-path { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; font-weight: 500; flex: 1; }
+    .endpoint-desc { font-size: 0.78rem; color: var(--text-secondary); }
+    .endpoint-body { padding: 0 20px 20px; display: none; }
+    .endpoint-body.open { display: block; }
+    .endpoint-detail { margin-top: 12px; }
+    .endpoint-detail h4 { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 8px; }
+    .code-block { padding: 14px 18px; background: #0a0a14; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: 'JetBrains Mono', monospace; font-size: 0.73rem; line-height: 1.7; color: var(--green); overflow-x: auto; white-space: pre; margin-bottom: 12px; }
+    .code-comment { color: var(--text-muted); }
+    .param-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .param-table th { text-align: left; padding: 8px 12px; background: var(--card); border: 1px solid var(--border); color: var(--text-muted); font-weight: 600; font-size: 0.7rem; text-transform: uppercase; }
+    .param-table td { padding: 8px 12px; border: 1px solid var(--border); }
+    .param-table code { font-size: 0.75rem; }
+
+    .guide-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 16px; }
+    .guide-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
+    .guide-card p { font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 12px; }
+    .guide-steps { list-style: none; counter-reset: guide-step; }
+    .guide-steps li { counter-increment: guide-step; padding: 6px 0; font-size: 0.8rem; color: var(--text-secondary); display: flex; align-items: flex-start; gap: 10px; }
+    .guide-steps li::before { content: counter(guide-step); display: flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; border-radius: 50%; background: var(--cyan); color: #0a0a1a; font-weight: 700; font-size: 0.7rem; }
+
+    .footer { padding: 32px; text-align: center; border-top: 1px solid var(--border); color: var(--text-secondary); font-size: 0.75rem; }
+
+    @media (max-width: 768px) {
+      .toc-grid { grid-template-columns: 1fr; }
+      .endpoint-header { flex-wrap: wrap; }
+      .endpoint-desc { width: 100%; margin-top: 8px; }
+      .nav-links { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="index.html" class="nav-logo"><span class="nav-logo-icon">&#x25C8;</span> NebulaCR</a>
+  <div class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="index.html#features">Features</a>
+    <a href="#oci">OCI API</a>
+    <a href="#auth">Auth API</a>
+    <a href="#scim">SCIM</a>
+    <a href="#guides">Guides</a>
+    <a href="https://github.com/bwalia/nebulacr">GitHub</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<div class="page-header">
+  <h1>API Reference</h1>
+  <p>Complete API documentation for NebulaCR covering OCI Distribution, Authentication, SCIM 2.0 Provisioning, Enterprise Identity, and Management endpoints.</p>
+</div>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <div class="toc-grid">
+    <a href="#oci">OCI Distribution API</a>
+    <a href="#auth">Authentication &amp; Tokens</a>
+    <a href="#oidc">OIDC / SSO Login</a>
+    <a href="#ci">CI/CD OIDC Federation</a>
+    <a href="#scim">SCIM 2.0 Provisioning</a>
+    <a href="#robots">Robot Accounts</a>
+    <a href="#dashboard-api">Dashboard &amp; Monitoring</a>
+    <a href="#internal">Internal Replication</a>
+    <a href="#guides">Integration Guides</a>
+  </div>
+</div>
+
+<!-- ===== OCI DISTRIBUTION ===== -->
+<div class="api-section" id="oci">
+  <div class="api-section-header">
+    <h2>OCI Distribution API</h2>
+    <span class="api-section-badge badge-auth">JWT Auth Required</span>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/v2/</span>
+      <span class="endpoint-desc">API version check (Docker registry ping)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">HTTP/1.1 200 OK
+{}</div>
+      <p style="font-size:0.78rem;color:var(--text-secondary);">Returns empty JSON object. If unauthenticated, returns 401 with <code>Www-Authenticate</code> header containing the token endpoint URL.</p></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/v2/{tenant}/{project}/{name}/manifests/{reference}</span>
+      <span class="endpoint-desc">Pull a manifest by tag or digest</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Path Parameters</h4>
+      <table class="param-table">
+        <tr><th>Param</th><th>Description</th></tr>
+        <tr><td><code>tenant</code></td><td>Tenant namespace (use <code>_</code> for default)</td></tr>
+        <tr><td><code>project</code></td><td>Project name</td></tr>
+        <tr><td><code>name</code></td><td>Repository name</td></tr>
+        <tr><td><code>reference</code></td><td>Tag name or <code>sha256:...</code> digest</td></tr>
+      </table></div>
+      <div class="endpoint-detail"><h4>Example</h4>
+<div class="code-block">curl -H "Authorization: Bearer $TOKEN" \
+  https://registry.example.com/v2/_/myproject/myapp/manifests/latest</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-put">PUT</span>
+      <span class="endpoint-path">/v2/{tenant}/{project}/{name}/manifests/{reference}</span>
+      <span class="endpoint-desc">Push a manifest (requires Push permission)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Headers</h4>
+      <table class="param-table">
+        <tr><th>Header</th><th>Value</th></tr>
+        <tr><td><code>Content-Type</code></td><td><code>application/vnd.oci.image.manifest.v1+json</code></td></tr>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/v2/{tenant}/{project}/{name}/blobs/uploads/</span>
+      <span class="endpoint-desc">Initiate a blob upload session</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">HTTP/1.1 202 Accepted
+Location: /v2/{t}/{p}/{n}/blobs/uploads/{uuid}
+Docker-Upload-UUID: {uuid}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/v2/{tenant}/{project}/{name}/tags/list</span>
+      <span class="endpoint-desc">List tags for a repository</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{"name": "_/myproject/myapp", "tags": ["latest", "v1.0", "v2.0"]}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/v2/_catalog</span>
+      <span class="endpoint-desc">List all repositories</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{"repositories": ["_/myproject/myapp", "_/myproject/api", "demo/default/nginx"]}</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== AUTHENTICATION ===== -->
+<div class="api-section" id="auth">
+  <div class="api-section-header">
+    <h2>Authentication &amp; Tokens</h2>
+    <span class="api-section-badge badge-public">Public</span>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/auth/token?service=nebulacr-registry&amp;scope=repository:t/p/n:pull</span>
+      <span class="endpoint-desc">Docker-compatible token exchange (Basic auth)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Authentication</h4>
+      <p style="font-size:0.8rem;color:var(--text-secondary);">Send credentials via <code>Authorization: Basic base64(user:pass)</code> header. Docker clients send this automatically after receiving a 401 challenge.</p></div>
+      <div class="endpoint-detail"><h4>Query Parameters</h4>
+      <table class="param-table">
+        <tr><th>Param</th><th>Description</th></tr>
+        <tr><td><code>service</code></td><td>Registry service name (from Www-Authenticate)</td></tr>
+        <tr><td><code>scope</code></td><td>Docker scope: <code>repository:tenant/project/repo:pull,push</code></td></tr>
+      </table></div>
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{"token": "eyJhbG...", "access_token": "eyJhbG...", "expires_in": 300, "issued_at": "2026-04-12T..."}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/auth/token/refresh</span>
+      <span class="endpoint-desc">Refresh an access token using a refresh token</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{"refresh_token": "rt_..."}</div></div>
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{"token": "eyJhbG...", "expires_in": 300, "refresh_token": "rt_new..."}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/auth/token/revoke</span>
+      <span class="endpoint-desc">Revoke a token immediately</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{"jti": "token-id-to-revoke"}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/auth/introspect</span>
+      <span class="endpoint-desc">Token introspection (RFC 7662)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{"token": "eyJhbG..."}</div></div>
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{"active": true, "sub": "admin", "tenant_id": "uuid", "exp": 1712930400, "scope": "pull,push"}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/auth/.well-known/jwks.json</span>
+      <span class="endpoint-desc">JWKS public key endpoint for token verification</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{"keys": [{"kty": "RSA", "use": "sig", "kid": "...", "alg": "RS256", "n": "...", "e": "AQAB"}]}</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== OIDC SSO ===== -->
+<div class="api-section" id="oidc">
+  <div class="api-section-header">
+    <h2>OIDC / SSO Login</h2>
+    <span class="api-section-badge badge-auth">Browser Flow</span>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/auth/oidc/login?provider={name}&amp;redirect_uri={uri}</span>
+      <span class="endpoint-desc">Initiate OIDC Authorization Code flow (redirects to IdP)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Query Parameters</h4>
+      <table class="param-table">
+        <tr><th>Param</th><th>Description</th></tr>
+        <tr><td><code>provider</code></td><td>OIDC provider name from config (e.g., <code>azure-ad</code>)</td></tr>
+        <tr><td><code>redirect_uri</code></td><td>Where to redirect after login (receives <code>?token=...</code>)</td></tr>
+      </table></div>
+      <div class="endpoint-detail"><h4>Flow</h4>
+      <p style="font-size:0.8rem;color:var(--text-secondary);">1. Generates PKCE code verifier + challenge<br>2. Stores session state<br>3. Redirects user to IdP authorization endpoint<br>4. IdP authenticates user and redirects to <code>/auth/oidc/callback</code></p></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/auth/oidc/callback?code={code}&amp;state={state}</span>
+      <span class="endpoint-desc">OIDC callback (exchanges code for tokens)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Flow</h4>
+      <p style="font-size:0.8rem;color:var(--text-secondary);">1. Validates state against stored session<br>2. Exchanges authorization code for ID token<br>3. Extracts sub, email, groups from ID token<br>4. Auto-provisions user if new<br>5. Applies group-to-role mappings<br>6. Issues NebulaCR JWT<br>7. Redirects to <code>redirect_uri?token=eyJ...</code></p></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CI/CD OIDC ===== -->
+<div class="api-section" id="ci">
+  <div class="api-section-header">
+    <h2>CI/CD OIDC Federation</h2>
+    <span class="api-section-badge badge-auth">OIDC Token</span>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/auth/ci/token</span>
+      <span class="endpoint-desc">Exchange a CI OIDC token for a NebulaCR token</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{
+  "token": "eyJhbG...",     <span class="code-comment">// CI provider's OIDC JWT</span>
+  "provider": "github",     <span class="code-comment">// github | gitlab | k8s | custom</span>
+  "scope": {
+    "tenant": "_",
+    "project": "myproject",
+    "actions": ["pull", "push"]
+  }
+}</div></div>
+      <div class="endpoint-detail"><h4>Supported Providers</h4>
+      <table class="param-table">
+        <tr><th>Provider</th><th>Issuer</th><th>Subject Format</th></tr>
+        <tr><td>GitHub Actions</td><td><code>https://token.actions.githubusercontent.com</code></td><td><code>github:org/repo</code></td></tr>
+        <tr><td>GitLab CI</td><td><code>https://gitlab.com</code></td><td><code>gitlab:group/project</code></td></tr>
+        <tr><td>Kubernetes SA</td><td>K8s API server OIDC endpoint</td><td><code>k8s:namespace:sa-name</code></td></tr>
+      </table></div>
+      <div class="endpoint-detail"><h4>GitHub Actions Example</h4>
+<div class="code-block"><span class="code-comment"># In .github/workflows/build.yml</span>
+jobs:
+  push:
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nebulacr-registry" | jq -r .value)
+          REGISTRY_TOKEN=$(curl -sX POST https://registry.example.com/auth/ci/token \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"$TOKEN\",\"provider\":\"github\",\"scope\":{\"tenant\":\"_\",\"project\":\"myproj\",\"actions\":[\"pull\",\"push\"]}}" \
+            | jq -r .token)
+          docker login registry.example.com -u ci -p "$REGISTRY_TOKEN"
+          docker push registry.example.com/_/myproj/myapp:latest</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/auth/github-actions/token</span>
+      <span class="endpoint-desc">GitHub Actions OIDC (legacy endpoint, use /auth/ci/token instead)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{"token": "eyJhbG...", "scope": {"tenant": "_", "project": "myproj", "actions": ["pull", "push"]}}</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SCIM 2.0 ===== -->
+<div class="api-section" id="scim">
+  <div class="api-section-header">
+    <h2>SCIM 2.0 Provisioning (RFC 7644)</h2>
+    <span class="api-section-badge badge-scim">Bearer Token</span>
+  </div>
+
+  <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:20px;">SCIM endpoints enable Azure AD, Okta, and OneLogin to automatically provision and deprovision registry users. All requests require <code>Authorization: Bearer {scim_token}</code>.</p>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/scim/v2/Users</span>
+      <span class="endpoint-desc">List all provisioned users</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+  "totalResults": 2,
+  "Resources": [
+    {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+     "id": "john.doe", "userName": "john.doe", "active": true,
+     "emails": [{"value": "john@example.com", "primary": true}],
+     "groups": [{"value": "nebulacr-devs", "display": "nebulacr-devs"}]}
+  ]
+}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/scim/v2/Users</span>
+      <span class="endpoint-desc">Provision a new user (pre-create before first login)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+  "userName": "john.doe",
+  "displayName": "John Doe",
+  "active": true,
+  "emails": [{"value": "john@example.com", "type": "work", "primary": true}],
+  "groups": [{"value": "nebulacr-devs", "display": "nebulacr-devs"}]
+}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-patch">PATCH</span>
+      <span class="endpoint-path">/scim/v2/Users/{id}</span>
+      <span class="endpoint-desc">Partial update (Azure AD uses this for deactivation)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Deactivate User (Instant Offboarding)</h4>
+<div class="code-block">{
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+  "Operations": [{"op": "replace", "path": "active", "value": false}]
+}</div>
+      <p style="font-size:0.8rem;color:var(--text-secondary);margin-top:8px;">Setting <code>active=false</code> immediately removes the user and all their access policies. They cannot <code>docker pull</code> from this moment onward.</p></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-delete">DELETE</span>
+      <span class="endpoint-path">/scim/v2/Users/{id}</span>
+      <span class="endpoint-desc">Deprovision a user (removes all access)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">HTTP/1.1 204 No Content</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/scim/v2/Groups</span>
+      <span class="endpoint-desc">Create a SCIM group</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+  "displayName": "nebulacr-devs",
+  "members": [{"value": "john.doe", "display": "John Doe"}]
+}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-patch">PATCH</span>
+      <span class="endpoint-path">/scim/v2/Groups/{id}</span>
+      <span class="endpoint-desc">Update group membership (add/remove members)</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Add Members</h4>
+<div class="code-block">{
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+  "Operations": [{"op": "add", "path": "members",
+    "value": [{"value": "jane.doe", "display": "Jane Doe"}]}]
+}</div></div>
+      <div class="endpoint-detail"><h4>Remove Members</h4>
+<div class="code-block">{
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+  "Operations": [{"op": "remove",
+    "path": "members[value eq \"john.doe\"]"}]
+}</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== ROBOT ACCOUNTS ===== -->
+<div class="api-section" id="robots">
+  <div class="api-section-header">
+    <h2>Robot Accounts</h2>
+    <span class="api-section-badge badge-auth">Admin Auth</span>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-post">POST</span>
+      <span class="endpoint-path">/api/v1/robot-accounts</span>
+      <span class="endpoint-desc">Create a robot account for machine identity</span>
+    </div>
+    <div class="endpoint-body">
+      <div class="endpoint-detail"><h4>Request Body</h4>
+<div class="code-block">{
+  "name": "ci-pipeline",
+  "description": "GitHub Actions CI",
+  "tenant": "_",
+  "project": "myproject",
+  "role": "maintainer",
+  "expires_in_days": 90
+}</div></div>
+      <div class="endpoint-detail"><h4>Response</h4>
+<div class="code-block">{
+  "id": "uuid",
+  "name": "ci-pipeline",
+  "secret": "nrc_...",    <span class="code-comment">// Only shown once!</span>
+  "docker_login": "docker login registry.example.com -u robot:ci-pipeline -p nrc_..."
+}</div></div>
+    </div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-get">GET</span>
+      <span class="endpoint-path">/api/v1/robot-accounts</span>
+      <span class="endpoint-desc">List all robot accounts</span>
+    </div>
+    <div class="endpoint-body"></div>
+  </div>
+
+  <div class="endpoint">
+    <div class="endpoint-header" onclick="toggle(this)">
+      <span class="endpoint-method method-delete">DELETE</span>
+      <span class="endpoint-path">/api/v1/robot-accounts/{id}</span>
+      <span class="endpoint-desc">Delete a robot account</span>
+    </div>
+    <div class="endpoint-body"></div>
+  </div>
+</div>
+
+<!-- ===== DASHBOARD API ===== -->
+<div class="api-section" id="dashboard-api">
+  <div class="api-section-header">
+    <h2>Dashboard &amp; Monitoring</h2>
+    <span class="api-section-badge badge-auth">Basic Auth</span>
+  </div>
+
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/dashboard</span><span class="endpoint-desc">Web dashboard (HTML)</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/api/images?q={search}&amp;limit=200</span><span class="endpoint-desc">Image browser with wildcard search</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/api/stats</span><span class="endpoint-desc">Registry statistics (uptime, push/pull counts)</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/api/system</span><span class="endpoint-desc">System metrics (CPU, RAM, disk)</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/api/ha-status</span><span class="endpoint-desc">HA multi-region health status</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/api/users</span><span class="endpoint-desc">List provisioned users (proxied from auth service)</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/api/groups</span><span class="endpoint-desc">List groups and role mappings</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/health</span><span class="endpoint-desc">Health check (no auth required)</span></div><div class="endpoint-body"></div></div>
+  <div class="endpoint"><div class="endpoint-header" onclick="toggle(this)"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/metrics</span><span class="endpoint-desc">Prometheus metrics (no auth required)</span></div><div class="endpoint-body"></div></div>
+</div>
+
+<!-- ===== INTERNAL ===== -->
+<div class="api-section" id="internal">
+  <div class="api-section-header">
+    <h2>Internal Replication</h2>
+    <span class="api-section-badge badge-internal">Internal Only</span>
+  </div>
+  <p style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:16px;">These endpoints are used for cross-region replication between NebulaCR instances. They are served on both the main port and the internal port (5002).</p>
+  <div class="endpoint"><div class="endpoint-header"><span class="endpoint-method method-post">POST</span><span class="endpoint-path">/internal/replicate/manifest</span><span class="endpoint-desc">Receive a replicated manifest from another region</span></div></div>
+  <div class="endpoint"><div class="endpoint-header"><span class="endpoint-method method-post">POST</span><span class="endpoint-path">/internal/replicate/blob</span><span class="endpoint-desc">Receive a replicated blob from another region</span></div></div>
+  <div class="endpoint"><div class="endpoint-header"><span class="endpoint-method method-post">POST</span><span class="endpoint-path">/internal/replicate/delete</span><span class="endpoint-desc">Receive a delete event from another region</span></div></div>
+  <div class="endpoint"><div class="endpoint-header"><span class="endpoint-method method-get">GET</span><span class="endpoint-path">/internal/replication/status</span><span class="endpoint-desc">Replication health status for all regions</span></div></div>
+</div>
+
+<!-- ===== INTEGRATION GUIDES ===== -->
+<div class="api-section" id="guides">
+  <div class="api-section-header">
+    <h2>Integration Guides</h2>
+  </div>
+
+  <div class="guide-card">
+    <h3>Azure AD / Entra ID Setup</h3>
+    <p>Connect NebulaCR to Azure AD for SSO and SCIM provisioning.</p>
+    <ol class="guide-steps">
+      <li>Register an application in Azure AD &rarr; App Registrations &rarr; New Registration</li>
+      <li>Set redirect URI to <code>https://registry.example.com/auth/oidc/callback</code></li>
+      <li>Note the Application (client) ID and create a client secret</li>
+      <li>Configure OIDC provider in NebulaCR config:<br><code style="display:block;margin-top:4px;">oidc_providers: [{issuer_url: "https://login.microsoftonline.com/{tenant}/v2.0", client_id: "...", client_secret: "...", groups_claim: "groups"}]</code></li>
+      <li>Enable SCIM: In Azure AD &rarr; Enterprise Applications &rarr; your app &rarr; Provisioning &rarr; Set Tenant URL to <code>https://registry.example.com/scim/v2</code> and enter the SCIM bearer token</li>
+      <li>Map AD groups to roles: <code>group_role_mappings: [{group: "nebulacr-admins", tenant: "_", role: "admin"}]</code></li>
+      <li>Test: Click "Login with Azure AD" on the dashboard or run <code>docker login</code></li>
+    </ol>
+  </div>
+
+  <div class="guide-card">
+    <h3>Okta SCIM Setup</h3>
+    <p>Configure Okta to auto-provision and deprovision NebulaCR users.</p>
+    <ol class="guide-steps">
+      <li>In Okta Admin &rarr; Applications &rarr; Create App Integration &rarr; SCIM 2.0</li>
+      <li>Set SCIM connector base URL to <code>https://registry.example.com/scim/v2</code></li>
+      <li>Authentication: Bearer token (use <code>enterprise.scim.bearer_token</code> from config)</li>
+      <li>Enable provisioning actions: Create Users, Update User Attributes, Deactivate Users</li>
+      <li>Map Okta groups to push groups &rarr; these sync to NebulaCR group-role mappings</li>
+      <li>Assign users/groups to the application &rarr; Okta pushes SCIM events immediately</li>
+    </ol>
+  </div>
+
+  <div class="guide-card">
+    <h3>GitHub Actions OIDC (Zero Secrets)</h3>
+    <p>Push images from GitHub Actions without storing registry credentials.</p>
+    <ol class="guide-steps">
+      <li>Configure GitHub OIDC in NebulaCR: <code>github_oidc: {allowed_orgs: ["your-org"], default_role: "maintainer"}</code></li>
+      <li>Add <code>id-token: write</code> permission to your workflow</li>
+      <li>Request OIDC token: <code>curl "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nebulacr-registry"</code></li>
+      <li>Exchange for registry token: <code>POST /auth/ci/token</code> with the OIDC JWT</li>
+      <li>Use the token with <code>docker login</code> &rarr; <code>docker push</code></li>
+    </ol>
+  </div>
+
+  <div class="guide-card">
+    <h3>Kubernetes ImagePullSecrets</h3>
+    <p>Configure Kubernetes pods to pull images from NebulaCR.</p>
+    <ol class="guide-steps">
+      <li>Create a robot account: <code>POST /api/v1/robot-accounts</code> with desired scope</li>
+      <li>Create the k8s secret: <code>kubectl create secret docker-registry nebulacr-secret --docker-server=registry.example.com --docker-username=robot:ci-pipeline --docker-password=nrc_...</code></li>
+      <li>Reference in your deployment: <code>imagePullSecrets: [{name: nebulacr-secret}]</code></li>
+      <li>For auto-rotation, use External Secrets Operator to call <code>/auth/credential-exchange</code></li>
+    </ol>
+  </div>
+</div>
+
+</div>
+
+<footer class="footer">
+  <div>&copy; 2026 NebulaCR &mdash; <a href="index.html">Home</a> &middot; <a href="https://github.com/bwalia/nebulacr">GitHub</a> &middot; <a href="https://github.com/bwalia/nebulacr/issues">Issues</a></div>
+</footer>
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  if (body) body.classList.toggle('open');
+}
+</script>
+
+</body>
+</html>
