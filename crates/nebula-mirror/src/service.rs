@@ -130,6 +130,7 @@ impl Default for MirrorConfig {
 }
 
 /// Result of a mirror fetch operation.
+#[derive(Debug)]
 pub struct MirrorFetchResult {
     pub data: Bytes,
     pub content_type: String,
