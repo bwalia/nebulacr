@@ -43,9 +43,9 @@ use nebula_common::storage::{
     blob_path, manifest_path, sha256_digest, tag_link_path, tags_prefix, upload_path,
 };
 
-use nebula_mirror::MirrorService;
 use nebula_mirror::service::MirrorConfig as MirrorServiceConfig;
 use nebula_mirror::upstream::UpstreamConfig;
+use nebula_mirror::{MirrorScope, MirrorService};
 use nebula_replication::event::ReplicationEvent;
 use nebula_replication::failover::FailoverManager;
 use nebula_replication::region::{
@@ -341,6 +341,56 @@ async fn rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
+// ── Storage error classification ────────────────────────────────────────────
+
+/// True when an object-store error means "the object is not present,"
+/// as opposed to a real IO/backend failure. This matters because the
+/// `get_blob`/`get_manifest` miss paths must only fall through to the
+/// mirror or return 404 when the object is truly absent — real IO
+/// failures must still surface as 5xx (R4).
+fn is_store_not_found(err: &object_store::Error) -> bool {
+    matches!(err, object_store::Error::NotFound { .. })
+}
+
+/// Translate the common-config `MirrorScopeConfig` (string-tagged,
+/// forward-compatible) into the strongly-typed `MirrorScope` the
+/// mirror service consumes. Unknown or missing modes fall back to
+/// `DefaultTenantOnly`, which is the safe default that keeps private
+/// projects out of the upstream path.
+fn mirror_scope_from_config(
+    cfg: Option<&nebula_common::config::MirrorScopeConfig>,
+) -> MirrorScope {
+    let Some(cfg) = cfg else {
+        return MirrorScope::default();
+    };
+    let default_tenant = cfg
+        .default_tenant
+        .clone()
+        .unwrap_or_else(|| "_".to_string());
+    match cfg.mode.as_deref() {
+        Some("all") => MirrorScope::All,
+        Some("allowlist") => MirrorScope::Allowlist {
+            tenants: cfg.tenants.clone(),
+            projects: cfg.projects.clone(),
+        },
+        Some("denylist") => MirrorScope::Denylist {
+            tenants: cfg.tenants.clone(),
+            projects: cfg.projects.clone(),
+        },
+        Some("manifest_linked") | Some("manifest-linked") => MirrorScope::ManifestLinked,
+        Some("default_tenant_only") | Some("default-tenant-only") | None => {
+            MirrorScope::DefaultTenantOnly { default_tenant }
+        }
+        Some(other) => {
+            warn!(
+                mode = %other,
+                "Unknown mirror.scope.mode, falling back to default_tenant_only"
+            );
+            MirrorScope::DefaultTenantOnly { default_tenant }
+        }
+    }
+}
+
 // ── Path Parameters ──────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
@@ -608,7 +658,7 @@ async fn get_manifest(
                     reference = %params.reference,
                     "Local manifest miss, trying upstream mirror"
                 );
-                let result = mirror
+                match mirror
                     .fetch_manifest(
                         &params.tenant,
                         &params.project,
@@ -616,8 +666,17 @@ async fn get_manifest(
                         &params.reference,
                     )
                     .await
-                    .map_err(|e| RegistryError::UpstreamError(e.to_string()))?;
-                result.data
+                {
+                    Ok(result) => result.data,
+                    Err(e) if e.is_not_found_equivalent() => {
+                        return Err(RegistryError::ManifestUnknown {
+                            reference: params.reference.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        return Err(RegistryError::UpstreamError(e.to_string()));
+                    }
+                }
             } else if let Some(ref failover) = state.failover_manager {
                 // Try reading from another region
                 info!(
@@ -1011,15 +1070,25 @@ async fn get_blob(
             .bytes()
             .await
             .map_err(|e| RegistryError::Storage(e.to_string()))?,
-        Err(_) => {
-            // Try mirror fallback
+        Err(store_err) => {
+            // Distinguish a true "blob not present" from a genuine
+            // backend failure. Only the former should fall through to
+            // the mirror path or return 404; a real IO error must
+            // still surface as 5xx (R4).
+            if !is_store_not_found(&store_err) {
+                return Err(RegistryError::Storage(store_err.to_string()));
+            }
+
             if let Some(ref mirror) = state.mirror_service {
+                // R3: scope check happens inside fetch_blob, which
+                // returns MirrorError::NotInScope for private projects
+                // without ever touching an upstream client.
                 debug!(
                     tenant = %params.tenant,
                     digest = %params.digest,
                     "Local blob miss, trying upstream mirror"
                 );
-                let result = mirror
+                match mirror
                     .fetch_blob(
                         &params.tenant,
                         &params.project,
@@ -1027,8 +1096,22 @@ async fn get_blob(
                         &params.digest,
                     )
                     .await
-                    .map_err(|e| RegistryError::UpstreamError(e.to_string()))?;
-                result.data
+                {
+                    Ok(result) => result.data,
+                    Err(e) if e.is_not_found_equivalent() => {
+                        // R1/R2: domain answer is "not found," regardless
+                        // of whether the mirror layer said so with a clean
+                        // 404, a breaker trip, or an upstream 5xx.
+                        return Err(RegistryError::BlobUnknown {
+                            digest: params.digest.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        // R4: genuine infrastructure failure (e.g. auth
+                        // config broken). Keep the 5xx path.
+                        return Err(RegistryError::UpstreamError(e.to_string()));
+                    }
+                }
             } else if let Some(ref failover) = state.failover_manager {
                 debug!(
                     tenant = %params.tenant,
@@ -2310,7 +2393,9 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .collect(),
                 cache_ttl_secs: mirror_cfg.cache_ttl_secs,
+                scope: mirror_scope_from_config(mirror_cfg.scope.as_ref()),
             };
+            info!(scope = ?svc_config.scope, "Mirror pullthrough scope");
             Some(Arc::new(MirrorService::new(&svc_config, store.clone())))
         } else {
             None
@@ -2581,4 +2666,86 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // T6: is_store_not_found distinguishes a true "not present" miss
+    // from a real backend IO failure. Only the former must fall
+    // through to the mirror or return 404; real IO errors stay 5xx.
+    #[test]
+    fn is_store_not_found_matches_only_not_found_variant() {
+        let not_found = object_store::Error::NotFound {
+            path: "tenant/project/name/blobs/sha256/abc".into(),
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "object not found",
+            )),
+        };
+        assert!(is_store_not_found(&not_found));
+
+        let io = object_store::Error::Generic {
+            store: "mock",
+            source: Box::new(std::io::Error::other("disk exploded")),
+        };
+        assert!(
+            !is_store_not_found(&io),
+            "real IO failures must NOT be flattened to 404 (R4)"
+        );
+    }
+
+    #[test]
+    fn mirror_scope_from_config_none_defaults_to_default_tenant_only() {
+        let scope = mirror_scope_from_config(None);
+        assert!(matches!(scope, MirrorScope::DefaultTenantOnly { .. }));
+        assert!(scope.tenant_project_eligible("_", "library"));
+        assert!(!scope.tenant_project_eligible("private", "app"));
+    }
+
+    #[test]
+    fn mirror_scope_from_config_allowlist() {
+        let cfg = nebula_common::config::MirrorScopeConfig {
+            mode: Some("allowlist".into()),
+            tenants: vec!["_".into()],
+            projects: vec!["public/library".into()],
+            default_tenant: None,
+        };
+        let scope = mirror_scope_from_config(Some(&cfg));
+        assert!(matches!(scope, MirrorScope::Allowlist { .. }));
+        assert!(scope.tenant_project_eligible("_", "anything"));
+        assert!(scope.tenant_project_eligible("public", "library"));
+        assert!(!scope.tenant_project_eligible("private", "app"));
+    }
+
+    #[test]
+    fn mirror_scope_from_config_manifest_linked() {
+        let cfg = nebula_common::config::MirrorScopeConfig {
+            mode: Some("manifest_linked".into()),
+            tenants: vec![],
+            projects: vec![],
+            default_tenant: None,
+        };
+        let scope = mirror_scope_from_config(Some(&cfg));
+        assert!(matches!(scope, MirrorScope::ManifestLinked));
+        assert!(!scope.decides_at_tenant_level());
+    }
+
+    #[test]
+    fn mirror_scope_from_config_unknown_mode_falls_back_safely() {
+        let cfg = nebula_common::config::MirrorScopeConfig {
+            mode: Some("typo-mode".into()),
+            tenants: vec![],
+            projects: vec![],
+            default_tenant: Some("__default__".into()),
+        };
+        let scope = mirror_scope_from_config(Some(&cfg));
+        match scope {
+            MirrorScope::DefaultTenantOnly { default_tenant } => {
+                assert_eq!(default_tenant, "__default__");
+            }
+            _ => panic!("unknown mode must fall back to DefaultTenantOnly"),
+        }
+    }
 }

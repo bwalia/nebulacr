@@ -82,6 +82,45 @@ pub struct MirrorConfig {
     pub upstreams: Vec<UpstreamRegistryConfig>,
     /// Default cache TTL in seconds.
     pub cache_ttl_secs: u64,
+    /// Optional scope rules. If omitted, a safe default is used:
+    /// mirror pullthrough is attempted only for the default tenant `_`
+    /// (i.e. standard public-image paths), and skipped for every other
+    /// tenant — which is where nebulacr is the origin of truth.
+    /// This keeps push-side blob probes for private projects from
+    /// contacting upstream registries at all (see CLAUDE-FIX-MIRROR-ISOLATION).
+    #[serde(default)]
+    pub scope: Option<MirrorScopeConfig>,
+}
+
+/// How to decide whether a given (tenant, project) is eligible for
+/// upstream mirror pullthrough.
+///
+/// The modes are additive — all enabled predicates are ORed together,
+/// and a request is eligible if any of them matches. When no scope is
+/// configured at all, the default behaviour is equivalent to
+/// `{ mode: "default_tenant_only", default_tenant: "_" }`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MirrorScopeConfig {
+    /// Matching mode. One of:
+    ///   - "allowlist"            — only the listed tenants/projects are mirrored
+    ///   - "denylist"             — everything except the listed tenants/projects is mirrored
+    ///   - "default_tenant_only"  — only requests on the default tenant `_` are mirrored
+    ///   - "manifest_linked"      — only blobs that belong to a manifest already fetched from upstream
+    ///   - "all"                  — legacy behaviour: everything is mirrored (NOT recommended)
+    ///
+    /// If unset, "default_tenant_only" is used.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Tenants on the allow/deny list.
+    #[serde(default)]
+    pub tenants: Vec<String>,
+    /// `tenant/project` pairs on the allow/deny list.
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// Name of the default tenant used for 2-segment Docker paths.
+    /// Defaults to "_" when omitted.
+    #[serde(default)]
+    pub default_tenant: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +144,7 @@ impl Default for MirrorConfig {
             enabled: false,
             upstreams: vec![],
             cache_ttl_secs: 3600,
+            scope: None,
         }
     }
 }

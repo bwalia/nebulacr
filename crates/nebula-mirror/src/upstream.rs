@@ -73,6 +73,25 @@ pub enum UpstreamError {
     BlobNotFound { digest: String },
 }
 
+impl UpstreamError {
+    /// Returns true when this upstream-level error means "the upstream
+    /// has no answer for us." From the domain perspective this
+    /// collapses: explicit 404s, breaker-open, transport failures,
+    /// and upstream 5xx all mean the same thing — nebulacr cannot
+    /// serve this blob from this upstream, so try the next one or
+    /// return 404 to the client.
+    pub fn is_not_found_equivalent(&self) -> bool {
+        match self {
+            UpstreamError::ManifestNotFound { .. } => true,
+            UpstreamError::BlobNotFound { .. } => true,
+            UpstreamError::CircuitBreakerOpen { .. } => true,
+            UpstreamError::Request(_) => true,
+            UpstreamError::Http { status, .. } => *status >= 500 || *status == 404,
+            UpstreamError::Auth(_) => false,
+        }
+    }
+}
+
 impl UpstreamClient {
     pub fn new(config: UpstreamConfig) -> Self {
         let http = reqwest::Client::builder()

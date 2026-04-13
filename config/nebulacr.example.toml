@@ -235,6 +235,25 @@ token_issue_rpm = 60
 # # Default cache TTL in seconds. Manifests older than this are re-fetched.
 # cache_ttl_secs = 3600
 
+# # Mirror scope: which (tenant, project) pairs are eligible for upstream
+# # pullthrough. If omitted, the default is "default_tenant_only" with
+# # default_tenant = "_", so private multi-tenant projects never contact
+# # upstream registries. This prevents push-time blob probes from tripping
+# # upstream circuit breakers and returning 502 on subsequent pushes.
+# #
+# # Modes:
+# #   "default_tenant_only" (default) — only the default tenant "_" hits upstream
+# #   "allowlist"                     — only listed tenants / projects
+# #   "denylist"                      — everything except listed tenants / projects
+# #   "manifest_linked"               — only blobs linked to an upstream-cached manifest
+# #   "all"                           — legacy behaviour, NOT recommended
+# #
+# # [mirror.scope]
+# # mode = "allowlist"
+# # tenants = ["_"]
+# # projects = ["public-proxy/library"]
+# # default_tenant = "_"
+
 # # Configure upstream registries. Multiple upstreams can be configured.
 # # On a local miss, upstreams are tried in order (tenant-specific first).
 
