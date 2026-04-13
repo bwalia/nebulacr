@@ -161,7 +161,10 @@ async fn spawn_upstream(behaviour: MockBehaviour) -> (String, Arc<AtomicUsize>) 
     };
 
     let app: Router = Router::new()
-        .route("/v2/{project}/{name}/blobs/{digest}", get(mock_blob_handler))
+        .route(
+            "/v2/{project}/{name}/blobs/{digest}",
+            get(mock_blob_handler),
+        )
         .route("/v2/", get(|| async { StatusCode::OK }))
         .with_state(state);
 
@@ -216,7 +219,10 @@ async fn t7_pullthrough_success_caches_locally() {
     // Local cache populated at the correct path.
     let cached = store
         .get(&StorePath::from(blob_path(
-            "_", "library", "alpine", "sha256:abc",
+            "_",
+            "library",
+            "alpine",
+            "sha256:abc",
         )))
         .await
         .expect("blob must be cached locally")
@@ -322,9 +328,7 @@ async fn t5_eligible_breaker_open_returns_not_found() {
     // is open, and the 6th call gets rejected internally with
     // CircuitBreakerOpen — which is_not_found_equivalent()==true.
     for _ in 0..5 {
-        let _ = svc
-            .fetch_blob("_", "library", "alpine", "sha256:xxx")
-            .await;
+        let _ = svc.fetch_blob("_", "library", "alpine", "sha256:xxx").await;
     }
 
     let err = svc

@@ -223,7 +223,10 @@ async fn dashboard_auth_middleware(
                         hex::encode(Sha256::digest(pass.as_bytes()))
                     };
                     user == config.username
-                        && constant_time_compare(pass_hash.as_bytes(), config.password_hash.as_bytes())
+                        && constant_time_compare(
+                            pass_hash.as_bytes(),
+                            config.password_hash.as_bytes(),
+                        )
                 } else {
                     false
                 }
@@ -357,9 +360,7 @@ fn is_store_not_found(err: &object_store::Error) -> bool {
 /// mirror service consumes. Unknown or missing modes fall back to
 /// `DefaultTenantOnly`, which is the safe default that keeps private
 /// projects out of the upstream path.
-fn mirror_scope_from_config(
-    cfg: Option<&nebula_common::config::MirrorScopeConfig>,
-) -> MirrorScope {
+fn mirror_scope_from_config(cfg: Option<&nebula_common::config::MirrorScopeConfig>) -> MirrorScope {
     let Some(cfg) = cfg else {
         return MirrorScope::default();
     };
@@ -2515,10 +2516,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Dashboard state (shared with dashboard handlers)
-    let auth_service_url = format!(
-        "http://{}",
-        state.config.server.auth_listen_addr
-    );
+    let auth_service_url = format!("http://{}", state.config.server.auth_listen_addr);
     let dashboard_state = dashboard::DashboardState {
         audit_log: audit_log.clone(),
         store: state.store.clone(),

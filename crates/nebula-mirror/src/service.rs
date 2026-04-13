@@ -336,7 +336,9 @@ impl MirrorService {
         // from upstream. Without this, a private layer digest would
         // still trigger the upstream probe and trip the breaker.
         if matches!(self.scope, MirrorScope::ManifestLinked)
-            && !self.is_blob_manifest_linked(tenant, project, name, digest).await
+            && !self
+                .is_blob_manifest_linked(tenant, project, name, digest)
+                .await
         {
             return Err(MirrorError::NotInScope);
         }
