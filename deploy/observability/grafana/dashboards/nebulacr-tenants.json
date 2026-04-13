@@ -1,0 +1,122 @@
+{
+  "uid": "nebulacr-tenants",
+  "title": "NebulaCR — Tenants & Developer Usage",
+  "tags": ["nebulacr", "tenant", "developer"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(registry_blob_upload_bytes_total, tenant)",
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Push bytes / sec by tenant",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "expr": "sum by (tenant) (rate(registry_blob_upload_bytes_total{tenant=~\"$tenant\"}[5m]))", "legendFormat": "{{tenant}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Pull operations / sec by tenant",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (tenant) (rate(registry_pull_total{tenant=~\"$tenant\"}[5m]))", "legendFormat": "{{tenant}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Deletes / sec by tenant",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (tenant) (rate(registry_delete_total{tenant=~\"$tenant\"}[5m]))", "legendFormat": "{{tenant}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Rate-limit rejections by tenant",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (tenant) (rate(nebulacr_rate_limit_rejected_total{tenant=~\"$tenant\"}[5m]))", "legendFormat": "{{tenant}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Top 10 tenants by push bytes (24h)",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": { "showHeader": true },
+      "targets": [
+        { "expr": "topk(10, sum by (tenant) (increase(registry_blob_upload_bytes_total[24h])))", "format": "table", "instant": true, "refId": "A" }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "renameByName": { "Value": "Push bytes (24h)" }, "indexByName": {} } }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Push bytes (24h)" }, "properties": [{ "id": "unit", "value": "decbytes" }] }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Top 10 tenants by pull ops (24h)",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": { "showHeader": true },
+      "targets": [
+        { "expr": "topk(10, sum by (tenant) (increase(registry_pull_total[24h])))", "format": "table", "instant": true, "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Webhook deliveries by event",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (event, outcome) (rate(nebulacr_webhook_deliveries_total[5m]))", "legendFormat": "{{event}} / {{outcome}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "p95 webhook delivery latency",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(nebulacr_webhook_delivery_duration_seconds_bucket[5m])))", "legendFormat": "{{endpoint}}", "refId": "A" }
+      ]
+    }
+  ]
+}

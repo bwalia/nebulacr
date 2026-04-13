@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: nebulacr-local
+    env: dev
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Registry main HTTP API (in-process /metrics endpoint).
+  # Note: the registry runs the exporter on the same port as the API at
+  # path /metrics. The dedicated metrics_addr in config.toml is reserved
+  # for an out-of-band binding and may not always be wired up — scraping
+  # the API port via /metrics works in every deployment topology.
+  - job_name: nebulacr-registry
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - registry:5000
+        labels:
+          service: nebulacr-registry
+
+  - job_name: nebulacr-auth
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - auth:5001
+        labels:
+          service: nebulacr-auth
+
+  # Self-scrape so we can alert on Prometheus health.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

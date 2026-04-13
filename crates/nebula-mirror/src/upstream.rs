@@ -1,10 +1,32 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use metrics::{counter, histogram};
 use nebula_resilience::{CircuitBreaker, CircuitBreakerConfig, RetryPolicy};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
+
+fn record_upstream_outcome(
+    upstream: &str,
+    kind: &'static str,
+    started: Instant,
+    outcome: &'static str,
+    bytes_len: u64,
+) {
+    let elapsed = started.elapsed().as_secs_f64();
+    histogram!("nebulacr_mirror_upstream_latency_seconds",
+        "upstream" => upstream.to_string(), "kind" => kind)
+    .record(elapsed);
+    counter!("nebulacr_mirror_upstream_requests_total",
+        "upstream" => upstream.to_string(), "kind" => kind, "outcome" => outcome)
+    .increment(1);
+    if outcome == "success" && bytes_len > 0 {
+        counter!("nebulacr_mirror_upstream_bytes_total",
+            "upstream" => upstream.to_string(), "kind" => kind)
+        .increment(bytes_len);
+    }
+}
 
 /// Configuration for an upstream registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +193,7 @@ impl UpstreamClient {
         );
 
         let url = format!("{}/v2/{}/manifests/{}", self.config.url, repo, reference);
+        let started = Instant::now();
 
         let cb = self.circuit_breaker.clone();
         let result = cb
@@ -268,13 +291,27 @@ impl UpstreamClient {
             .await;
 
         match result {
-            Ok(r) => Ok(r),
+            Ok(r) => {
+                let len = r.data.len() as u64;
+                record_upstream_outcome(&self.config.name, "manifest", started, "success", len);
+                Ok(r)
+            }
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::BreakerOpen(_)) => {
+                record_upstream_outcome(&self.config.name, "manifest", started, "breaker_open", 0);
                 Err(UpstreamError::CircuitBreakerOpen {
                     name: self.config.name.clone(),
                 })
             }
-            Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => Err(e),
+            Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => {
+                let outcome = match &e {
+                    UpstreamError::ManifestNotFound { .. } => "not_found",
+                    UpstreamError::Auth(_) => "auth_error",
+                    UpstreamError::Http { status, .. } if *status >= 500 => "upstream_5xx",
+                    _ => "error",
+                };
+                record_upstream_outcome(&self.config.name, "manifest", started, outcome, 0);
+                Err(e)
+            }
         }
     }
 
@@ -292,6 +329,7 @@ impl UpstreamClient {
         );
 
         let url = format!("{}/v2/{}/blobs/{}", self.config.url, repo, digest);
+        let started = Instant::now();
 
         let cb = self.circuit_breaker.clone();
         let result = cb
@@ -369,13 +407,27 @@ impl UpstreamClient {
             .await;
 
         match result {
-            Ok(r) => Ok(r),
+            Ok(r) => {
+                let len = r.data.len() as u64;
+                record_upstream_outcome(&self.config.name, "blob", started, "success", len);
+                Ok(r)
+            }
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::BreakerOpen(_)) => {
+                record_upstream_outcome(&self.config.name, "blob", started, "breaker_open", 0);
                 Err(UpstreamError::CircuitBreakerOpen {
                     name: self.config.name.clone(),
                 })
             }
-            Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => Err(e),
+            Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => {
+                let outcome = match &e {
+                    UpstreamError::BlobNotFound { .. } => "not_found",
+                    UpstreamError::Auth(_) => "auth_error",
+                    UpstreamError::Http { status, .. } if *status >= 500 => "upstream_5xx",
+                    _ => "error",
+                };
+                record_upstream_outcome(&self.config.name, "blob", started, outcome, 0);
+                Err(e)
+            }
         }
     }
 

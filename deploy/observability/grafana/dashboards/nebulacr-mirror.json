@@ -1,0 +1,117 @@
+{
+  "uid": "nebulacr-mirror",
+  "title": "NebulaCR — Mirror & Pull-through Cache",
+  "tags": ["nebulacr", "mirror", "cache"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Cache miss rate (1h)",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(nebulacr_mirror_cache_misses_total[1h]))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Upstream errors / sec",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(nebulacr_mirror_upstream_requests_total{outcome=~\"error|upstream_5xx|breaker_open\"}[5m]))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Bytes pulled from upstream (5m)",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "expr": "sum(rate(nebulacr_mirror_upstream_bytes_total[5m]))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Mirror fetch outcomes",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "stacking": { "mode": "normal" } } } },
+      "targets": [
+        { "expr": "sum by (kind, outcome) (rate(nebulacr_mirror_fetch_total[5m]))", "legendFormat": "{{kind}} / {{outcome}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Upstream request rate by upstream",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (upstream, outcome) (rate(nebulacr_mirror_upstream_requests_total[5m]))", "legendFormat": "{{upstream}} / {{outcome}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "p95 upstream latency",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, upstream, kind) (rate(nebulacr_mirror_upstream_latency_seconds_bucket[5m])))", "legendFormat": "{{upstream}} {{kind}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Bytes pulled from upstream",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "expr": "sum by (upstream, kind) (rate(nebulacr_mirror_upstream_bytes_total[5m]))", "legendFormat": "{{upstream}} {{kind}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Upstream circuit breaker state",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CLOSED" }, "1": { "text": "HALF" }, "2": { "text": "OPEN" } } }
+          ]
+        }
+      },
+      "targets": [
+        { "expr": "nebulacr_circuit_breaker_state{breaker=~\"upstream-.*\"}", "legendFormat": "{{breaker}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Cache population bytes",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "expr": "sum by (upstream, kind) (rate(nebulacr_mirror_cache_population_bytes_total[5m]))", "legendFormat": "{{upstream}} {{kind}}", "refId": "A" }
+      ]
+    }
+  ]
+}

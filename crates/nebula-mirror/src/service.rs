@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::Utc;
+use metrics::counter;
 use nebula_common::storage::{blob_path, manifest_path, sha256_digest};
 use object_store::{ObjectStore, path::Path as StorePath};
 use serde::{Deserialize, Serialize};
@@ -213,6 +214,8 @@ impl MirrorService {
         // R3: scope check. Private projects skip the upstream path
         // entirely, no matter what the upstream list contains.
         if !self.is_scope_eligible(tenant, project) {
+            counter!("nebulacr_mirror_fetch_total", "kind" => "manifest", "outcome" => "skipped_scope")
+                .increment(1);
             return Err(MirrorError::NotInScope);
         }
 
@@ -221,8 +224,14 @@ impl MirrorService {
         // Try tenant-specific upstream first, then all upstreams
         let upstream_indices = self.resolve_upstreams(tenant);
         if upstream_indices.is_empty() {
+            counter!("nebulacr_mirror_fetch_total", "kind" => "manifest", "outcome" => "no_upstreams")
+                .increment(1);
             return Err(MirrorError::NoUpstreamsConfigured);
         }
+
+        // Reaching this point means the local lookup missed and we need
+        // to consult the upstream — that's the cache-miss event.
+        counter!("nebulacr_mirror_cache_misses_total", "kind" => "manifest").increment(1);
 
         let mut all_not_found = true;
         let mut last_err = None;
@@ -285,6 +294,13 @@ impl MirrorService {
                         "Cached manifest from upstream"
                     );
 
+                    counter!("nebulacr_mirror_fetch_total",
+                        "kind" => "manifest", "outcome" => "fetched")
+                    .increment(1);
+                    counter!("nebulacr_mirror_cache_population_bytes_total",
+                        "kind" => "manifest", "upstream" => upstream.config().name.clone())
+                    .increment(response.data.len() as u64);
+
                     return Ok(MirrorFetchResult {
                         data: response.data,
                         content_type: response.content_type,
@@ -310,8 +326,13 @@ impl MirrorService {
         // non-not-found-equivalent failures (auth errors) keep the
         // original Upstream() wrapper.
         if all_not_found {
+            counter!("nebulacr_mirror_fetch_total",
+                "kind" => "manifest", "outcome" => "not_found")
+            .increment(1);
             return Err(MirrorError::NotFoundOnAnyUpstream);
         }
+        counter!("nebulacr_mirror_fetch_total", "kind" => "manifest", "outcome" => "error")
+            .increment(1);
         Err(last_err
             .map(MirrorError::Upstream)
             .unwrap_or(MirrorError::NoUpstreamsConfigured))
@@ -328,6 +349,8 @@ impl MirrorService {
         // R3: scope check. Blob probes for private projects skip the
         // upstream path entirely.
         if !self.is_scope_eligible(tenant, project) {
+            counter!("nebulacr_mirror_fetch_total", "kind" => "blob", "outcome" => "skipped_scope")
+                .increment(1);
             return Err(MirrorError::NotInScope);
         }
 
@@ -340,6 +363,8 @@ impl MirrorService {
                 .is_blob_manifest_linked(tenant, project, name, digest)
                 .await
         {
+            counter!("nebulacr_mirror_fetch_total", "kind" => "blob", "outcome" => "skipped_unlinked")
+                .increment(1);
             return Err(MirrorError::NotInScope);
         }
 
@@ -347,8 +372,12 @@ impl MirrorService {
 
         let upstream_indices = self.resolve_upstreams(tenant);
         if upstream_indices.is_empty() {
+            counter!("nebulacr_mirror_fetch_total", "kind" => "blob", "outcome" => "no_upstreams")
+                .increment(1);
             return Err(MirrorError::NoUpstreamsConfigured);
         }
+
+        counter!("nebulacr_mirror_cache_misses_total", "kind" => "blob").increment(1);
 
         let mut all_not_found = true;
         let mut last_err = None;
@@ -391,6 +420,13 @@ impl MirrorService {
                         "Cached blob from upstream"
                     );
 
+                    counter!("nebulacr_mirror_fetch_total",
+                        "kind" => "blob", "outcome" => "fetched")
+                    .increment(1);
+                    counter!("nebulacr_mirror_cache_population_bytes_total",
+                        "kind" => "blob", "upstream" => upstream.config().name.clone())
+                    .increment(response.data.len() as u64);
+
                     return Ok(MirrorFetchResult {
                         data: response.data,
                         content_type: response.content_type,
@@ -412,8 +448,12 @@ impl MirrorService {
         }
 
         if all_not_found {
+            counter!("nebulacr_mirror_fetch_total", "kind" => "blob", "outcome" => "not_found")
+                .increment(1);
             return Err(MirrorError::NotFoundOnAnyUpstream);
         }
+        counter!("nebulacr_mirror_fetch_total", "kind" => "blob", "outcome" => "error")
+            .increment(1);
         Err(last_err
             .map(MirrorError::Upstream)
             .unwrap_or(MirrorError::NoUpstreamsConfigured))

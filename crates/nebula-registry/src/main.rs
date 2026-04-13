@@ -24,7 +24,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use governor::{Quota, RateLimiter, clock::DefaultClock, state::keyed::DefaultKeyedStateStore};
 use jsonwebtoken::{DecodingKey, TokenData, Validation};
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
@@ -338,10 +338,122 @@ async fn rate_limit_middleware(
     };
 
     if state.default_rate_limiter.check_key(&key).is_err() {
+        counter!("nebulacr_rate_limit_rejected_total", "tenant" => key.clone()).increment(1);
         return Err(RegistryError::RateLimitExceeded);
     }
 
     Ok(next.run(request).await)
+}
+
+// ── HTTP Metrics Middleware ──────────────────────────────────────────────────
+
+/// Map a raw URL path onto a low-cardinality route label so dashboards
+/// don't blow up. Anything inside `/v2/.../{thing}/...` collapses to a
+/// stable family identifier.
+fn classify_route(path: &str, method: &str) -> &'static str {
+    if path == "/v2/" {
+        return "v2_check";
+    }
+    if path == "/v2/_catalog" {
+        return "catalog";
+    }
+    if path == "/health" {
+        return "health";
+    }
+    if path == "/metrics" {
+        return "metrics";
+    }
+    if path.starts_with("/auth/token") {
+        return "auth_token_proxy";
+    }
+    if path.starts_with("/internal/replicate/manifest") {
+        return "internal_replicate_manifest";
+    }
+    if path.starts_with("/internal/replicate/blob") {
+        return "internal_replicate_blob";
+    }
+    if path.starts_with("/internal/replicate/delete") {
+        return "internal_replicate_delete";
+    }
+    if path.starts_with("/internal/replication/status") {
+        return "internal_replication_status";
+    }
+    if path.starts_with("/dashboard") {
+        return "dashboard";
+    }
+    if path.starts_with("/api/") {
+        return "dashboard_api";
+    }
+    if path.starts_with("/v2/") {
+        if path.contains("/manifests/") {
+            return match method {
+                "GET" => "manifest_get",
+                "HEAD" => "manifest_head",
+                "PUT" => "manifest_put",
+                "DELETE" => "manifest_delete",
+                _ => "manifest_other",
+            };
+        }
+        if path.contains("/blobs/uploads") {
+            return match method {
+                "POST" => "blob_upload_initiate",
+                "PATCH" => "blob_upload_chunk",
+                "PUT" => "blob_upload_complete",
+                _ => "blob_upload_other",
+            };
+        }
+        if path.contains("/blobs/") {
+            return match method {
+                "GET" => "blob_get",
+                "HEAD" => "blob_head",
+                _ => "blob_other",
+            };
+        }
+        if path.contains("/tags/list") {
+            return "tags_list";
+        }
+        if path.contains("/status/") {
+            return "image_status";
+        }
+        return "v2_other";
+    }
+    "other"
+}
+
+/// Status class — `2xx`, `3xx`, ... — used as a low-cardinality label.
+fn status_class(status: u16) -> &'static str {
+    match status / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "other",
+    }
+}
+
+async fn http_metrics_middleware(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let method_owned = request.method().as_str().to_string();
+    let route = classify_route(request.uri().path(), &method_owned);
+
+    gauge!("nebulacr_http_requests_in_flight", "route" => route).increment(1.0);
+
+    let response = next.run(request).await;
+
+    let elapsed = started.elapsed().as_secs_f64();
+    let status = response.status().as_u16();
+    let class = status_class(status);
+
+    gauge!("nebulacr_http_requests_in_flight", "route" => route).decrement(1.0);
+    counter!("nebulacr_http_requests_total",
+        "route" => route, "method" => method_owned.clone(), "status_class" => class)
+    .increment(1);
+    histogram!("nebulacr_http_request_duration_seconds",
+        "route" => route, "method" => method_owned)
+    .record(elapsed);
+
+    response
 }
 
 // ── Storage error classification ────────────────────────────────────────────
@@ -2224,7 +2336,9 @@ async fn main() -> anyhow::Result<()> {
         .install_recorder()
         .expect("failed to install Prometheus recorder");
 
-    // Pre-register all metrics so they appear in /metrics from startup
+    // Pre-register all metrics so they appear in /metrics from startup.
+    // Existing per-operation counters & latency histogram (kept for back-compat
+    // dashboards).
     counter!("registry_manifest_push_total").increment(0);
     counter!("registry_manifest_pull_total").increment(0);
     counter!("registry_blob_pull_total").increment(0);
@@ -2239,6 +2353,87 @@ async fn main() -> anyhow::Result<()> {
     histogram!("registry_request_duration_seconds", "operation" => "manifest.delete").record(0.0);
     histogram!("registry_request_duration_seconds", "operation" => "blob.pull").record(0.0);
     histogram!("registry_request_duration_seconds", "operation" => "blob.push").record(0.0);
+
+    // ── Enterprise observability (HTTP, storage, mirror, replication, webhook) ──
+    // Pre-publish the build_info gauge (fixed value 1, labels carry version data
+    // — same trick used by node_exporter).
+    gauge!("nebulacr_build_info",
+        "service" => "registry",
+        "version" => env!("CARGO_PKG_VERSION"),
+        "rustc" => option_env!("RUSTC_VERSION").unwrap_or("unknown"))
+    .set(1.0);
+
+    // HTTP — populated by http_metrics_middleware.
+    counter!("nebulacr_http_requests_total",
+        "route" => "v2_check", "method" => "GET", "status_class" => "2xx")
+    .increment(0);
+    histogram!("nebulacr_http_request_duration_seconds",
+        "route" => "v2_check", "method" => "GET")
+    .record(0.0);
+    gauge!("nebulacr_http_requests_in_flight", "route" => "v2_check").set(0.0);
+
+    // Rate limiter — populated by rate_limit_middleware.
+    counter!("nebulacr_rate_limit_rejected_total", "tenant" => "anonymous").increment(0);
+
+    // Storage backend (resilience layer).
+    for op in [
+        "put", "put_opts", "get", "get_opts", "head", "delete", "list",
+    ] {
+        counter!("nebulacr_storage_operations_total",
+            "operation" => op, "outcome" => "success")
+        .increment(0);
+        counter!("nebulacr_storage_operations_total",
+            "operation" => op, "outcome" => "error")
+        .increment(0);
+        counter!("nebulacr_storage_operation_errors_total", "operation" => op).increment(0);
+        histogram!("nebulacr_storage_operation_duration_seconds", "operation" => op).record(0.0);
+        counter!("nebulacr_retry_attempts_total",
+            "operation" => op, "outcome" => "recovered")
+        .increment(0);
+        counter!("nebulacr_retry_attempts_total",
+            "operation" => op, "outcome" => "exhausted")
+        .increment(0);
+    }
+
+    // Circuit breakers — pre-publish the storage one so dashboards always have a series.
+    gauge!("nebulacr_circuit_breaker_state", "breaker" => "storage").set(0.0);
+    counter!("nebulacr_circuit_breaker_transitions_total",
+        "breaker" => "storage", "to" => "open")
+    .increment(0);
+    counter!("nebulacr_circuit_breaker_rejections_total", "breaker" => "storage").increment(0);
+
+    // Mirror.
+    for kind in ["manifest", "blob"] {
+        counter!("nebulacr_mirror_cache_misses_total", "kind" => kind).increment(0);
+        for outcome in [
+            "fetched",
+            "not_found",
+            "error",
+            "skipped_scope",
+            "skipped_unlinked",
+            "no_upstreams",
+        ] {
+            counter!("nebulacr_mirror_fetch_total", "kind" => kind, "outcome" => outcome)
+                .increment(0);
+        }
+    }
+
+    // Replication.
+    counter!("nebulacr_replication_enqueued_total", "kind" => "manifest").increment(0);
+    counter!("nebulacr_replication_enqueued_total", "kind" => "blob").increment(0);
+    counter!("nebulacr_replication_enqueued_total", "kind" => "delete").increment(0);
+    counter!("nebulacr_replication_enqueue_failures_total").increment(0);
+    gauge!("nebulacr_replication_queue_depth").set(0.0);
+
+    // Webhook.
+    counter!("nebulacr_webhook_enqueued_total", "event" => "manifest.push").increment(0);
+    counter!("nebulacr_webhook_enqueued_total", "event" => "manifest.delete").increment(0);
+    counter!("nebulacr_webhook_enqueued_total", "event" => "blob.push").increment(0);
+    counter!("nebulacr_webhook_enqueue_failures_total", "event" => "manifest.push").increment(0);
+
+    // Process start-time gauge — Prometheus convention; uptime is computed
+    // by Grafana as `time() - nebulacr_process_start_time_seconds`.
+    gauge!("nebulacr_process_start_time_seconds").set(chrono::Utc::now().timestamp() as f64);
 
     // Initialize object store based on configured backend
     let storage_backend = config.storage.backend.as_str();
@@ -2636,6 +2831,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(internal_routes.clone())
         .layer(DefaultBodyLimit::disable()) // No limit — OCI blob sizes are unbounded
         .layer(middleware::from_fn(request_id_middleware))
+        .layer(middleware::from_fn(http_metrics_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_middleware,

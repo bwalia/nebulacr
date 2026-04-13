@@ -1,9 +1,16 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
+
+// State encoding for the `nebulacr_circuit_breaker_state` gauge.
+// Kept stable so dashboards and alerts can match on numeric value.
+const STATE_CLOSED: f64 = 0.0;
+const STATE_HALF_OPEN: f64 = 1.0;
+const STATE_OPEN: f64 = 2.0;
 
 /// Configuration for the circuit breaker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,13 +74,31 @@ pub enum CircuitBreakerError {
 
 impl CircuitBreaker {
     pub fn new(name: impl Into<String>, config: CircuitBreakerConfig) -> Self {
+        let name = name.into();
+        // Pre-publish the gauge so the metric exists from startup.
+        gauge!("nebulacr_circuit_breaker_state", "breaker" => name.clone()).set(STATE_CLOSED);
+        counter!("nebulacr_circuit_breaker_transitions_total",
+            "breaker" => name.clone(), "to" => "closed")
+        .increment(0);
+        counter!("nebulacr_circuit_breaker_rejections_total", "breaker" => name.clone())
+            .increment(0);
         Self {
             state: RwLock::new(BreakerState::Closed {
                 consecutive_failures: 0,
             }),
             config,
-            name: name.into(),
+            name,
         }
+    }
+
+    fn set_state_gauge(&self, value: f64) {
+        gauge!("nebulacr_circuit_breaker_state", "breaker" => self.name.clone()).set(value);
+    }
+
+    fn record_transition(&self, to: &'static str) {
+        counter!("nebulacr_circuit_breaker_transitions_total",
+            "breaker" => self.name.clone(), "to" => to)
+        .increment(1);
     }
 
     /// Execute an async operation through the circuit breaker.
@@ -96,6 +121,9 @@ impl CircuitBreaker {
                             remaining_secs = (open_duration - elapsed).as_secs(),
                             "Circuit breaker is open, rejecting call"
                         );
+                        counter!("nebulacr_circuit_breaker_rejections_total",
+                            "breaker" => self.name.clone())
+                        .increment(1);
                         return Err(CircuitBreakerCallError::BreakerOpen(
                             CircuitBreakerError::Open {
                                 name: self.name.clone(),
@@ -121,6 +149,8 @@ impl CircuitBreaker {
                     *state = BreakerState::HalfOpen {
                         consecutive_successes: 0,
                     };
+                    self.set_state_gauge(STATE_HALF_OPEN);
+                    self.record_transition("half_open");
                 }
             }
         }
@@ -154,6 +184,8 @@ impl CircuitBreaker {
                     *state = BreakerState::Closed {
                         consecutive_failures: 0,
                     };
+                    self.set_state_gauge(STATE_CLOSED);
+                    self.record_transition("closed");
                 } else {
                     *state = BreakerState::HalfOpen {
                         consecutive_successes: new_successes,
@@ -165,6 +197,8 @@ impl CircuitBreaker {
                 *state = BreakerState::Closed {
                     consecutive_failures: 0,
                 };
+                self.set_state_gauge(STATE_CLOSED);
+                self.record_transition("closed");
             }
         }
     }
@@ -186,6 +220,8 @@ impl CircuitBreaker {
                     *state = BreakerState::Open {
                         opened_at: Instant::now(),
                     };
+                    self.set_state_gauge(STATE_OPEN);
+                    self.record_transition("open");
                 } else {
                     *state = BreakerState::Closed {
                         consecutive_failures: new_failures,
@@ -197,6 +233,8 @@ impl CircuitBreaker {
                 *state = BreakerState::Open {
                     opened_at: Instant::now(),
                 };
+                self.set_state_gauge(STATE_OPEN);
+                self.record_transition("open");
             }
             BreakerState::Open { .. } => {
                 // Already open, nothing to do

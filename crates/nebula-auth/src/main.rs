@@ -19,17 +19,20 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
 };
 use base64::Engine;
 use chrono::Utc;
 use governor::{Quota, RateLimiter};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, encode};
+use metrics::{counter, gauge, histogram};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -2800,6 +2803,105 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+// ── HTTP metrics middleware ───────────────────────────────────────
+
+fn auth_classify_route(path: &str) -> &'static str {
+    if path == "/health" {
+        return "health";
+    }
+    if path == "/metrics" {
+        return "metrics";
+    }
+    if path.starts_with("/auth/oidc/login") {
+        return "oidc_login";
+    }
+    if path.starts_with("/auth/oidc/callback") {
+        return "oidc_callback";
+    }
+    if path.starts_with("/auth/token/refresh") {
+        return "token_refresh";
+    }
+    if path.starts_with("/auth/token/revoke") {
+        return "token_revoke";
+    }
+    if path.starts_with("/auth/token/revoked") {
+        return "token_revoked_list";
+    }
+    if path.starts_with("/auth/token/json") {
+        return "token_json";
+    }
+    if path.starts_with("/auth/token") {
+        return "token";
+    }
+    if path.starts_with("/auth/github-actions") {
+        return "github_actions_token";
+    }
+    if path.starts_with("/auth/introspect") {
+        return "introspect";
+    }
+    if path.starts_with("/auth/.well-known/jwks.json") {
+        return "jwks";
+    }
+    if path.starts_with("/auth/audit") {
+        return "audit";
+    }
+    if path.starts_with("/auth/ci/token") {
+        return "ci_token";
+    }
+    if path.starts_with("/auth/credential-exchange") {
+        return "credential_exchange";
+    }
+    if path.starts_with("/api/v1/robot-accounts") {
+        return "robot_accounts";
+    }
+    if path.starts_with("/api/v1/users") {
+        return "users";
+    }
+    if path.starts_with("/api/v1/groups") {
+        return "groups";
+    }
+    if path.starts_with("/scim/v2/Users") {
+        return "scim_users";
+    }
+    if path.starts_with("/scim/v2/Groups") {
+        return "scim_groups";
+    }
+    "other"
+}
+
+fn auth_status_class(status: u16) -> &'static str {
+    match status / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "other",
+    }
+}
+
+async fn auth_http_metrics_middleware(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let route = auth_classify_route(request.uri().path());
+    let method = request.method().as_str().to_string();
+
+    gauge!("nebulacr_auth_http_requests_in_flight", "route" => route).increment(1.0);
+    let response = next.run(request).await;
+    let elapsed = started.elapsed().as_secs_f64();
+    let status = response.status().as_u16();
+    let class = auth_status_class(status);
+
+    gauge!("nebulacr_auth_http_requests_in_flight", "route" => route).decrement(1.0);
+    counter!("nebulacr_auth_http_requests_total",
+        "route" => route, "method" => method.clone(), "status_class" => class)
+    .increment(1);
+    histogram!("nebulacr_auth_http_request_duration_seconds",
+        "route" => route, "method" => method)
+    .record(elapsed);
+
+    response
+}
+
 /// GET /metrics — Prometheus metrics.
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
@@ -3647,6 +3749,22 @@ async fn main() -> anyhow::Result<()> {
     metrics::counter!("registry_token_refresh_total").increment(0);
     metrics::counter!("registry_token_revocation_total").increment(0);
 
+    // ── Enterprise observability pre-registration ──
+    gauge!("nebulacr_build_info",
+        "service" => "auth",
+        "version" => env!("CARGO_PKG_VERSION"),
+        "rustc" => option_env!("RUSTC_VERSION").unwrap_or("unknown"))
+    .set(1.0);
+    gauge!("nebulacr_process_start_time_seconds").set(chrono::Utc::now().timestamp() as f64);
+    counter!("nebulacr_auth_http_requests_total",
+        "route" => "health", "method" => "GET", "status_class" => "2xx")
+    .increment(0);
+    histogram!("nebulacr_auth_http_request_duration_seconds",
+        "route" => "token", "method" => "POST")
+    .record(0.0);
+    gauge!("nebulacr_auth_http_requests_in_flight", "route" => "token").set(0.0);
+    counter!("nebulacr_auth_circuit_breaker_rejections_total", "breaker" => "noop").increment(0);
+
     let state = AppState {
         encoding_key,
         decoding_key,
@@ -3725,6 +3843,7 @@ async fn main() -> anyhow::Result<()> {
         // Infrastructure
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
+        .layer(middleware::from_fn(auth_http_metrics_middleware))
         .layer(
             tower_http::trace::TraceLayer::new_for_http().make_span_with(
                 |request: &axum::http::Request<_>| {

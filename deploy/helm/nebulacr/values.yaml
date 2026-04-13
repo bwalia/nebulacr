@@ -353,6 +353,28 @@ serviceMonitor:
   # Additional relabelings
   relabelings: []
 
+## -- Prometheus alerting rules (PrometheusRule CRD) --
+## Ships the same alert set bundled at deploy/observability/prometheus/rules/.
+## Disabled by default — enable when prometheus-operator is installed.
+prometheusRule:
+  enabled: false
+  namespace: ""
+  labels: {}
+  # Override per-alert thresholds without forking the chart.
+  thresholds:
+    http5xxRatio: 0.05
+    httpP99LatencySeconds: 2
+    storageP99LatencySeconds: 5
+    storageErrorRate: 0.1
+    retryExhaustionRate: 1
+    mirrorUpstreamErrorRate: 0.5
+    mirrorCacheMissRatio: 0.5
+    replicationLagSeconds: 300
+    replicationQueueDepth: 800
+    replicationFailureRate: 0.1
+    authFailureRate: 5
+    webhookFailureRate: 0.05
+
 ## -- Service accounts --
 serviceAccount:
   create: true

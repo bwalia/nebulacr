@@ -5,10 +5,11 @@
 //! verification and configurable retry with backoff.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use metrics::{counter, histogram};
 use reqwest::Client;
 use serde::Serialize;
 use sha2::Sha256;
@@ -133,7 +134,10 @@ pub struct WebhookHandle {
 impl WebhookHandle {
     /// Enqueue a webhook payload for async delivery.
     pub async fn notify(&self, payload: WebhookPayload) {
+        let event = payload.event.clone();
+        counter!("nebulacr_webhook_enqueued_total", "event" => event.clone()).increment(1);
         if let Err(e) = self.tx.send(payload).await {
+            counter!("nebulacr_webhook_enqueue_failures_total", "event" => event).increment(1);
             warn!(error = %e, "Failed to enqueue webhook event (channel full or closed)");
         }
     }
@@ -214,6 +218,7 @@ impl WebhookNotifier {
         body: &[u8],
     ) {
         let max_retries = self.config.max_retries;
+        let started = Instant::now();
 
         for attempt in 0..=max_retries {
             let mut request = self
@@ -248,9 +253,21 @@ impl WebhookNotifier {
                         status = %resp.status(),
                         "Webhook delivered"
                     );
+                    histogram!("nebulacr_webhook_delivery_duration_seconds",
+                        "endpoint" => endpoint.name.clone(), "event" => payload.event.clone())
+                    .record(started.elapsed().as_secs_f64());
+                    counter!("nebulacr_webhook_deliveries_total",
+                        "endpoint" => endpoint.name.clone(),
+                        "event" => payload.event.clone(),
+                        "outcome" => "success")
+                    .increment(1);
                     return;
                 }
                 Ok(resp) => {
+                    counter!("nebulacr_webhook_delivery_attempts_total",
+                        "endpoint" => endpoint.name.clone(),
+                        "outcome" => "non_success_status")
+                    .increment(1);
                     warn!(
                         endpoint = %endpoint.name,
                         event_id = %payload.id,
@@ -260,6 +277,10 @@ impl WebhookNotifier {
                     );
                 }
                 Err(e) => {
+                    counter!("nebulacr_webhook_delivery_attempts_total",
+                        "endpoint" => endpoint.name.clone(),
+                        "outcome" => "transport_error")
+                    .increment(1);
                     warn!(
                         endpoint = %endpoint.name,
                         event_id = %payload.id,
@@ -277,6 +298,14 @@ impl WebhookNotifier {
             }
         }
 
+        histogram!("nebulacr_webhook_delivery_duration_seconds",
+            "endpoint" => endpoint.name.clone(), "event" => payload.event.clone())
+        .record(started.elapsed().as_secs_f64());
+        counter!("nebulacr_webhook_deliveries_total",
+            "endpoint" => endpoint.name.clone(),
+            "event" => payload.event.clone(),
+            "outcome" => "failed")
+        .increment(1);
         error!(
             endpoint = %endpoint.name,
             event_id = %payload.id,

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use metrics::{counter, gauge};
 use serde::Serialize;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -102,6 +103,9 @@ impl FailoverManager {
                                 region = %region.name,
                                 "Region recovered and is now healthy"
                             );
+                            counter!("nebulacr_region_health_transitions_total",
+                                "region" => region.name.clone(), "to" => "healthy")
+                            .increment(1);
                         }
                         health.healthy = true;
                         health.consecutive_failures = 0;
@@ -119,6 +123,9 @@ impl FailoverManager {
                                     status = %resp.status(),
                                     "Region marked as unhealthy"
                                 );
+                                counter!("nebulacr_region_health_transitions_total",
+                                    "region" => region.name.clone(), "to" => "unhealthy")
+                                .increment(1);
                             }
                             health.healthy = false;
                         }
@@ -135,10 +142,21 @@ impl FailoverManager {
                                     error = %e,
                                     "Region marked as unhealthy (connection failed)"
                                 );
+                                counter!("nebulacr_region_health_transitions_total",
+                                    "region" => region.name.clone(), "to" => "unhealthy")
+                                .increment(1);
                             }
                             health.healthy = false;
                         }
                     }
+                }
+
+                gauge!("nebulacr_region_healthy", "region" => region.name.clone())
+                    .set(if health.healthy { 1.0 } else { 0.0 });
+                if let Some(rt) = health.response_time_ms {
+                    gauge!("nebulacr_region_health_check_latency_seconds",
+                        "region" => region.name.clone())
+                    .set(rt as f64 / 1000.0);
                 }
 
                 health.last_check = Utc::now();

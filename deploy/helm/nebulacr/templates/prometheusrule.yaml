@@ -1,0 +1,162 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "nebulacr.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.prometheusRule.namespace }}
+  labels:
+    {{- include "nebulacr.registry.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: nebulacr.availability
+      rules:
+        - alert: NebulaCRTargetDown
+          expr: up{job=~"nebulacr-.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{`{{ $labels.job }}`}} target is down"
+            description: |
+              Prometheus has been unable to scrape {{`{{ $labels.instance }}`}} for >2m.
+              Check pod readiness, /health, and crashloop status.
+
+        - alert: NebulaCRHigh5xxRate
+          expr: |
+            sum by (route) (rate(nebulacr_http_requests_total{status_class="5xx"}[5m]))
+              /
+            clamp_min(sum by (route) (rate(nebulacr_http_requests_total[5m])), 1e-9)
+              > {{ .Values.prometheusRule.thresholds.http5xxRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Registry route {{`{{ $labels.route }}`}} 5xx rate above threshold"
+
+        - alert: NebulaCRP99LatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, route) (rate(nebulacr_http_request_duration_seconds_bucket[5m]))
+            ) > {{ .Values.prometheusRule.thresholds.httpP99LatencySeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "p99 latency on {{`{{ $labels.route }}`}} exceeds SLO"
+
+    - name: nebulacr.storage
+      rules:
+        - alert: NebulaCRStorageErrorRate
+          expr: |
+            sum by (operation) (rate(nebulacr_storage_operation_errors_total[5m]))
+              > {{ .Values.prometheusRule.thresholds.storageErrorRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Storage backend errors on {{`{{ $labels.operation }}`}}"
+
+        - alert: NebulaCRStorageP99Slow
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, operation) (rate(nebulacr_storage_operation_duration_seconds_bucket[5m]))
+            ) > {{ .Values.prometheusRule.thresholds.storageP99LatencySeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Storage op {{`{{ $labels.operation }}`}} p99 above SLO"
+
+        - alert: NebulaCRCircuitBreakerOpen
+          expr: nebulacr_circuit_breaker_state >= 2
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Circuit breaker {{`{{ $labels.breaker }}`}} OPEN"
+
+        - alert: NebulaCRRetryStorm
+          expr: |
+            sum(rate(nebulacr_retry_attempts_total{outcome="exhausted"}[5m]))
+              > {{ .Values.prometheusRule.thresholds.retryExhaustionRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Storage retry exhaustion above threshold"
+
+    - name: nebulacr.mirror
+      rules:
+        - alert: NebulaCRMirrorUpstreamErrors
+          expr: |
+            sum by (upstream) (
+              rate(nebulacr_mirror_upstream_requests_total{outcome=~"error|upstream_5xx|breaker_open"}[5m])
+            ) > {{ .Values.prometheusRule.thresholds.mirrorUpstreamErrorRate }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Upstream {{`{{ $labels.upstream }}`}} unhealthy"
+
+    - name: nebulacr.replication
+      rules:
+        - alert: NebulaCRReplicationLag
+          expr: nebulacr_replication_lag_seconds > {{ .Values.prometheusRule.thresholds.replicationLagSeconds }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Replication lag above threshold for {{`{{ $labels.source_region }}`}}"
+
+        - alert: NebulaCRReplicationQueueBacklog
+          expr: nebulacr_replication_queue_depth > {{ .Values.prometheusRule.thresholds.replicationQueueDepth }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Replication queue depth backlog"
+
+        - alert: NebulaCRReplicationFailures
+          expr: |
+            sum by (region) (
+              rate(nebulacr_replication_events_total{outcome!="success"}[5m])
+            ) > {{ .Values.prometheusRule.thresholds.replicationFailureRate }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Replication to {{`{{ $labels.region }}`}} failing"
+
+        - alert: NebulaCRRegionUnhealthy
+          expr: nebulacr_region_healthy == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Region {{`{{ $labels.region }}`}} unhealthy"
+
+    - name: nebulacr.auth
+      rules:
+        - alert: NebulaCRAuthFailureSpike
+          expr: sum(rate(registry_auth_failures_total[5m])) > {{ .Values.prometheusRule.thresholds.authFailureRate }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Auth failure rate elevated"
+
+    - name: nebulacr.webhook
+      rules:
+        - alert: NebulaCRWebhookDeliveryFailing
+          expr: |
+            sum by (endpoint) (rate(nebulacr_webhook_deliveries_total{outcome="failed"}[10m]))
+              > {{ .Values.prometheusRule.thresholds.webhookFailureRate }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook endpoint {{`{{ $labels.endpoint }}`}} failing"
+{{- end }}

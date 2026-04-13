@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use metrics::counter;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -30,7 +31,22 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     /// Execute an async operation with retry logic and exponential backoff.
-    pub async fn execute<F, Fut, T, E>(&self, mut f: F) -> Result<T, E>
+    pub async fn execute<F, Fut, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        self.execute_labeled("unknown", f).await
+    }
+
+    /// Same as [`execute`], but tags emitted retry metrics with an operation label
+    /// so dashboards can break retry pressure down by storage op (put/get/head/...).
+    pub async fn execute_labeled<F, Fut, T, E>(
+        &self,
+        operation: &'static str,
+        mut f: F,
+    ) -> Result<T, E>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
@@ -40,7 +56,14 @@ impl RetryPolicy {
 
         loop {
             match f().await {
-                Ok(val) => return Ok(val),
+                Ok(val) => {
+                    if attempt > 0 {
+                        counter!("nebulacr_retry_attempts_total",
+                            "operation" => operation, "outcome" => "recovered")
+                        .increment(attempt as u64);
+                    }
+                    return Ok(val);
+                }
                 Err(e) => {
                     if attempt >= self.max_retries {
                         warn!(
@@ -48,6 +71,9 @@ impl RetryPolicy {
                             error = %e,
                             "All retry attempts exhausted"
                         );
+                        counter!("nebulacr_retry_attempts_total",
+                            "operation" => operation, "outcome" => "exhausted")
+                        .increment((attempt + 1) as u64);
                         return Err(e);
                     }
 

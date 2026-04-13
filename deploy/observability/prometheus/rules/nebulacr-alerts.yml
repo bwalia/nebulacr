@@ -1,0 +1,254 @@
+groups:
+  # ─────────────────────────────────────────────────────────────────────
+  # Availability — these are the SLO-style alerts ops cares about.
+  # Every rule has a runbook hint in `summary`/`description`.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: nebulacr.availability
+    rules:
+      - alert: NebulaCRTargetDown
+        expr: up{job=~"nebulacr-.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: '{{ $labels.job }}'
+        annotations:
+          summary: '{{ $labels.job }} target is down'
+          description: |
+            Prometheus has been unable to scrape {{ $labels.instance }} for >2m.
+            Check pod readiness, /health, and crashloop status.
+
+      - alert: NebulaCRHigh5xxRate
+        expr: |
+          sum by (route) (rate(nebulacr_http_requests_total{status_class="5xx"}[5m]))
+            /
+          clamp_min(sum by (route) (rate(nebulacr_http_requests_total[5m])), 1e-9)
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: registry
+        annotations:
+          summary: 'Registry route {{ $labels.route }} >5% 5xx for 10m'
+          description: |
+            5xx rate exceeded 5% of all requests on route `{{ $labels.route }}`.
+            Check registry logs and storage backend health.
+
+      - alert: NebulaCRP99LatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, route) (rate(nebulacr_http_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 15m
+        labels:
+          severity: warning
+          component: registry
+        annotations:
+          summary: 'p99 latency on {{ $labels.route }} > 2s'
+          description: |
+            p99 latency on `{{ $labels.route }}` has stayed above 2 seconds
+            for 15 minutes. Storage saturation, GC pauses, or upstream mirror
+            backpressure are common causes.
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Storage backend — the resilience layer feeds these.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: nebulacr.storage
+    rules:
+      - alert: NebulaCRStorageErrorRate
+        expr: |
+          sum by (operation) (rate(nebulacr_storage_operation_errors_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: 'Storage backend errors on {{ $labels.operation }}'
+          description: |
+            More than 0.1 errors/sec on storage operation `{{ $labels.operation }}`
+            for 10 minutes. Check S3/GCS/Azure dashboards and credentials.
+
+      - alert: NebulaCRStorageP99Slow
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, operation) (rate(nebulacr_storage_operation_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 15m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: 'Storage op {{ $labels.operation }} p99 > 5s'
+          description: |
+            Storage backend latency has degraded — clients will see push/pull
+            stalls. Check backend regional status and network egress.
+
+      - alert: NebulaCRCircuitBreakerOpen
+        expr: nebulacr_circuit_breaker_state >= 2
+        for: 1m
+        labels:
+          severity: critical
+          component: '{{ $labels.breaker }}'
+        annotations:
+          summary: 'Circuit breaker {{ $labels.breaker }} is OPEN'
+          description: |
+            The {{ $labels.breaker }} circuit breaker is open. All calls
+            through it are short-circuiting. Investigate the upstream
+            target for this breaker (storage backend, replication peer,
+            or mirror upstream).
+
+      - alert: NebulaCRRetryStorm
+        expr: |
+          sum(rate(nebulacr_retry_attempts_total{outcome="exhausted"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: 'Storage retries are being exhausted'
+          description: |
+            Retry exhaustion above 1/sec for 10m means the storage backend
+            is failing in ways the retry policy can't recover from.
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Mirror / pull-through cache.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: nebulacr.mirror
+    rules:
+      - alert: NebulaCRMirrorUpstreamErrors
+        expr: |
+          sum by (upstream) (
+            rate(nebulacr_mirror_upstream_requests_total{outcome=~"error|upstream_5xx|breaker_open"}[5m])
+          ) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          component: mirror
+        annotations:
+          summary: 'Upstream {{ $labels.upstream }} unhealthy'
+          description: |
+            Upstream `{{ $labels.upstream }}` has returned >0.5 errors/sec
+            for 15 minutes. Pulls falling through to it will be slow or fail.
+
+      - alert: NebulaCRMirrorCacheHitRatioLow
+        expr: |
+          sum(rate(nebulacr_mirror_cache_misses_total[1h]))
+            /
+          clamp_min(sum(rate(nebulacr_http_requests_total{route=~"manifest_get|blob_get"}[1h])), 1e-9)
+            > 0.5
+        for: 1h
+        labels:
+          severity: info
+          component: mirror
+        annotations:
+          summary: 'Mirror cache miss ratio above 50%'
+          description: |
+            Most pulls are hitting upstream rather than the local cache.
+            Consider raising cache_ttl_secs or pre-warming common images.
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Multi-region replication and failover.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: nebulacr.replication
+    rules:
+      - alert: NebulaCRReplicationLag
+        expr: nebulacr_replication_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: replication
+        annotations:
+          summary: 'Replication lag > 5m for {{ $labels.source_region }}'
+          description: |
+            The replicator has not caught up to events emitted by
+            `{{ $labels.source_region }}`. Cross-region reads may
+            return stale data.
+
+      - alert: NebulaCRReplicationQueueBacklog
+        expr: nebulacr_replication_queue_depth > 800
+        for: 10m
+        labels:
+          severity: warning
+          component: replication
+        annotations:
+          summary: 'Replication queue depth above 800/1000'
+          description: |
+            The bounded replication channel is filling up. New events
+            will start blocking enqueue calls and slowing pushes.
+
+      - alert: NebulaCRReplicationFailures
+        expr: |
+          sum by (region) (
+            rate(nebulacr_replication_events_total{outcome!="success"}[5m])
+          ) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          component: replication
+        annotations:
+          summary: 'Replication to {{ $labels.region }} failing'
+          description: |
+            Non-success replication outcomes >0.1/sec for region
+            `{{ $labels.region }}`. Check region health & internal endpoints.
+
+      - alert: NebulaCRRegionUnhealthy
+        expr: nebulacr_region_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: failover
+        annotations:
+          summary: 'Region {{ $labels.region }} unhealthy'
+          description: |
+            Failover manager has marked region `{{ $labels.region }}`
+            unhealthy for 5 minutes. Reads to that region will fall
+            through to the next-priority replica.
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Auth service.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: nebulacr.auth
+    rules:
+      - alert: NebulaCRAuthFailureSpike
+        expr: |
+          sum(rate(registry_auth_failures_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: auth
+        annotations:
+          summary: 'Auth failure rate >5/sec'
+          description: |
+            Sustained auth failures usually mean a misconfigured client,
+            credential rotation, or a brute-force probe.
+
+      - alert: NebulaCRTokenIssuanceStopped
+        expr: |
+          rate(registry_token_issued_total[5m]) == 0
+            and on() rate(nebulacr_auth_http_requests_total{route="token"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: auth
+        annotations:
+          summary: 'Auth service is rejecting all token requests'
+          description: |
+            Token requests are arriving but no tokens are being issued.
+            Check JWT key loading and bootstrap admin credentials.
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Webhook delivery.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: nebulacr.webhook
+    rules:
+      - alert: NebulaCRWebhookDeliveryFailing
+        expr: |
+          sum by (endpoint) (rate(nebulacr_webhook_deliveries_total{outcome="failed"}[10m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+          component: webhook
+        annotations:
+          summary: 'Webhook endpoint {{ $labels.endpoint }} failing'
+          description: |
+            Webhook deliveries to `{{ $labels.endpoint }}` are exceeding
+            the retry budget. Downstream automation will miss events.

@@ -1,9 +1,24 @@
+use metrics::{counter, gauge, histogram};
 use nebula_resilience::{CircuitBreaker, CircuitBreakerConfig, RetryPolicy};
 use object_store::{ObjectStore, path::Path as StorePath};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+fn record_replication_outcome(
+    region: &str,
+    kind: &'static str,
+    started: Instant,
+    outcome: &'static str,
+) {
+    histogram!("nebulacr_replication_event_duration_seconds",
+        "region" => region.to_string(), "kind" => kind)
+    .record(started.elapsed().as_secs_f64());
+    counter!("nebulacr_replication_events_total",
+        "region" => region.to_string(), "kind" => kind, "outcome" => outcome)
+    .increment(1);
+}
 
 use crate::event::{ReplicationEvent, ReplicationEventType};
 use crate::region::{MultiRegionConfig, RegionConfig, ReplicationMode};
@@ -36,7 +51,18 @@ pub struct ReplicationHandle {
 impl ReplicationHandle {
     /// Enqueue a replication event. For SemiSync mode, waits for acknowledgment.
     pub async fn enqueue(&self, event: ReplicationEvent) {
+        let kind: &'static str = match event.event_type {
+            ReplicationEventType::ManifestPush => "manifest",
+            ReplicationEventType::BlobPush => "blob",
+            ReplicationEventType::ManifestDelete => "delete",
+        };
+        counter!("nebulacr_replication_enqueued_total", "kind" => kind).increment(1);
+        // The mpsc channel has bounded capacity (1000); track current depth
+        // so we can alert on backpressure.
+        gauge!("nebulacr_replication_queue_depth")
+            .set((self.event_tx.max_capacity() - self.event_tx.capacity()) as f64);
         if let Err(e) = self.event_tx.send(event).await {
+            counter!("nebulacr_replication_enqueue_failures_total").increment(1);
             warn!(error = %e, "Failed to enqueue replication event");
         }
     }
@@ -137,6 +163,16 @@ impl Replicator {
                 "Processing replication event"
             );
 
+            // Reflect updated queue depth after dequeue.
+            gauge!("nebulacr_replication_queue_depth")
+                .set((self.event_tx.max_capacity() - self.event_tx.capacity()) as f64);
+
+            // Replication lag = wall-time since the source region created the event.
+            let lag = (chrono::Utc::now() - event.timestamp).num_seconds().max(0) as f64;
+            gauge!("nebulacr_replication_lag_seconds",
+                "source_region" => event.source_region.clone())
+            .set(lag);
+
             // Persist the event to local store for durability
             if let Err(e) = self.persist_event(&event).await {
                 error!(error = %e, "Failed to persist replication event");
@@ -186,6 +222,7 @@ impl Replicator {
         remote: &RemoteRegion,
         event: &ReplicationEvent,
     ) -> Result<(), ReplicationError> {
+        let started = Instant::now();
         // Read manifest from local store
         let manifest_store_path = StorePath::from(nebula_common::storage::manifest_path(
             &event.tenant,
@@ -248,7 +285,7 @@ impl Replicator {
             })
             .await;
 
-        match result {
+        let mapped = match result {
             Ok(r) => Ok(r),
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::BreakerOpen(_)) => {
                 Err(ReplicationError::CircuitBreakerOpen {
@@ -256,7 +293,15 @@ impl Replicator {
                 })
             }
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => Err(e),
-        }
+        };
+        let outcome: &'static str = match &mapped {
+            Ok(_) => "success",
+            Err(ReplicationError::CircuitBreakerOpen { .. }) => "breaker_open",
+            Err(ReplicationError::RemoteRejected { .. }) => "remote_rejected",
+            Err(_) => "error",
+        };
+        record_replication_outcome(&remote.config.name, "manifest", started, outcome);
+        mapped
     }
 
     async fn replicate_blob(
@@ -264,6 +309,7 @@ impl Replicator {
         remote: &RemoteRegion,
         event: &ReplicationEvent,
     ) -> Result<(), ReplicationError> {
+        let started = Instant::now();
         let blob_store_path = StorePath::from(nebula_common::storage::blob_path(
             &event.tenant,
             &event.project,
@@ -323,7 +369,7 @@ impl Replicator {
             })
             .await;
 
-        match result {
+        let mapped = match result {
             Ok(r) => Ok(r),
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::BreakerOpen(_)) => {
                 Err(ReplicationError::CircuitBreakerOpen {
@@ -331,7 +377,20 @@ impl Replicator {
                 })
             }
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => Err(e),
+        };
+        let outcome: &'static str = match &mapped {
+            Ok(_) => "success",
+            Err(ReplicationError::CircuitBreakerOpen { .. }) => "breaker_open",
+            Err(ReplicationError::RemoteRejected { .. }) => "remote_rejected",
+            Err(_) => "error",
+        };
+        if mapped.is_ok() {
+            counter!("nebulacr_replication_bytes_total",
+                "region" => remote.config.name.clone(), "kind" => "blob")
+            .increment(event.size);
         }
+        record_replication_outcome(&remote.config.name, "blob", started, outcome);
+        mapped
     }
 
     async fn replicate_delete(
@@ -339,6 +398,7 @@ impl Replicator {
         remote: &RemoteRegion,
         event: &ReplicationEvent,
     ) -> Result<(), ReplicationError> {
+        let started = Instant::now();
         let url = format!(
             "{}/internal/replicate/delete",
             remote.config.internal_endpoint
@@ -377,7 +437,7 @@ impl Replicator {
             })
             .await;
 
-        match result {
+        let mapped = match result {
             Ok(r) => Ok(r),
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::BreakerOpen(_)) => {
                 Err(ReplicationError::CircuitBreakerOpen {
@@ -385,7 +445,15 @@ impl Replicator {
                 })
             }
             Err(nebula_resilience::circuit_breaker::CircuitBreakerCallError::Inner(e)) => Err(e),
-        }
+        };
+        let outcome: &'static str = match &mapped {
+            Ok(_) => "success",
+            Err(ReplicationError::CircuitBreakerOpen { .. }) => "breaker_open",
+            Err(ReplicationError::RemoteRejected { .. }) => "remote_rejected",
+            Err(_) => "error",
+        };
+        record_replication_outcome(&remote.config.name, "delete", started, outcome);
+        mapped
     }
 }
 

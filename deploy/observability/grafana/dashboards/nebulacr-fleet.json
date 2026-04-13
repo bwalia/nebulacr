@@ -1,0 +1,92 @@
+{
+  "uid": "nebulacr-fleet",
+  "title": "NebulaCR — Fleet & SLOs",
+  "tags": ["nebulacr", "slo", "fleet"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Availability (24h, non-5xx ratio)",
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.99 }, { "color": "green", "value": 0.999 }] }
+        }
+      },
+      "targets": [
+        { "expr": "1 - (sum(rate(nebulacr_http_requests_total{status_class=\"5xx\"}[24h])) / clamp_min(sum(rate(nebulacr_http_requests_total[24h])), 1e-9))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Latency SLO p99 (1h, target ≤2s)",
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }] }
+        }
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(nebulacr_http_request_duration_seconds_bucket[1h])))", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active circuit breakers (open or half-open)",
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }] }
+        }
+      },
+      "targets": [
+        { "expr": "count(nebulacr_circuit_breaker_state >= 1) or vector(0)", "refId": "A" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Error budget burn (5xx ratio)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "targets": [
+        { "expr": "sum(rate(nebulacr_http_requests_total{status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(nebulacr_http_requests_total[5m])), 1e-9)", "legendFormat": "5xx ratio (5m)", "refId": "A" },
+        { "expr": "sum(rate(nebulacr_http_requests_total{status_class=\"5xx\"}[1h])) / clamp_min(sum(rate(nebulacr_http_requests_total[1h])), 1e-9)", "legendFormat": "5xx ratio (1h)", "refId": "B" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Service uptime",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "time() - nebulacr_process_start_time_seconds", "legendFormat": "{{service}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Up status by service",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "up{job=~\"nebulacr-.*\"}", "legendFormat": "{{job}} {{instance}}", "refId": "A" }
+      ]
+    }
+  ]
+}

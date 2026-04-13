@@ -1,20 +1,169 @@
 # Observability
 
-NebulaCR provides Prometheus metrics, structured JSON logging, and OpenTelemetry distributed tracing. This guide covers how to configure, collect, and visualize operational data from the registry.
+NebulaCR ships an enterprise-grade observability bundle: Prometheus metrics across every layer (HTTP, storage, mirror, replication, webhooks, auth), structured JSON logs, OpenTelemetry tracing, six pre-built Grafana dashboards, and a PrometheusRule with SLO-style alerts.
+
+The bundled artifacts live under [`deploy/observability/`](../deploy/observability/) and are wired up by `docker-compose.observability.yml` for local development; for Kubernetes use the chart's `serviceMonitor.enabled` and `prometheusRule.enabled` toggles.
 
 ## Table of Contents
 
-- [Prometheus Metrics](#prometheus-metrics)
+- [One-command local stack](#one-command-local-stack)
+- [Bundled Grafana dashboards](#bundled-grafana-dashboards)
+- [Bundled alert rules](#bundled-alert-rules)
+- [Metric reference](#metric-reference)
 - [Structured JSON Logging](#structured-json-logging)
 - [OpenTelemetry Tracing](#opentelemetry-tracing)
-- [Grafana Dashboard Suggestions](#grafana-dashboard-suggestions)
 - [Health Endpoints](#health-endpoints)
+
+## One-command local stack
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+| Service     | URL                       | Login         |
+|-------------|---------------------------|---------------|
+| Registry    | http://localhost:5000     | -             |
+| Auth        | http://localhost:5001     | -             |
+| Prometheus  | http://localhost:9091     | -             |
+| Grafana     | http://localhost:3000     | admin / admin |
+
+Grafana auto-loads the dashboards from `deploy/observability/grafana/dashboards/` via provisioning. Prometheus auto-loads the alert rules from `deploy/observability/prometheus/rules/`.
+
+## Bundled Grafana dashboards
+
+| File | UID | Audience | What it shows |
+|---|---|---|---|
+| `nebulacr-overview.json` | `nebulacr-overview` | Ops on-call | Golden signals: request rate, error rate, p50/p95/p99 latency, push/pull throughput, in-flight requests, rate-limit rejections |
+| `nebulacr-storage.json` | `nebulacr-storage` | Ops / SRE | Storage backend ops/sec, error rate, p95/p99 latency by op, retry attempts, circuit breaker state & transitions |
+| `nebulacr-auth.json` | `nebulacr-auth` | Ops / SecOps | Token issuance, auth failures broken down by reason, OIDC outcomes by provider, robot/group activity, auth-route latency |
+| `nebulacr-mirror.json` | `nebulacr-mirror` | Ops | Mirror cache miss rate, upstream request outcomes, p95 upstream latency, upstream circuit breakers, cache population bytes |
+| `nebulacr-replication.json` | `nebulacr-replication` | Ops / Platform | Replication queue depth, lag by source region, success/error per region, region health, failover transitions, replication throughput |
+| `nebulacr-tenants.json` | `nebulacr-tenants` | Developers / Tenants | Per-tenant push/pull bytes, top 10 tenants by usage, tenant rate-limit pressure, webhook delivery |
+| `nebulacr-fleet.json` | `nebulacr-fleet` | Leadership / SLO | Availability SLO (24h non-5xx ratio), p99 latency SLO, active circuit breakers, error budget burn, uptime |
+
+## Bundled alert rules
+
+The Prometheus rule file at [`deploy/observability/prometheus/rules/nebulacr-alerts.yml`](../deploy/observability/prometheus/rules/nebulacr-alerts.yml) defines six rule groups:
+
+| Group | Highlights |
+|---|---|
+| `nebulacr.availability` | `NebulaCRTargetDown`, `NebulaCRHigh5xxRate`, `NebulaCRP99LatencyHigh` |
+| `nebulacr.storage` | `NebulaCRStorageErrorRate`, `NebulaCRStorageP99Slow`, `NebulaCRCircuitBreakerOpen`, `NebulaCRRetryStorm` |
+| `nebulacr.mirror` | `NebulaCRMirrorUpstreamErrors`, `NebulaCRMirrorCacheHitRatioLow` |
+| `nebulacr.replication` | `NebulaCRReplicationLag`, `NebulaCRReplicationQueueBacklog`, `NebulaCRReplicationFailures`, `NebulaCRRegionUnhealthy` |
+| `nebulacr.auth` | `NebulaCRAuthFailureSpike`, `NebulaCRTokenIssuanceStopped` |
+| `nebulacr.webhook` | `NebulaCRWebhookDeliveryFailing` |
+
+The same rules ship as a Helm `PrometheusRule` template. Enable in `values.yaml`:
+
+```yaml
+prometheusRule:
+  enabled: true
+  thresholds:
+    http5xxRatio: 0.05
+    httpP99LatencySeconds: 2
+    storageP99LatencySeconds: 5
+    replicationLagSeconds: 300
+```
 
 ---
 
-## Prometheus Metrics
+## Metric reference
 
-NebulaCR exposes Prometheus metrics on a dedicated port (default: 9090) separate from the main API. This port should not be exposed to the public internet.
+NebulaCR exposes Prometheus metrics from both services on `/metrics`. The registry can also bind a dedicated `metrics_addr` (default `:9090`) for out-of-band scraping. All new instrumentation uses the `nebulacr_*` namespace; the legacy per-operation counters keep the `registry_*` prefix for backwards compatibility with older dashboards.
+
+### HTTP / Service-level (registry + auth)
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nebulacr_http_requests_total` | Counter | `route`, `method`, `status_class` | Registry HTTP requests, route is a low-cardinality classifier (manifest_get, blob_get, blob_upload_chunk, …) |
+| `nebulacr_http_request_duration_seconds` | Histogram | `route`, `method` | Registry HTTP request latency |
+| `nebulacr_http_requests_in_flight` | Gauge | `route` | Currently in-flight registry requests |
+| `nebulacr_auth_http_requests_total` | Counter | `route`, `method`, `status_class` | Auth-service HTTP requests |
+| `nebulacr_auth_http_request_duration_seconds` | Histogram | `route`, `method` | Auth-service HTTP request latency |
+| `nebulacr_auth_http_requests_in_flight` | Gauge | `route` | In-flight auth-service requests |
+| `nebulacr_rate_limit_rejected_total` | Counter | `tenant` | Requests rejected by the registry rate limiter |
+| `nebulacr_build_info` | Gauge | `service`, `version`, `rustc` | Static `1` series; labels carry build metadata |
+| `nebulacr_process_start_time_seconds` | Gauge | – | Wall-time the process started (for uptime calculations) |
+
+### Storage backend (resilience layer)
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nebulacr_storage_operations_total` | Counter | `operation`, `outcome` | All `ObjectStore` operations through the resilient wrapper |
+| `nebulacr_storage_operation_errors_total` | Counter | `operation` | Subset of the above where `outcome="error"` |
+| `nebulacr_storage_operation_duration_seconds` | Histogram | `operation` | End-to-end latency for each storage op |
+| `nebulacr_retry_attempts_total` | Counter | `operation`, `outcome` (`recovered`, `exhausted`) | Retry attempts emitted by the retry policy |
+| `nebulacr_circuit_breaker_state` | Gauge | `breaker` | 0 = closed, 1 = half-open, 2 = open |
+| `nebulacr_circuit_breaker_transitions_total` | Counter | `breaker`, `to` | Transitions counted per target state |
+| `nebulacr_circuit_breaker_rejections_total` | Counter | `breaker` | Calls short-circuited because the breaker was open |
+
+The `breaker` label is `storage` for the resilient object store wrapper, `upstream-<name>` for each mirror upstream, and `replication-<region>` for each replication peer.
+
+### Mirror / pull-through cache
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nebulacr_mirror_cache_misses_total` | Counter | `kind` (`manifest`, `blob`) | Local lookup missed and we contacted an upstream |
+| `nebulacr_mirror_fetch_total` | Counter | `kind`, `outcome` (`fetched`, `not_found`, `error`, `skipped_scope`, `skipped_unlinked`, `no_upstreams`) | Final result of a mirror fetch |
+| `nebulacr_mirror_cache_population_bytes_total` | Counter | `kind`, `upstream` | Bytes cached locally after upstream fetch |
+| `nebulacr_mirror_upstream_requests_total` | Counter | `upstream`, `kind`, `outcome` (`success`, `not_found`, `auth_error`, `upstream_5xx`, `breaker_open`, `error`) | Per-upstream result of a single fetch attempt |
+| `nebulacr_mirror_upstream_latency_seconds` | Histogram | `upstream`, `kind` | Upstream HTTP latency |
+| `nebulacr_mirror_upstream_bytes_total` | Counter | `upstream`, `kind` | Bytes fetched from upstream |
+
+### Multi-region replication
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nebulacr_replication_enqueued_total` | Counter | `kind` | Replication events enqueued by request handlers |
+| `nebulacr_replication_enqueue_failures_total` | Counter | – | Channel-send failures during enqueue |
+| `nebulacr_replication_queue_depth` | Gauge | – | Live depth of the bounded MPSC channel |
+| `nebulacr_replication_lag_seconds` | Gauge | `source_region` | Wall-time between event creation and the replicator dequeueing it |
+| `nebulacr_replication_events_total` | Counter | `region`, `kind`, `outcome` | Per-region replication attempts |
+| `nebulacr_replication_event_duration_seconds` | Histogram | `region`, `kind` | Per-region replication latency |
+| `nebulacr_replication_bytes_total` | Counter | `region`, `kind` | Bytes successfully replicated |
+| `nebulacr_region_healthy` | Gauge | `region` | 1 = healthy, 0 = unhealthy (failover manager) |
+| `nebulacr_region_health_check_latency_seconds` | Gauge | `region` | Latency of the most recent health probe |
+| `nebulacr_region_health_transitions_total` | Counter | `region`, `to` | Health state transitions per region |
+
+### Webhook notifier
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nebulacr_webhook_enqueued_total` | Counter | `event` | Events handed to the notifier |
+| `nebulacr_webhook_enqueue_failures_total` | Counter | `event` | Channel-send failures |
+| `nebulacr_webhook_delivery_attempts_total` | Counter | `endpoint`, `outcome` (`non_success_status`, `transport_error`) | Individual delivery attempts that failed |
+| `nebulacr_webhook_deliveries_total` | Counter | `endpoint`, `event`, `outcome` (`success`, `failed`) | Final delivery outcome per event |
+| `nebulacr_webhook_delivery_duration_seconds` | Histogram | `endpoint`, `event` | End-to-end delivery latency |
+
+### Auth (existing `registry_*` series, kept for compatibility)
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `registry_auth_requests_total` | Counter | – | Total token requests |
+| `registry_token_issued_total` | Counter | – | Tokens issued |
+| `registry_auth_failures_total` | Counter | `reason` | Auth failures broken down by reason |
+| `registry_oidc_logins_total` | Counter | `provider`, `status` | OIDC login attempts |
+| `registry_robot_auth_total` | Counter | `robot` | Robot account auths |
+| `registry_group_mapping_hits_total` | Counter | `group` | Group mapping resolutions |
+| `registry_token_refresh_total` | Counter | – | Token refreshes |
+| `registry_token_revocation_total` | Counter | – | Token revocations |
+| `registry_scim_provisions_total` | Counter | `action` | SCIM provisioning operations |
+
+### Registry per-operation totals (`registry_*`, kept for compatibility)
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `registry_manifest_push_total` | Counter | – | Manifest pushes |
+| `registry_manifest_pull_total` | Counter | – | Manifest pulls |
+| `registry_blob_pull_total` | Counter | – | Blob pulls |
+| `registry_pull_total` | Counter | `tenant`, `project` | Per-tenant pulls |
+| `registry_delete_total` | Counter | `tenant`, `project` | Per-tenant deletes |
+| `registry_blob_upload_bytes_total` | Counter | `tenant` | Per-tenant push bytes |
+| `registry_push_bytes_total` | Counter | – | Total push bytes |
+| `registry_pull_bytes_total` | Counter | – | Total pull bytes |
+| `registry_request_duration_seconds` | Histogram | `operation` | Per-operation latency |
+| `registry_errors_total` | Counter | `type` | High-level error classifier |
 
 ### Configuration
 
@@ -27,172 +176,35 @@ metrics_addr = "0.0.0.0:9090"
 NEBULACR_SERVER__METRICS_ADDR=0.0.0.0:9090
 ```
 
-### Key Metrics
+### Kubernetes ServiceMonitor & PrometheusRule
 
-#### Registry Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_http_requests_total` | Counter | `method`, `path`, `status` | Total HTTP requests handled |
-| `nebulacr_http_request_duration_seconds` | Histogram | `method`, `path` | Request latency distribution |
-| `nebulacr_blob_upload_bytes_total` | Counter | `tenant` | Total bytes uploaded (blobs) |
-| `nebulacr_blob_download_bytes_total` | Counter | `tenant` | Total bytes downloaded (blobs) |
-| `nebulacr_manifest_push_total` | Counter | `tenant`, `project` | Total manifest pushes |
-| `nebulacr_manifest_pull_total` | Counter | `tenant`, `project` | Total manifest pulls |
-| `nebulacr_storage_operation_duration_seconds` | Histogram | `operation`, `backend` | Storage backend latency |
-| `nebulacr_storage_operation_errors_total` | Counter | `operation`, `backend` | Storage backend errors |
-
-#### Auth Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_token_issued_total` | Counter | `tenant`, `grant_type` | Total tokens issued |
-| `nebulacr_token_rejected_total` | Counter | `reason` | Total token requests rejected |
-| `nebulacr_auth_latency_seconds` | Histogram | `provider` | Authentication latency |
-
-#### Rate Limiting Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_rate_limit_rejected_total` | Counter | `tenant`, `endpoint` | Requests rejected by rate limiter |
-| `nebulacr_rate_limit_remaining` | Gauge | `tenant` | Remaining requests in current window |
-
-#### Mirror / Pull-Through Cache Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_mirror_cache_hits_total` | Counter | `upstream` | Cache hits (served locally) |
-| `nebulacr_mirror_cache_misses_total` | Counter | `upstream` | Cache misses (fetched from upstream) |
-| `nebulacr_mirror_upstream_latency_seconds` | Histogram | `upstream` | Upstream fetch latency |
-| `nebulacr_mirror_upstream_errors_total` | Counter | `upstream` | Upstream fetch errors |
-
-#### Replication Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_replication_lag_seconds` | Gauge | `region` | Current replication lag |
-| `nebulacr_replication_objects_synced_total` | Counter | `region` | Objects replicated |
-| `nebulacr_replication_errors_total` | Counter | `region` | Replication errors |
-
-#### Resilience Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_circuit_breaker_state` | Gauge | `backend` | Circuit breaker state (0=closed, 1=half-open, 2=open) |
-| `nebulacr_retry_attempts_total` | Counter | `backend`, `outcome` | Storage retry attempts |
-
-#### Tenant Quota Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `nebulacr_tenant_storage_bytes` | Gauge | `tenant` | Current storage usage per tenant |
-| `nebulacr_tenant_repository_count` | Gauge | `tenant` | Current repository count per tenant |
-| `nebulacr_tenant_project_count` | Gauge | `tenant` | Current project count per tenant |
-
-### Kubernetes ServiceMonitor
-
-If you are running Prometheus Operator, enable the ServiceMonitor in your Helm values:
+If you run prometheus-operator, enable the bundled CRDs in `values.yaml`:
 
 ```yaml
 serviceMonitor:
   enabled: true
-  namespace: ""         # Defaults to release namespace
-  interval: 30s
-  scrapeTimeout: 10s
   labels:
-    release: prometheus  # Match your Prometheus Operator selector
-  metricRelabelings: []
-  relabelings: []
+    release: prometheus  # match your prometheus-operator selector
+
+prometheusRule:
+  enabled: true
 ```
 
-### Static Prometheus Scrape Config
+The chart ships both a `ServiceMonitor` and a `PrometheusRule` with the same alerts as the local-stack file. Override per-alert thresholds via `prometheusRule.thresholds` without forking the chart.
 
-If you are not using the Prometheus Operator, add a scrape config to your `prometheus.yml`:
+### Static scrape config (no operator)
 
 ```yaml
 scrape_configs:
-  - job_name: "nebulacr-registry"
+  - job_name: nebulacr-registry
     metrics_path: /metrics
-    static_targets:
-      - targets:
-          - "nebulacr-registry.nebulacr.svc.cluster.local:9090"
-    scrape_interval: 30s
+    static_configs:
+      - targets: ["nebulacr-registry.nebulacr.svc.cluster.local:5000"]
 
-  - job_name: "nebulacr-auth"
+  - job_name: nebulacr-auth
     metrics_path: /metrics
-    static_targets:
-      - targets:
-          - "nebulacr-auth.nebulacr.svc.cluster.local:9091"
-    scrape_interval: 30s
-```
-
-For Kubernetes service discovery:
-
-```yaml
-scrape_configs:
-  - job_name: "nebulacr"
-    kubernetes_sd_configs:
-      - role: pod
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app]
-        regex: nebulacr.*
-        action: keep
-      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
-        target_label: __address__
-        regex: (.+)
-        replacement: "${1}"
-```
-
-### Alerting Rules
-
-Example Prometheus alerting rules:
-
-```yaml
-groups:
-  - name: nebulacr
-    rules:
-      - alert: NebulaCRHighErrorRate
-        expr: |
-          sum(rate(nebulacr_http_requests_total{status=~"5.."}[5m]))
-          / sum(rate(nebulacr_http_requests_total[5m])) > 0.05
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "NebulaCR error rate above 5%"
-
-      - alert: NebulaCRStorageErrors
-        expr: rate(nebulacr_storage_operation_errors_total[5m]) > 0
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "NebulaCR storage backend errors detected"
-
-      - alert: NebulaCRCircuitBreakerOpen
-        expr: nebulacr_circuit_breaker_state == 2
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "NebulaCR circuit breaker is open for {{ $labels.backend }}"
-
-      - alert: NebulaCRReplicationLag
-        expr: nebulacr_replication_lag_seconds > 120
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "NebulaCR replication lag exceeds 2 minutes for {{ $labels.region }}"
-
-      - alert: NebulaCRTenantStorageQuota
-        expr: |
-          nebulacr_tenant_storage_bytes / on(tenant) nebulacr_tenant_storage_quota_bytes > 0.9
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Tenant {{ $labels.tenant }} storage usage above 90%"
+    static_configs:
+      - targets: ["nebulacr-auth.nebulacr.svc.cluster.local:5001"]
 ```
 
 ---
@@ -360,39 +372,9 @@ environment:
 
 ---
 
-## Grafana Dashboard Suggestions
+## Grafana dashboards
 
-### Registry Overview Dashboard
-
-Panels to include:
-
-1. **Request Rate** - `sum(rate(nebulacr_http_requests_total[5m])) by (method)`
-2. **Error Rate** - `sum(rate(nebulacr_http_requests_total{status=~"5.."}[5m]))`
-3. **Request Latency (p50/p95/p99)** - `histogram_quantile(0.99, rate(nebulacr_http_request_duration_seconds_bucket[5m]))`
-4. **Push/Pull Rate** - `rate(nebulacr_manifest_push_total[5m])` and `rate(nebulacr_manifest_pull_total[5m])`
-5. **Bandwidth** - `rate(nebulacr_blob_upload_bytes_total[5m])` and `rate(nebulacr_blob_download_bytes_total[5m])`
-6. **Active Tenants** - Unique tenant labels seen in recent metrics
-
-### Storage Dashboard
-
-1. **Storage Latency** - `histogram_quantile(0.95, rate(nebulacr_storage_operation_duration_seconds_bucket[5m]))`
-2. **Storage Error Rate** - `rate(nebulacr_storage_operation_errors_total[5m])`
-3. **Circuit Breaker State** - `nebulacr_circuit_breaker_state`
-4. **Retry Rate** - `rate(nebulacr_retry_attempts_total[5m])`
-5. **Per-Tenant Storage Usage** - `nebulacr_tenant_storage_bytes`
-
-### Auth Dashboard
-
-1. **Token Issuance Rate** - `rate(nebulacr_token_issued_total[5m])`
-2. **Token Rejection Rate** - `rate(nebulacr_token_rejected_total[5m]) by (reason)`
-3. **Auth Latency by Provider** - `histogram_quantile(0.95, rate(nebulacr_auth_latency_seconds_bucket[5m])) by (provider)`
-4. **Rate Limit Rejections** - `rate(nebulacr_rate_limit_rejected_total[5m]) by (tenant)`
-
-### Mirror / Cache Dashboard
-
-1. **Cache Hit Ratio** - `sum(rate(nebulacr_mirror_cache_hits_total[5m])) / (sum(rate(nebulacr_mirror_cache_hits_total[5m])) + sum(rate(nebulacr_mirror_cache_misses_total[5m])))`
-2. **Upstream Latency** - `histogram_quantile(0.95, rate(nebulacr_mirror_upstream_latency_seconds_bucket[5m])) by (upstream)`
-3. **Upstream Errors** - `rate(nebulacr_mirror_upstream_errors_total[5m]) by (upstream)`
+The bundled JSON dashboards listed at the top of this doc cover every layer of the system. They live under `deploy/observability/grafana/dashboards/` and are auto-loaded by the local stack. To import them into an external Grafana, paste any of the JSON files via *Dashboards → Import*.
 
 ---
 
