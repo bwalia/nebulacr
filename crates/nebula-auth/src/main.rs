@@ -11,8 +11,8 @@
 //  - Rate limiting & Prometheus metrics
 // ═══════════════════════════════════════════════════════════════════
 
-use std::collections::{HashMap, HashSet};
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -850,10 +850,10 @@ async fn authenticate_request(
             return Ok(subject);
         }
         // Robot accounts: username format is "robot:{name}"
-        if let Some(robot_name) = username.strip_prefix("robot:") {
-            if let Ok(subject) = authenticate_robot(state, robot_name, &password).await {
-                return Ok(subject);
-            }
+        if let Some(robot_name) = username.strip_prefix("robot:")
+            && let Ok(subject) = authenticate_robot(state, robot_name, &password).await
+        {
+            return Ok(subject);
         }
     }
 
@@ -876,16 +876,17 @@ async fn authenticate_robot(
     for robot in robots.values() {
         if robot.name == name && robot.enabled {
             // Check expiry
-            if let Some(expires_at) = robot.expires_at {
-                if Utc::now() > expires_at {
-                    increment_auth_failures("robot_expired");
-                    return Err(RegistryError::Unauthorized);
-                }
+            if let Some(expires_at) = robot.expires_at
+                && Utc::now() > expires_at
+            {
+                increment_auth_failures("robot_expired");
+                return Err(RegistryError::Unauthorized);
             }
             // Verify secret (SHA-256 hash comparison)
             let secret_hash = sha256_hex(secret);
             if constant_time_eq(secret_hash.as_bytes(), robot.secret_hash.as_bytes()) {
-                metrics::counter!("registry_robot_auth_total", "robot" => name.to_owned()).increment(1);
+                metrics::counter!("registry_robot_auth_total", "robot" => name.to_owned())
+                    .increment(1);
                 let subject = format!("robot:{}", name);
                 let robot_id = robot.id.to_string();
                 info!(robot = %name, "robot account authenticated");
@@ -1443,7 +1444,9 @@ async fn get_token_inner(
         if let Ok(sub) = authenticate_basic(&state, &username, &password) {
             sub
         } else if let Some(robot_name) = username.strip_prefix("robot:") {
-            authenticate_robot(&state, robot_name, &password).await.unwrap_or_else(|_| "anonymous".to_string())
+            authenticate_robot(&state, robot_name, &password)
+                .await
+                .unwrap_or_else(|_| "anonymous".to_string())
         } else {
             "anonymous".to_string()
         }
@@ -1453,7 +1456,9 @@ async fn get_token_inner(
         if let Ok(sub) = authenticate_basic(&state, u, p) {
             sub
         } else if let Some(robot_name) = u.strip_prefix("robot:") {
-            authenticate_robot(&state, robot_name, p).await.unwrap_or_else(|_| "anonymous".to_string())
+            authenticate_robot(&state, robot_name, p)
+                .await
+                .unwrap_or_else(|_| "anonymous".to_string())
         } else {
             "anonymous".to_string()
         }
@@ -1958,18 +1963,21 @@ async fn oidc_login(
                 || p.client_id == query.provider
         })
         .cloned()
-        .ok_or_else(|| RegistryError::Internal(format!(
-            "OIDC provider '{}' not configured",
-            query.provider
-        )))?;
+        .ok_or_else(|| {
+            RegistryError::Internal(format!("OIDC provider '{}' not configured", query.provider))
+        })?;
 
     // Generate PKCE code verifier + challenge
     let pkce_verifier: String = (0..64)
         .map(|_| {
             let idx = rand::random::<u8>() % 62;
-            if idx < 10 { (b'0' + idx) as char }
-            else if idx < 36 { (b'a' + idx - 10) as char }
-            else { (b'A' + idx - 36) as char }
+            if idx < 10 {
+                (b'0' + idx) as char
+            } else if idx < 36 {
+                (b'a' + idx - 10) as char
+            } else {
+                (b'A' + idx - 36) as char
+            }
         })
         .collect();
 
@@ -2039,7 +2047,8 @@ async fn oidc_login(
         StatusCode::FOUND,
         [("location", auth_url.as_str())],
         "Redirecting to identity provider...",
-    ).into_response())
+    )
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2056,11 +2065,11 @@ async fn oidc_callback(
     // Look up session by state
     let session = {
         let mut sessions = state.oidc_sessions.write().await;
-        sessions.remove(&query.state).ok_or_else(|| {
-            RegistryError::TokenInvalid {
+        sessions
+            .remove(&query.state)
+            .ok_or_else(|| RegistryError::TokenInvalid {
                 reason: "invalid or expired OIDC session state".into(),
-            }
-        })?
+            })?
     };
 
     // Check session is not too old (10 minutes max)
@@ -2096,10 +2105,7 @@ async fn oidc_callback(
                 ))
                 .to_string()
         }
-        Err(_) => format!(
-            "{}/token",
-            provider_config.issuer_url.trim_end_matches('/')
-        ),
+        Err(_) => format!("{}/token", provider_config.issuer_url.trim_end_matches('/')),
     };
 
     let callback_uri = format!(
@@ -2178,7 +2184,10 @@ async fn oidc_callback(
         &state,
         &oidc_claims.sub,
         oidc_claims.email.clone(),
-        oidc_claims.name.clone().or(oidc_claims.preferred_username.clone()),
+        oidc_claims
+            .name
+            .clone()
+            .or(oidc_claims.preferred_username.clone()),
         oidc_claims.groups.clone(),
         "oidc",
     )
@@ -2271,10 +2280,12 @@ async fn ci_token_exchange(
         .iter()
         .find(|p| p.name == request.provider)
         .cloned()
-        .ok_or_else(|| RegistryError::Internal(format!(
-            "CI OIDC provider '{}' not configured",
-            request.provider
-        )))?;
+        .ok_or_else(|| {
+            RegistryError::Internal(format!(
+                "CI OIDC provider '{}' not configured",
+                request.provider
+            ))
+        })?;
 
     // Validate the OIDC token against the provider's JWKS
     // First check if the OIDC manager has this provider, if not try to validate generically
@@ -2313,10 +2324,7 @@ async fn ci_token_exchange(
         })?;
 
     // Verify issuer
-    let token_issuer = ci_claims
-        .get("iss")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let token_issuer = ci_claims.get("iss").and_then(|v| v.as_str()).unwrap_or("");
     if token_issuer != ci_config.issuer_url {
         return Err(RegistryError::TokenInvalid {
             reason: format!(
@@ -2327,10 +2335,10 @@ async fn ci_token_exchange(
     }
 
     // Check expiry
-    if let Some(exp) = ci_claims.get("exp").and_then(|v| v.as_i64()) {
-        if Utc::now().timestamp() > exp {
-            return Err(RegistryError::TokenExpired);
-        }
+    if let Some(exp) = ci_claims.get("exp").and_then(|v| v.as_i64())
+        && Utc::now().timestamp() > exp
+    {
+        return Err(RegistryError::TokenExpired);
     }
 
     // Check allowed claim filters
@@ -2359,11 +2367,12 @@ async fn ci_token_exchange(
 
     // Resolve tenant
     let tenants = state.tenants.read().await;
-    let tenant = tenants.get(&request.scope.tenant).ok_or_else(|| {
-        RegistryError::TenantNotFound {
-            tenant: request.scope.tenant.clone(),
-        }
-    })?;
+    let tenant =
+        tenants
+            .get(&request.scope.tenant)
+            .ok_or_else(|| RegistryError::TenantNotFound {
+                tenant: request.scope.tenant.clone(),
+            })?;
     let tenant_id = tenant.id;
     drop(tenants);
 
@@ -2401,7 +2410,10 @@ async fn ci_token_exchange(
 
     // Issue token with max TTL
     let now = Utc::now();
-    let ttl = std::cmp::min(state.config.auth.token_ttl_seconds, ci_config.max_ttl_seconds);
+    let ttl = std::cmp::min(
+        state.config.auth.token_ttl_seconds,
+        ci_config.max_ttl_seconds,
+    );
     let claims = TokenClaims {
         iss: state.config.auth.issuer.clone(),
         sub: subject.clone(),
@@ -2534,7 +2546,10 @@ async fn revoke_token_handler(
 
     metrics::counter!("registry_token_revocation_total").increment(1);
 
-    (StatusCode::OK, Json(serde_json::json!({"status": "revoked"})))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "revoked"})),
+    )
 }
 
 /// GET /auth/token/revoked — Returns list of revoked token JTIs (for registry polling).
@@ -2577,9 +2592,13 @@ async fn create_robot_account(
     let secret: String = (0..48)
         .map(|_| {
             let idx = rand::random::<u8>() % 62;
-            if idx < 10 { (b'0' + idx) as char }
-            else if idx < 36 { (b'a' + idx - 10) as char }
-            else { (b'A' + idx - 36) as char }
+            if idx < 10 {
+                (b'0' + idx) as char
+            } else if idx < 36 {
+                (b'a' + idx - 10) as char
+            } else {
+                (b'A' + idx - 36) as char
+            }
         })
         .collect();
 
@@ -2599,7 +2618,9 @@ async fn create_robot_account(
         role,
         secret_hash: sha256_hex(&secret),
         created_at: now,
-        expires_at: request.expires_in_seconds.map(|s| now + chrono::Duration::seconds(s as i64)),
+        expires_at: request
+            .expires_in_seconds
+            .map(|s| now + chrono::Duration::seconds(s as i64)),
         last_used: None,
         enabled: true,
     };
@@ -2623,9 +2644,7 @@ async fn create_robot_account(
 }
 
 /// GET /api/v1/robot-accounts — List all robot accounts.
-async fn list_robot_accounts(
-    State(state): State<AppState>,
-) -> Json<Vec<serde_json::Value>> {
+async fn list_robot_accounts(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let robots = state.robot_accounts.read().await;
     let list: Vec<serde_json::Value> = robots
         .values()
@@ -2655,7 +2674,10 @@ async fn delete_robot_account(
     let mut robots = state.robot_accounts.write().await;
     if robots.remove(&id).is_some() {
         info!(id = %id, "robot account deleted");
-        (StatusCode::OK, Json(serde_json::json!({"status": "deleted"})))
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
+        )
     } else {
         (
             StatusCode::NOT_FOUND,
@@ -2676,11 +2698,14 @@ async fn credential_exchange(
     validation.set_audience(&[&state.config.auth.audience]);
     validation.set_issuer(&[&state.config.auth.issuer]);
 
-    let token_data =
-        jsonwebtoken::decode::<TokenClaims>(&request.session_token, &state.decoding_key, &validation)
-            .map_err(|e| RegistryError::TokenInvalid {
-                reason: format!("invalid session token: {e}"),
-            })?;
+    let token_data = jsonwebtoken::decode::<TokenClaims>(
+        &request.session_token,
+        &state.decoding_key,
+        &validation,
+    )
+    .map_err(|e| RegistryError::TokenInvalid {
+        reason: format!("invalid session token: {e}"),
+    })?;
 
     let now = Utc::now();
     let ttl_secs: i64 = 300; // 5-minute credential
@@ -2717,9 +2742,7 @@ async fn list_users(State(state): State<AppState>) -> Json<Vec<UserRecord>> {
 }
 
 /// GET /api/v1/groups — List group role mappings and active memberships.
-async fn list_groups(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+async fn list_groups(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mappings = &state.config.enterprise.group_role_mappings;
     let users = state.users.read().await;
 
@@ -2937,14 +2960,23 @@ fn seed_demo_data() -> (TenantMap, ProjectMap, Vec<AccessPolicy>) {
 // ═══════════════════════════════════════════════════════════════════
 
 /// Authenticate SCIM requests using the configured bearer token.
-fn authenticate_scim(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ScimError>)> {
+fn authenticate_scim(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ScimError>)> {
     let scim_config = &state.config.enterprise.scim;
     if !scim_config.enabled {
-        return Err((StatusCode::NOT_FOUND, Json(ScimError::new(404, "SCIM provisioning is not enabled"))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ScimError::new(404, "SCIM provisioning is not enabled")),
+        ));
     }
 
     let Some(ref expected_token) = scim_config.bearer_token else {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ScimError::new(500, "SCIM bearer token not configured"))));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ScimError::new(500, "SCIM bearer token not configured")),
+        ));
     };
 
     let auth_header = headers
@@ -2954,7 +2986,10 @@ fn authenticate_scim(state: &AppState, headers: &HeaderMap) -> Result<(), (Statu
         .unwrap_or("");
 
     if !constant_time_eq(auth_header.as_bytes(), expected_token.as_bytes()) {
-        return Err((StatusCode::UNAUTHORIZED, Json(ScimError::new(401, "Invalid SCIM bearer token"))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ScimError::new(401, "Invalid SCIM bearer token")),
+        ));
     }
 
     Ok(())
@@ -2973,11 +3008,15 @@ fn user_to_scim(user: &UserRecord, base_url: &str) -> ScimUser {
         }]
     };
 
-    let groups: Vec<ScimGroupRef> = user.groups.iter().map(|g| ScimGroupRef {
-        value: g.clone(),
-        ref_uri: Some(format!("{}/scim/v2/Groups/{}", base_url, g)),
-        display: Some(g.clone()),
-    }).collect();
+    let groups: Vec<ScimGroupRef> = user
+        .groups
+        .iter()
+        .map(|g| ScimGroupRef {
+            value: g.clone(),
+            ref_uri: Some(format!("{}/scim/v2/Groups/{}", base_url, g)),
+            display: Some(g.clone()),
+        })
+        .collect();
 
     ScimUser {
         schemas: vec![ScimUser::schema()],
@@ -2986,11 +3025,14 @@ fn user_to_scim(user: &UserRecord, base_url: &str) -> ScimUser {
         user_name: user.subject.clone(),
         display_name: user.display_name.clone(),
         active: true,
-        name: user.display_name.as_ref().map(|n| nebula_common::auth::ScimName {
-            formatted: Some(n.clone()),
-            given_name: None,
-            family_name: None,
-        }),
+        name: user
+            .display_name
+            .as_ref()
+            .map(|n| nebula_common::auth::ScimName {
+                formatted: Some(n.clone()),
+                given_name: None,
+                family_name: None,
+            }),
         emails,
         groups,
         meta: Some(ScimMeta {
@@ -3033,7 +3075,10 @@ async fn scim_get_user(
 
     let users = state.users.read().await;
     let user = users.get(&id).ok_or_else(|| {
-        (StatusCode::NOT_FOUND, Json(ScimError::new(404, format!("User '{}' not found", id))))
+        (
+            StatusCode::NOT_FOUND,
+            Json(ScimError::new(404, format!("User '{}' not found", id))),
+        )
     })?;
 
     let base_url = state.config.server.auth_listen_addr.clone();
@@ -3050,11 +3095,18 @@ async fn scim_create_user(
 
     let subject = scim_user.user_name.clone();
     if subject.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(ScimError::new(400, "userName is required"))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ScimError::new(400, "userName is required")),
+        ));
     }
 
     let email = scim_user.emails.first().map(|e| e.value.clone());
-    let groups: Vec<String> = scim_user.groups.iter().map(|g| g.display.clone().unwrap_or_else(|| g.value.clone())).collect();
+    let groups: Vec<String> = scim_user
+        .groups
+        .iter()
+        .map(|g| g.display.clone().unwrap_or_else(|| g.value.clone()))
+        .collect();
 
     let now = chrono::Utc::now();
     let user = UserRecord {
@@ -3092,7 +3144,11 @@ async fn scim_replace_user(
     authenticate_scim(&state, &headers)?;
 
     let email = scim_user.emails.first().map(|e| e.value.clone());
-    let groups: Vec<String> = scim_user.groups.iter().map(|g| g.display.clone().unwrap_or_else(|| g.value.clone())).collect();
+    let groups: Vec<String> = scim_user
+        .groups
+        .iter()
+        .map(|g| g.display.clone().unwrap_or_else(|| g.value.clone()))
+        .collect();
 
     let mut users = state.users.write().await;
     let existing = users.get(&id);
@@ -3130,21 +3186,27 @@ async fn scim_replace_user(
     let base_url = state.config.server.auth_listen_addr.clone();
     let response_user = {
         let users = state.users.read().await;
-        users.get(&id).map(|u| user_to_scim(u, &base_url)).unwrap_or_else(|| {
-            // User was deactivated — return with active=false
-            let mut u = user_to_scim(&UserRecord {
-                subject: id.clone(),
-                email: None,
-                display_name: scim_user.display_name.clone(),
-                groups: vec![],
-                auth_method: "scim".to_string(),
-                first_seen: now,
-                last_login: now,
-                login_count: 0,
-            }, &base_url);
-            u.active = false;
-            u
-        })
+        users
+            .get(&id)
+            .map(|u| user_to_scim(u, &base_url))
+            .unwrap_or_else(|| {
+                // User was deactivated — return with active=false
+                let mut u = user_to_scim(
+                    &UserRecord {
+                        subject: id.clone(),
+                        email: None,
+                        display_name: scim_user.display_name.clone(),
+                        groups: vec![],
+                        auth_method: "scim".to_string(),
+                        first_seen: now,
+                        last_login: now,
+                        login_count: 0,
+                    },
+                    &base_url,
+                );
+                u.active = false;
+                u
+            })
     };
 
     Ok(Json(response_user))
@@ -3162,26 +3224,28 @@ async fn scim_patch_user(
     for op in &patch.operations {
         match op.op.to_lowercase().as_str() {
             "replace" => {
-                if op.path.as_deref() == Some("active") {
-                    if let Some(serde_json::Value::Bool(false)) = &op.value {
-                        // Deactivate user — instant offboarding
-                        let mut users = state.users.write().await;
-                        users.remove(&id);
-                        drop(users);
-                        let mut policies = state.access_policies.write().await;
-                        policies.retain(|p| p.subject != id);
-                        drop(policies);
-                        metrics::counter!("registry_scim_provisions_total", "action" => "deactivate").increment(1);
-                        warn!(subject = %id, "SCIM PATCH deactivated user — access revoked immediately");
-                    }
+                if op.path.as_deref() == Some("active")
+                    && let Some(serde_json::Value::Bool(false)) = &op.value
+                {
+                    // Deactivate user — instant offboarding
+                    let mut users = state.users.write().await;
+                    users.remove(&id);
+                    drop(users);
+                    let mut policies = state.access_policies.write().await;
+                    policies.retain(|p| p.subject != id);
+                    drop(policies);
+                    metrics::counter!("registry_scim_provisions_total", "action" => "deactivate")
+                        .increment(1);
+                    warn!(subject = %id, "SCIM PATCH deactivated user — access revoked immediately");
                 }
                 // Handle other replace operations on display name, emails, etc.
-                if op.path.as_deref() == Some("displayName") || op.path.as_deref() == Some("name.formatted") {
-                    if let Some(serde_json::Value::String(name)) = &op.value {
-                        let mut users = state.users.write().await;
-                        if let Some(user) = users.get_mut(&id) {
-                            user.display_name = Some(name.clone());
-                        }
+                if (op.path.as_deref() == Some("displayName")
+                    || op.path.as_deref() == Some("name.formatted"))
+                    && let Some(serde_json::Value::String(name)) = &op.value
+                {
+                    let mut users = state.users.write().await;
+                    if let Some(user) = users.get_mut(&id) {
+                        user.display_name = Some(name.clone());
                     }
                 }
             }
@@ -3200,22 +3264,25 @@ async fn scim_patch_user(
 
     let users = state.users.read().await;
     let base_url = state.config.server.auth_listen_addr.clone();
-    let user = users.get(&id).map(|u| user_to_scim(u, &base_url)).unwrap_or_else(|| {
-        let mut u = ScimUser {
-            schemas: vec![ScimUser::schema()],
-            id: Some(id.clone()),
-            external_id: Some(id.clone()),
-            user_name: id.clone(),
-            display_name: None,
-            active: false,
-            name: None,
-            emails: vec![],
-            groups: vec![],
-            meta: None,
-        };
-        u.active = false;
-        u
-    });
+    let user = users
+        .get(&id)
+        .map(|u| user_to_scim(u, &base_url))
+        .unwrap_or_else(|| {
+            let mut u = ScimUser {
+                schemas: vec![ScimUser::schema()],
+                id: Some(id.clone()),
+                external_id: Some(id.clone()),
+                user_name: id.clone(),
+                display_name: None,
+                active: false,
+                name: None,
+                emails: vec![],
+                groups: vec![],
+                meta: None,
+            };
+            u.active = false;
+            u
+        });
 
     Ok(Json(user))
 }
@@ -3270,7 +3337,10 @@ async fn scim_create_group(
 ) -> Result<(StatusCode, Json<ScimGroup>), (StatusCode, Json<ScimError>)> {
     authenticate_scim(&state, &headers)?;
 
-    let group_id = group.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let group_id = group
+        .id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let mut g = group;
     g.id = Some(group_id.clone());
     g.schemas = vec![ScimGroup::schema()];
@@ -3278,10 +3348,10 @@ async fn scim_create_group(
     // Sync member groups to user records
     for member in &g.members {
         let mut users = state.users.write().await;
-        if let Some(user) = users.get_mut(&member.value) {
-            if !user.groups.contains(&g.display_name) {
-                user.groups.push(g.display_name.clone());
-            }
+        if let Some(user) = users.get_mut(&member.value)
+            && !user.groups.contains(&g.display_name)
+        {
+            user.groups.push(g.display_name.clone());
         }
     }
 
@@ -3305,30 +3375,33 @@ async fn scim_patch_group(
 
     let mut groups = state.scim_groups.write().await;
     let group = groups.get_mut(&id).ok_or_else(|| {
-        (StatusCode::NOT_FOUND, Json(ScimError::new(404, format!("Group '{}' not found", id))))
+        (
+            StatusCode::NOT_FOUND,
+            Json(ScimError::new(404, format!("Group '{}' not found", id))),
+        )
     })?;
 
     for op in &patch.operations {
         match op.op.to_lowercase().as_str() {
             "add" => {
                 // Add members to the group
-                if let Some(ref value) = op.value {
-                    if let Ok(members) = serde_json::from_value::<Vec<ScimMember>>(value.clone()) {
-                        for member in members {
-                            if !group.members.iter().any(|m| m.value == member.value) {
-                                // Add group to user's group list
-                                let mut users = state.users.write().await;
-                                if let Some(user) = users.get_mut(&member.value) {
-                                    if !user.groups.contains(&group.display_name) {
-                                        user.groups.push(group.display_name.clone());
-                                        // Re-apply group policies
-                                        let groups_clone = user.groups.clone();
-                                        drop(users);
-                                        apply_group_policies(&state, &member.value, &groups_clone).await;
-                                    }
-                                }
-                                group.members.push(member);
+                if let Some(ref value) = op.value
+                    && let Ok(members) = serde_json::from_value::<Vec<ScimMember>>(value.clone())
+                {
+                    for member in members {
+                        if !group.members.iter().any(|m| m.value == member.value) {
+                            // Add group to user's group list
+                            let mut users = state.users.write().await;
+                            if let Some(user) = users.get_mut(&member.value)
+                                && !user.groups.contains(&group.display_name)
+                            {
+                                user.groups.push(group.display_name.clone());
+                                // Re-apply group policies
+                                let groups_clone = user.groups.clone();
+                                drop(users);
+                                apply_group_policies(&state, &member.value, &groups_clone).await;
                             }
+                            group.members.push(member);
                         }
                     }
                 }
@@ -3352,12 +3425,11 @@ async fn scim_patch_group(
             }
             "replace" => {
                 // Full member list replacement
-                if op.path.as_deref() == Some("members") || op.path.is_none() {
-                    if let Some(ref value) = op.value {
-                        if let Ok(members) = serde_json::from_value::<Vec<ScimMember>>(value.clone()) {
-                            group.members = members;
-                        }
-                    }
+                if (op.path.as_deref() == Some("members") || op.path.is_none())
+                    && let Some(ref value) = op.value
+                    && let Ok(members) = serde_json::from_value::<Vec<ScimMember>>(value.clone())
+                {
+                    group.members = members;
                 }
             }
             _ => {}
@@ -3384,7 +3456,8 @@ async fn scim_delete_group(
         for user in users.values_mut() {
             user.groups.retain(|g| g != &group.display_name);
         }
-        metrics::counter!("registry_scim_provisions_total", "action" => "group_delete").increment(1);
+        metrics::counter!("registry_scim_provisions_total", "action" => "group_delete")
+            .increment(1);
         info!(group = %group.display_name, "SCIM group deleted");
     }
 
@@ -3434,7 +3507,8 @@ async fn apply_group_policies(state: &AppState, subject: &str, groups: &[String]
 
                 metrics::counter!("registry_group_mapping_hits_total",
                     "group" => mapping.group.clone()
-                ).increment(1);
+                )
+                .increment(1);
             }
         }
     }
@@ -3618,7 +3692,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token/revoke", post(revoke_token_handler))
         .route("/auth/token/revoked", get(revoked_tokens_handler))
         // Robot Account CRUD (Phase 3)
-        .route("/api/v1/robot-accounts", post(create_robot_account).get(list_robot_accounts))
+        .route(
+            "/api/v1/robot-accounts",
+            post(create_robot_account).get(list_robot_accounts),
+        )
         .route("/api/v1/robot-accounts/{id}", delete(delete_robot_account))
         // Credential Exchange (Phase 4)
         .route("/auth/credential-exchange", post(credential_exchange))
@@ -3626,10 +3703,25 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/users", get(list_users))
         .route("/api/v1/groups", get(list_groups))
         // SCIM 2.0 Provisioning (RFC 7644)
-        .route("/scim/v2/Users", get(scim_list_users).post(scim_create_user))
-        .route("/scim/v2/Users/{id}", get(scim_get_user).put(scim_replace_user).patch(scim_patch_user).delete(scim_delete_user))
-        .route("/scim/v2/Groups", get(scim_list_groups).post(scim_create_group))
-        .route("/scim/v2/Groups/{id}", patch(scim_patch_group).delete(scim_delete_group))
+        .route(
+            "/scim/v2/Users",
+            get(scim_list_users).post(scim_create_user),
+        )
+        .route(
+            "/scim/v2/Users/{id}",
+            get(scim_get_user)
+                .put(scim_replace_user)
+                .patch(scim_patch_user)
+                .delete(scim_delete_user),
+        )
+        .route(
+            "/scim/v2/Groups",
+            get(scim_list_groups).post(scim_create_group),
+        )
+        .route(
+            "/scim/v2/Groups/{id}",
+            patch(scim_patch_group).delete(scim_delete_group),
+        )
         // Infrastructure
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))

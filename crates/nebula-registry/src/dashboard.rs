@@ -19,7 +19,6 @@ use axum::{
 use futures::TryStreamExt;
 use object_store::{ObjectStore, path::Path as StorePath};
 use serde::{Deserialize, Serialize};
-use serde_json;
 use sysinfo::{Disks, System};
 
 use crate::audit::{AuditStats, RegistryAuditLog};
@@ -286,7 +285,11 @@ pub async fn api_images(
         .store
         .list_with_delimiter(None)
         .await
-        .ok().unwrap_or_else(|| object_store::ListResult { common_prefixes: vec![], objects: vec![] });
+        .ok()
+        .unwrap_or_else(|| object_store::ListResult {
+            common_prefixes: vec![],
+            objects: vec![],
+        });
 
     for tenant_prefix in &tenants.common_prefixes {
         let tenant = tenant_prefix.as_ref().trim_end_matches('/').to_string();
@@ -300,7 +303,11 @@ pub async fn api_images(
             .store
             .list_with_delimiter(Some(tenant_prefix))
             .await
-            .ok().unwrap_or_else(|| object_store::ListResult { common_prefixes: vec![], objects: vec![] });
+            .ok()
+            .unwrap_or_else(|| object_store::ListResult {
+                common_prefixes: vec![],
+                objects: vec![],
+            });
 
         for project_prefix in &projects.common_prefixes {
             let project_path = project_prefix.as_ref().trim_end_matches('/');
@@ -314,7 +321,11 @@ pub async fn api_images(
                 .store
                 .list_with_delimiter(Some(project_prefix))
                 .await
-                .ok().unwrap_or_else(|| object_store::ListResult { common_prefixes: vec![], objects: vec![] });
+                .ok()
+                .unwrap_or_else(|| object_store::ListResult {
+                    common_prefixes: vec![],
+                    objects: vec![],
+                });
 
             for repo_prefix in &repos.common_prefixes {
                 let repo_path = repo_prefix.as_ref().trim_end_matches('/');
@@ -364,7 +375,8 @@ pub async fn api_images(
                 let blob_count = blob_objects.len();
 
                 // Count manifests
-                let manifests_path = StorePath::from(format!("{tenant}/{project}/{name}/manifests/"));
+                let manifests_path =
+                    StorePath::from(format!("{tenant}/{project}/{name}/manifests/"));
                 let manifest_objects: Vec<_> = state
                     .store
                     .list(Some(&manifests_path))
@@ -444,11 +456,15 @@ async fn proxy_to_auth(state: &DashboardState, path: &str) -> Response {
     let url = format!("{}{}", auth_url.trim_end_matches('/'), path);
     match reqwest::get(&url).await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = resp.text().await.unwrap_or_default();
             (
                 status,
-                [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
                 body,
             )
                 .into_response()
@@ -490,12 +506,11 @@ fn matches_search(repo: &str, search: &str) -> bool {
             }
         }
         // If pattern doesn't end with *, last segment must be at end
-        if !search.ends_with('*') {
-            if let Some(last) = parts.last() {
-                if !last.is_empty() {
-                    return repo_lower.ends_with(last);
-                }
-            }
+        if !search.ends_with('*')
+            && let Some(last) = parts.last()
+            && !last.is_empty()
+        {
+            return repo_lower.ends_with(last);
         }
         true
     } else {
