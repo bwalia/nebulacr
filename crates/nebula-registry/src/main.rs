@@ -2738,6 +2738,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/system", get(dashboard::api_system))
         .route("/api/ha-status", get(dashboard::api_ha_status))
         .route("/api/images", get(dashboard::api_images))
+        .route("/api/image-detail", get(dashboard::api_image_detail))
         // Identity & Access Management (proxy to auth service)
         .route("/api/users", get(dashboard::api_users))
         .route("/api/groups", get(dashboard::api_groups))
