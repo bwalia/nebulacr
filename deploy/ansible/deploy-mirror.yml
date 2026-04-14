@@ -186,7 +186,7 @@
                 is_primary: true
                 priority: 1
               - name: "srv1423968-mirror"
-                endpoint: "http://187.77.179.206:{{ registry_port }}"
+                endpoint: "https://acc-nebulacr-mirror.diytaxreturn.co.uk"
                 internal_endpoint: "http://127.0.0.1:5002"
                 is_primary: false
                 priority: 2
