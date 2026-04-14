@@ -1554,8 +1554,7 @@ document.addEventListener('keydown', (e) => {{
 
 function renderImageDetail(d) {{
     document.getElementById('modal-title').innerHTML =
-        escapeHtml(d.repository) + '<small>' + d.tag_count + ' tag(s) · ' + d.unique_layer_count + ' unique layer(s)</small>';
-    document.getElementById('modal-subtitle').textContent = '';
+        escapeHtml(d.repository) + '<small id="modal-subtitle">' + d.tag_count + ' tag(s) · ' + d.unique_layer_count + ' unique layer(s)</small>';
 
     let html = '';
 
