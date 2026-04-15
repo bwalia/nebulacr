@@ -53,7 +53,10 @@ pub fn dispatch(layer_digest: &str, path: &str, contents: &[u8], out: &mut Vec<P
         cargo::parse(layer_digest, contents, out);
         return;
     }
-    if path.ends_with("requirements.txt") || path.ends_with(".dist-info/METADATA") {
+    if path.ends_with("requirements.txt")
+        || path.ends_with(".dist-info/METADATA")
+        || path.ends_with(".egg-info/PKG-INFO")
+    {
         pypi::parse(layer_digest, path, contents, out);
         return;
     }

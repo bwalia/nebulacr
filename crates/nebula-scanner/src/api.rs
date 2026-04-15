@@ -11,7 +11,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use nebula_ai::{CveAnalysis, CveAnalyzer, CveInput};
 
 use crate::model::{ScanResult, Vulnerability};
 use crate::queue::Queue;
+use crate::settings::ImageSettingsStore;
 use crate::store::EphemeralStore;
 use crate::suppress::{NewSuppression, Suppressions};
 
@@ -31,6 +32,7 @@ pub struct ScannerState {
     pub store: Arc<dyn EphemeralStore>,
     pub queue: Arc<dyn Queue>,
     pub suppressions: Arc<Suppressions>,
+    pub settings: Arc<ImageSettingsStore>,
     pub ai: Option<Arc<dyn CveAnalyzer>>,
 }
 
@@ -39,11 +41,15 @@ pub fn router(state: ScannerState) -> Router {
         .route("/v2/scan/live/{digest}", get(live_scan))
         .route("/v2/scan", post(trigger_scan))
         .route("/v2/policy/evaluate", post(evaluate_policy))
-        .route("/v2/cve/suppress", post(create_suppression))
+        .route(
+            "/v2/cve/suppress",
+            post(create_suppression).get(list_suppressions),
+        )
+        .route("/v2/cve/suppress/{id}", delete(revoke_suppression))
         .route("/v2/cve/search", get(search_cves))
         .route(
             "/v2/image/{tenant}/{project}/{repo}/settings",
-            patch(update_image_settings),
+            patch(update_image_settings).get(get_image_settings),
         )
         .with_state(state)
 }
@@ -69,6 +75,11 @@ struct AiAnnotated {
 struct LiveQuery {
     #[serde(default)]
     ai: Option<u8>,
+    /// Optional cap on how many CVEs to analyse. Each call to Ollama is
+    /// sequential and can take tens of seconds on contended GPUs, so callers
+    /// can bound the response time with a small limit while iterating.
+    #[serde(default)]
+    ai_limit: Option<usize>,
 }
 
 async fn live_scan(
@@ -94,7 +105,11 @@ async fn live_scan(
     };
 
     let ai_analysis = if q.ai.unwrap_or(0) > 0 && state.ai.is_some() {
-        Some(analyse_all(state.ai.as_ref().unwrap(), &result.vulnerabilities).await)
+        let slice: &[Vulnerability] = match q.ai_limit {
+            Some(n) if n < result.vulnerabilities.len() => &result.vulnerabilities[..n],
+            _ => &result.vulnerabilities,
+        };
+        Some(analyse_all(state.ai.as_ref().unwrap(), slice).await)
     } else {
         None
     };
@@ -217,6 +232,82 @@ async fn search_cves() -> impl IntoResponse {
     (StatusCode::NOT_IMPLEMENTED, "cve search — needs own-DB (slice 2)")
 }
 
-async fn update_image_settings() -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "image settings — pending task")
+#[derive(Deserialize)]
+struct SettingsPatch {
+    scan_enabled: Option<bool>,
+    policy_yaml: Option<String>,
+}
+
+async fn get_image_settings(
+    State(state): State<ScannerState>,
+    Path((tenant, project, repo)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    match state.settings.get(&tenant, &project, &repo).await {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn update_image_settings(
+    State(state): State<ScannerState>,
+    Path((tenant, project, repo)): Path<(String, String, String)>,
+    Json(patch): Json<SettingsPatch>,
+) -> impl IntoResponse {
+    // Merge onto current record so callers can PATCH one field at a time.
+    let current = match state.settings.get(&tenant, &project, &repo).await {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let scan_enabled = patch.scan_enabled.unwrap_or(current.scan_enabled);
+    let policy_yaml = patch.policy_yaml.or(current.policy_yaml);
+    match state
+        .settings
+        // TODO: use auth-derived actor once the auth middleware is wired onto scanner routes.
+        .upsert("system", &tenant, &project, &repo, scan_enabled, policy_yaml.as_deref())
+        .await
+    {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ListSuppressQuery {
+    cve_id: Option<String>,
+    tenant: Option<String>,
+    project: Option<String>,
+    repository: Option<String>,
+    #[serde(default)]
+    include_revoked: bool,
+}
+
+async fn list_suppressions(
+    State(state): State<ScannerState>,
+    Query(q): Query<ListSuppressQuery>,
+) -> impl IntoResponse {
+    match state
+        .suppressions
+        .list(
+            q.cve_id.as_deref(),
+            q.tenant.as_deref(),
+            q.project.as_deref(),
+            q.repository.as_deref(),
+            q.include_revoked,
+        )
+        .await
+    {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn revoke_suppression(
+    State(state): State<ScannerState>,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    match state.suppressions.revoke("system", id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "suppression not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }

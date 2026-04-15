@@ -19,6 +19,7 @@ use crate::image::Puller;
 use crate::model::ScanJob;
 use crate::policy::Policy;
 use crate::queue::{Queue, TokioQueue};
+use crate::settings::ImageSettingsStore;
 use crate::store::{EphemeralStore, RedisStore};
 use crate::suppress::Suppressions;
 use crate::vulndb::{NebulaVulnDb, OsvClient, VulnDb};
@@ -58,6 +59,7 @@ impl ScannerRuntime {
             VulnDbBackend::Nebula => Arc::new(NebulaVulnDb::new(pg.clone())),
         };
         let suppressions = Arc::new(Suppressions::new(pg.clone()));
+        let settings = Arc::new(ImageSettingsStore::new(pg.clone()));
 
         // Default policy is permissive (pass-through). Per-repo policies in
         // image_settings.policy_yaml will override this once task #12 lands.
@@ -72,6 +74,7 @@ impl ScannerRuntime {
                 vulndb: vulndb.clone(),
                 store: redis.clone(),
                 suppressions: suppressions.clone(),
+                settings: settings.clone(),
                 pg: pg.clone(),
                 default_policy: default_policy.clone(),
             });
@@ -101,6 +104,7 @@ impl ScannerRuntime {
             store: redis.clone(),
             queue: queue.clone(),
             suppressions: suppressions.clone(),
+            settings: settings.clone(),
             ai,
         });
 

@@ -43,6 +43,7 @@ pub mod queue;
 pub mod report;
 pub mod runtime;
 pub mod sbom;
+pub mod settings;
 pub mod store;
 pub mod suppress;
 pub mod vulndb;

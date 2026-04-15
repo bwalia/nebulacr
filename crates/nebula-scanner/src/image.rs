@@ -249,6 +249,7 @@ fn is_interesting(path: &str) -> bool {
         || path.ends_with("Cargo.lock")
         || path.ends_with("requirements.txt")
         || path.ends_with(".dist-info/METADATA")
+        || path.ends_with(".egg-info/PKG-INFO")
         || path.ends_with("go.sum")
 }
 

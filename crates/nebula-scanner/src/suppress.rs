@@ -68,6 +68,75 @@ impl Suppressions {
         Ok(id)
     }
 
+    /// List suppressions matching the given scope filters. Every filter is
+    /// optional; `None` means "don't filter on this field".
+    pub async fn list(
+        &self,
+        cve_id: Option<&str>,
+        tenant: Option<&str>,
+        project: Option<&str>,
+        repository: Option<&str>,
+        include_revoked: bool,
+    ) -> Result<Vec<nebula_db::models::SuppressionRow>> {
+        let rows = sqlx::query_as::<_, nebula_db::models::SuppressionRow>(
+            r#"SELECT id, cve_id, scope_tenant, scope_project, scope_repository,
+                      scope_package, reason, created_by, created_at, expires_at, revoked_at
+               FROM suppressions
+               WHERE ($1::text IS NULL OR cve_id = $1)
+                 AND ($2::text IS NULL OR scope_tenant = $2)
+                 AND ($3::text IS NULL OR scope_project = $3)
+                 AND ($4::text IS NULL OR scope_repository = $4)
+                 AND ($5 OR revoked_at IS NULL)
+               ORDER BY created_at DESC
+               LIMIT 500"#,
+        )
+        .bind(cve_id)
+        .bind(tenant)
+        .bind(project)
+        .bind(repository)
+        .bind(include_revoked)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(nebula_db::DbError::from)?;
+        Ok(rows)
+    }
+
+    /// Soft-delete: stamp revoked_at and emit an audit log entry.
+    /// Returns Ok(false) if no active suppression with this id exists.
+    pub async fn revoke(&self, actor: &str, id: Uuid) -> Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(nebula_db::DbError::from)?;
+        let updated = sqlx::query(
+            r#"UPDATE suppressions SET revoked_at = NOW()
+               WHERE id = $1 AND revoked_at IS NULL"#,
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(nebula_db::DbError::from)?;
+
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(nebula_db::DbError::from)?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"INSERT INTO audit_log (id, actor, action, target_kind, target_id, details)
+                VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(actor)
+        .bind("suppression.revoke")
+        .bind("suppression")
+        .bind(id.to_string())
+        .bind(serde_json::json!({}))
+        .execute(&mut *tx)
+        .await
+        .map_err(nebula_db::DbError::from)?;
+
+        tx.commit().await.map_err(nebula_db::DbError::from)?;
+        Ok(true)
+    }
+
     /// Mark vulnerabilities as `suppressed` in place, based on DB state.
     pub async fn apply(
         &self,

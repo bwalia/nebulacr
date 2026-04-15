@@ -11,6 +11,7 @@ use crate::model::{ScanJob, ScanResult, ScanStatus, ScanSummary, Vulnerability};
 use crate::policy::Policy;
 use crate::queue::Queue;
 use crate::sbom::{self, Package};
+use crate::settings::ImageSettingsStore;
 use crate::store::EphemeralStore;
 use crate::suppress::Suppressions;
 use crate::vulndb::VulnDb;
@@ -22,6 +23,7 @@ pub struct Worker {
     pub vulndb: Arc<dyn VulnDb>,
     pub store: Arc<dyn EphemeralStore>,
     pub suppressions: Arc<Suppressions>,
+    pub settings: Arc<ImageSettingsStore>,
     pub pg: PgPool,
     pub default_policy: Policy,
 }
@@ -44,6 +46,26 @@ impl Worker {
     }
 
     async fn process(&self, job: ScanJob) -> Result<()> {
+        // Honor per-repo scan_enabled flag (default true).
+        let settings = self
+            .settings
+            .get(&job.tenant, &job.project, &job.repository)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "failed to read image_settings; using defaults");
+                crate::settings::ImageSettings::default_for(
+                    &job.tenant, &job.project, &job.repository,
+                )
+            });
+        if !settings.scan_enabled {
+            info!(
+                digest = %job.digest,
+                tenant = %job.tenant, project = %job.project, repo = %job.repository,
+                "scan skipped: scan_enabled=false"
+            );
+            return Ok(());
+        }
+
         let started = Utc::now();
         record_status(&self.pg, &job, ScanStatus::InProgress, None).await?;
 
@@ -73,7 +95,7 @@ impl Worker {
             digest: job.digest.clone(),
         };
 
-        let final_result = match self.run_pipeline(&job, &loc, started).await {
+        let final_result = match self.run_pipeline(&job, &loc, started, &settings).await {
             Ok(res) => res,
             Err(e) => {
                 let msg = e.to_string();
@@ -101,6 +123,7 @@ impl Worker {
         job: &ScanJob,
         loc: &ImageLocator,
         started: chrono::DateTime<Utc>,
+        settings: &crate::settings::ImageSettings,
     ) -> Result<ScanResult> {
         // 1. Walk layers and collect packages.
         let mut collector = SbomCollector::default();
@@ -130,8 +153,15 @@ impl Worker {
             summary.add(v.severity);
         }
 
-        // 5. Policy.
-        let policy_eval = self.default_policy.evaluate(&vulns);
+        // 5. Policy. Per-repo policy_yaml wins over the registry default.
+        let policy = match settings.policy_yaml.as_deref() {
+            Some(y) => Policy::from_yaml(y).unwrap_or_else(|e| {
+                warn!(error = %e, "image_settings.policy_yaml invalid; falling back to default");
+                self.default_policy.clone()
+            }),
+            None => self.default_policy.clone(),
+        };
+        let policy_eval = policy.evaluate(&vulns);
 
         Ok(ScanResult {
             id: job.id,

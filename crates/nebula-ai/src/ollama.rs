@@ -22,7 +22,8 @@ impl Default for OllamaConfig {
             model: "qwen2.5-coder:7b".into(),
             // CPU inference is slow; GPU (P4200) handles qwen2.5-coder:7b in ~5-15s
             // for a short JSON answer. Leave headroom.
-            request_timeout: Duration::from_secs(90),
+            // 5 minutes — generous headroom for contended GPUs and queue wait.
+            request_timeout: Duration::from_secs(300),
             num_ctx: 8192,
             temperature: 0.2,
         }
