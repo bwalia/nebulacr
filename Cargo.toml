@@ -7,6 +7,9 @@ members = [
     "crates/nebula-resilience",
     "crates/nebula-mirror",
     "crates/nebula-replication",
+    "crates/nebula-db",
+    "crates/nebula-ai",
+    "crates/nebula-scanner",
 ]
 resolver = "3"
 
@@ -93,6 +96,22 @@ nebula-controller = { path = "crates/nebula-controller" }
 nebula-resilience = { path = "crates/nebula-resilience" }
 nebula-mirror = { path = "crates/nebula-mirror" }
 nebula-replication = { path = "crates/nebula-replication" }
+nebula-db = { path = "crates/nebula-db" }
+nebula-ai = { path = "crates/nebula-ai" }
+nebula-scanner = { path = "crates/nebula-scanner" }
+
+# Scanner deps
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+deadpool-redis = "0.18"
+tar = "0.4"
+flate2 = "1"
+zstd = "0.13"
+oci-spec = "0.7"
+purl = "0.1"
+semver = "1"
+regex = "1"
+async-stream = "0.3"
 
 # Async traits
 async-trait = "0.1"

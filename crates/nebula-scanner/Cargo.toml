@@ -1,0 +1,61 @@
+[package]
+name = "nebula-scanner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal
+nebula-common.workspace = true
+nebula-db.workspace = true
+nebula-ai.workspace = true
+
+# Async + web
+tokio.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+tower.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+# Storage
+object_store.workspace = true
+bytes.workspace = true
+
+# HTTP + Redis + SQL
+reqwest.workspace = true
+redis.workspace = true
+deadpool-redis.workspace = true
+sqlx.workspace = true
+
+# OCI + archive
+oci-spec.workspace = true
+tar.workspace = true
+flate2.workspace = true
+zstd.workspace = true
+
+# Vuln matching
+purl.workspace = true
+semver.workspace = true
+regex.workspace = true
+
+# Utilities
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

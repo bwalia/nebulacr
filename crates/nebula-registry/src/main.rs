@@ -54,6 +54,7 @@ use nebula_replication::region::{
 };
 use nebula_replication::replicator::{ReplicationHandle, Replicator};
 use nebula_resilience::{CircuitBreakerConfig, ResilientObjectStore, RetryPolicy};
+use nebula_scanner::{config::ScannerConfig, model::ScanJob, ScannerRuntime};
 
 // ── Application State ────────────────────────────────────────────────────────
 
@@ -77,6 +78,9 @@ struct AppState {
     failover_manager: Option<Arc<FailoverManager>>,
     /// Webhook notifier handle for external event notifications (optional).
     webhook_handle: Option<webhook::WebhookHandle>,
+    /// Scanner job queue sender (optional). When present, successful manifest
+    /// pushes enqueue a background scan job.
+    scanner_queue: Option<tokio::sync::mpsc::Sender<ScanJob>>,
     /// Registry audit log for tracking who pushed/pulled what.
     audit_log: Arc<audit::RegistryAuditLog>,
     /// Process start time for uptime tracking.
@@ -580,14 +584,29 @@ struct PaginationQuery {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-/// GET /v2/ - API version check
-#[instrument(name = "v2_check")]
-async fn v2_check() -> impl IntoResponse {
+/// GET /v2/ - API version check.
+///
+/// Per the OCI Distribution spec, this endpoint must return 401 Unauthorized
+/// with a `Www-Authenticate` challenge when the client has no credentials, so
+/// that clients like `docker` and `skopeo` know to fetch a bearer token before
+/// attempting push/pull. The request-id middleware rewrites the realm to the
+/// request's own host. Authenticated requests (any Authorization header) get 200.
+#[instrument(name = "v2_check", skip(headers))]
+async fn v2_check(headers: HeaderMap) -> Response {
+    if headers.get(header::AUTHORIZATION).is_some() {
+        return (
+            StatusCode::OK,
+            [("Docker-Distribution-API-Version", "registry/2.0")],
+            "{}",
+        )
+            .into_response();
+    }
     (
-        StatusCode::OK,
+        StatusCode::UNAUTHORIZED,
         [("Docker-Distribution-API-Version", "registry/2.0")],
-        "{}",
+        "{\"errors\":[{\"code\":\"UNAUTHORIZED\",\"message\":\"authentication required\"}]}",
     )
+        .into_response()
 }
 
 /// GET/POST /auth/token — Proxy to the auth service.
@@ -948,6 +967,30 @@ async fn put_manifest(
             source_region,
         ))
         .await;
+    }
+
+    // Enqueue a background vulnerability scan (non-blocking). try_send is
+    // used so a saturated queue does not stall the push — the scan is
+    // best-effort and can be re-triggered via POST /v2/scan.
+    if let Some(ref tx) = state.scanner_queue {
+        let job = ScanJob {
+            id: Uuid::new_v4(),
+            digest: digest.clone(),
+            tenant: params.tenant.clone(),
+            project: params.project.clone(),
+            repository: params.name.clone(),
+            reference: params.reference.clone(),
+            enqueued_at: chrono::Utc::now(),
+        };
+        match tx.try_send(job) {
+            Ok(()) => debug!(%digest, "scan job enqueued"),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(%digest, "scan queue full; push not auto-scanned")
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                warn!(%digest, "scan queue closed")
+            }
+        }
     }
 
     let location = format!(
@@ -2268,6 +2311,66 @@ fn extract_header(headers: &HeaderMap, name: &str) -> Result<String, RegistryErr
         .ok_or_else(|| RegistryError::Internal(format!("missing header: {name}")))
 }
 
+/// Load scanner config from `NEBULACR_SCANNER__*` env vars and build the
+/// runtime. Returns `Ok(None)` when `NEBULACR_SCANNER__ENABLED` is not "true".
+async fn build_scanner_runtime(
+    store: Arc<dyn ObjectStore>,
+) -> anyhow::Result<Option<ScannerRuntime>> {
+    use std::env;
+    let enabled = env::var("NEBULACR_SCANNER__ENABLED")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let postgres_url = env::var("NEBULACR_SCANNER__POSTGRES_URL")
+        .map_err(|_| anyhow::anyhow!("NEBULACR_SCANNER__POSTGRES_URL required when scanner enabled"))?;
+    let redis_url = env::var("NEBULACR_SCANNER__REDIS_URL")
+        .map_err(|_| anyhow::anyhow!("NEBULACR_SCANNER__REDIS_URL required when scanner enabled"))?;
+    let vulndb = env::var("NEBULACR_SCANNER__VULNDB").unwrap_or_else(|_| "osv".into());
+    let vulndb = match vulndb.as_str() {
+        "nebula" => nebula_scanner::config::VulnDbBackend::Nebula,
+        _ => nebula_scanner::config::VulnDbBackend::Osv,
+    };
+    let ai_enabled = env::var("NEBULACR_SCANNER__AI_ENABLED")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(true);
+    let ai_endpoint = env::var("NEBULACR_SCANNER__AI_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let ai_model =
+        env::var("NEBULACR_SCANNER__AI_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".into());
+
+    let cfg = ScannerConfig {
+        enabled: true,
+        postgres_url,
+        redis_url,
+        vulndb,
+        ai_enabled,
+        ai_endpoint,
+        ai_model,
+        workers: env::var("NEBULACR_SCANNER__WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2),
+        queue_capacity: env::var("NEBULACR_SCANNER__QUEUE_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256),
+        result_ttl_secs: env::var("NEBULACR_SCANNER__RESULT_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600),
+        pg_max_connections: env::var("NEBULACR_SCANNER__PG_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8),
+    };
+
+    let rt = ScannerRuntime::build(cfg, store).await?;
+    info!("scanner runtime ready (workers={})", rt.worker_handles.len());
+    Ok(Some(rt))
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -2695,6 +2798,21 @@ async fn main() -> anyhow::Result<()> {
     let audit_log = Arc::new(audit::RegistryAuditLog::new());
     let start_time = Instant::now();
 
+    // ── Scanner runtime (optional; enabled by NEBULACR_SCANNER__ENABLED) ──
+    let scanner_runtime = match build_scanner_runtime(store.clone()).await {
+        Ok(Some(rt)) => Some(rt),
+        Ok(None) => {
+            info!("scanner disabled via config");
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, "scanner runtime init failed; continuing without it");
+            None
+        }
+    };
+    let scanner_queue = scanner_runtime.as_ref().map(|rt| rt.queue_sender.clone());
+    let scanner_router = scanner_runtime.as_ref().map(|rt| rt.router.clone());
+
     let state = AppState {
         store,
         config: Arc::new(config),
@@ -2706,6 +2824,7 @@ async fn main() -> anyhow::Result<()> {
         replication_handle,
         failover_manager: failover_manager.clone(),
         webhook_handle,
+        scanner_queue,
         audit_log: audit_log.clone(),
         start_time,
     };
@@ -2839,6 +2958,13 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
+    // Merge the scanner router AFTER applying state to the main app — at
+    // this point both are Router<()> and merge accepts them. Scanner routes
+    // carry their own ScannerState internally.
+    let app = match scanner_router {
+        Some(sr) => app.merge(sr),
+        None => app,
+    };
 
     let internal_app = internal_routes
         .layer(DefaultBodyLimit::disable())

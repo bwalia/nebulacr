@@ -21,10 +21,12 @@ services:
     command: ["nebula-registry"]
     ports:
       - "5000:5000"   # Registry API
-      - "9090:9090"   # Prometheus metrics
+      - "9095:9090"   # Prometheus metrics (9090 used by kubepilot on host)
     environment:
       RUST_LOG: "info,nebula_registry=debug,nebula_common=debug"
       NEBULACR_SERVER__LISTEN_ADDR: "0.0.0.0:5000"
+      NEBULACR_EXTERNAL_URL: "http://localhost:5000"
+      NEBULACR_AUTH_SERVICE_URL: "http://auth:5001"
       NEBULACR_SERVER__METRICS_ADDR: "0.0.0.0:9090"
       NEBULACR_AUTH__ISSUER: "nebulacr"
       NEBULACR_AUTH__AUDIENCE: "nebulacr-registry"
@@ -35,6 +37,14 @@ services:
       NEBULACR_STORAGE__ROOT: "/var/lib/nebulacr/data"
       NEBULACR_RATE_LIMIT__DEFAULT_RPS: "100"
       NEBULACR_RATE_LIMIT__IP_RPS: "50"
+      # Scanner backends
+      NEBULACR_SCANNER__ENABLED: "true"
+      NEBULACR_SCANNER__POSTGRES_URL: "postgres://nebulacr:nebulacr@postgres:5432/nebulacr"
+      NEBULACR_SCANNER__REDIS_URL: "redis://redis:6379"
+      NEBULACR_SCANNER__VULNDB: "osv"
+      NEBULACR_SCANNER__AI_ENABLED: "true"
+      NEBULACR_SCANNER__AI_ENDPOINT: "http://host.docker.internal:11434"
+      NEBULACR_SCANNER__AI_MODEL: "qwen2.5-coder:7b"
       # Webhook notifications to OpsAPI (uncomment to enable)
       # NEBULACR_WEBHOOKS__ENABLED: "true"
       # NEBULACR_WEBHOOKS__TIMEOUT_MS: "5000"
@@ -45,6 +55,12 @@ services:
     depends_on:
       auth:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 15s
@@ -132,6 +148,43 @@ services:
     profiles:
       - minio
 
+  # ── Postgres (scanner metadata: suppressions, audit log, image settings) ──
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: nebulacr
+      POSTGRES_PASSWORD: nebulacr
+      POSTGRES_DB: nebulacr
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nebulacr -d nebulacr"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - nebulacr
+
+  # ── Redis (scanner ephemeral results, 1h TTL) ─────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - nebulacr
+
   # ── Key Generator (init container) ────────────────────────────────────────
   # Generates RSA key pair for JWT signing on first run.
   keygen:
@@ -161,6 +214,8 @@ volumes:
   jwt-keys:
     driver: local
   minio-data:
+    driver: local
+  postgres-data:
     driver: local
 
 networks:

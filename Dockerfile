@@ -20,6 +20,9 @@ COPY crates/nebula-controller/Cargo.toml  crates/nebula-controller/Cargo.toml
 COPY crates/nebula-resilience/Cargo.toml  crates/nebula-resilience/Cargo.toml
 COPY crates/nebula-mirror/Cargo.toml      crates/nebula-mirror/Cargo.toml
 COPY crates/nebula-replication/Cargo.toml crates/nebula-replication/Cargo.toml
+COPY crates/nebula-db/Cargo.toml          crates/nebula-db/Cargo.toml
+COPY crates/nebula-ai/Cargo.toml          crates/nebula-ai/Cargo.toml
+COPY crates/nebula-scanner/Cargo.toml     crates/nebula-scanner/Cargo.toml
 
 # Create stub source files so Cargo can resolve the workspace
 RUN mkdir -p crates/nebula-common/src      && echo "pub fn _stub(){}" > crates/nebula-common/src/lib.rs \
@@ -28,7 +31,10 @@ RUN mkdir -p crates/nebula-common/src      && echo "pub fn _stub(){}" > crates/n
  && mkdir -p crates/nebula-controller/src  && echo "fn main(){}" > crates/nebula-controller/src/main.rs \
  && mkdir -p crates/nebula-resilience/src  && echo "pub fn _stub(){}" > crates/nebula-resilience/src/lib.rs \
  && mkdir -p crates/nebula-mirror/src      && echo "pub fn _stub(){}" > crates/nebula-mirror/src/lib.rs \
- && mkdir -p crates/nebula-replication/src && echo "pub fn _stub(){}" > crates/nebula-replication/src/lib.rs
+ && mkdir -p crates/nebula-replication/src && echo "pub fn _stub(){}" > crates/nebula-replication/src/lib.rs \
+ && mkdir -p crates/nebula-db/src          && echo "pub fn _stub(){}" > crates/nebula-db/src/lib.rs \
+ && mkdir -p crates/nebula-ai/src          && echo "pub fn _stub(){}" > crates/nebula-ai/src/lib.rs \
+ && mkdir -p crates/nebula-scanner/src     && echo "pub fn _stub(){}" > crates/nebula-scanner/src/lib.rs
 
 # Build dependencies only (this layer is cached unless Cargo.toml/lock change)
 RUN cargo build --release --workspace 2>&1 || true
@@ -36,7 +42,8 @@ RUN cargo build --release --workspace 2>&1 || true
 # Remove the stub artifacts so the real source gets compiled
 RUN rm -rf crates/nebula-common/src crates/nebula-auth/src crates/nebula-registry/src \
     crates/nebula-controller/src crates/nebula-resilience/src crates/nebula-mirror/src \
-    crates/nebula-replication/src \
+    crates/nebula-replication/src crates/nebula-db/src crates/nebula-ai/src \
+    crates/nebula-scanner/src \
  && rm -rf target/release/.fingerprint/nebula-*
 
 # Copy the actual source code
