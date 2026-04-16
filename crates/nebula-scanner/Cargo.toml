@@ -25,6 +25,7 @@ async-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+toml.workspace = true
 
 # Storage
 object_store.workspace = true
