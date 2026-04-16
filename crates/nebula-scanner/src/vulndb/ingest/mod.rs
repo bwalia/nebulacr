@@ -8,14 +8,23 @@
 //! The trait split keeps the normalisation layer (pure, unit-tested) away
 //! from the I/O layer (HTTP downloads, SQL writes).
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
 
 use crate::model::Severity;
 use crate::Result;
 
 pub mod normalise;
+pub mod osv;
+pub mod writer;
+
+pub use osv::OsvIngester;
 
 /// A vuln ingester. Each implementation owns its own upstream feed, cursor
 /// handling, and error recovery. Runs are idempotent: re-running against
@@ -70,4 +79,37 @@ pub struct AffectedRangeRow {
     pub fixed: Option<String>,
     pub last_affected: Option<String>,
     pub purl: Option<String>,
+}
+
+/// Spawn one tokio task per ingester that runs once, then loops on
+/// `interval`. Runs are best-effort — transient errors are logged, the
+/// ingester keeps its schedule. The returned handles are kept by
+/// `ScannerRuntime` for shutdown.
+pub fn spawn_scheduler(
+    ingesters: Vec<Arc<dyn Ingester>>,
+    pool: PgPool,
+    interval: Duration,
+) -> Vec<JoinHandle<()>> {
+    ingesters
+        .into_iter()
+        .map(|ing| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                info!(source = ing.source(), secs = interval.as_secs(), "vuln-DB ingest scheduler starting");
+                loop {
+                    match ing.run(&pool).await {
+                        Ok(stats) => info!(
+                            source = ing.source(),
+                            advisories = stats.advisories,
+                            skipped = stats.skipped,
+                            errors = stats.errors,
+                            "ingest tick ok"
+                        ),
+                        Err(e) => warn!(source = ing.source(), error = %e, "ingest tick failed"),
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            })
+        })
+        .collect()
 }

@@ -25,6 +25,7 @@ use crate::queue::Queue;
 use crate::settings::ImageSettingsStore;
 use crate::store::EphemeralStore;
 use crate::suppress::{NewSuppression, Suppressions};
+use crate::vulndb::ingest::Ingester;
 
 #[derive(Clone)]
 pub struct ScannerState {
@@ -33,6 +34,7 @@ pub struct ScannerState {
     pub queue: Arc<dyn Queue>,
     pub suppressions: Arc<Suppressions>,
     pub settings: Arc<ImageSettingsStore>,
+    pub ingesters: Vec<Arc<dyn Ingester>>,
     pub ai: Option<Arc<dyn CveAnalyzer>>,
 }
 
@@ -51,6 +53,7 @@ pub fn router(state: ScannerState) -> Router {
             "/v2/image/{tenant}/{project}/{repo}/settings",
             patch(update_image_settings).get(get_image_settings),
         )
+        .route("/admin/vulndb/ingest", post(trigger_ingest))
         .with_state(state)
 }
 
@@ -310,4 +313,54 @@ async fn revoke_suppression(
         Ok(false) => (StatusCode::NOT_FOUND, "suppression not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+#[derive(Deserialize, Default)]
+struct IngestQuery {
+    /// Run only the ingester with this source ID (`osv`, `nvd`, `ghsa`).
+    /// Omitted → run all registered ingesters.
+    source: Option<String>,
+}
+
+#[derive(Serialize)]
+struct IngestReport {
+    source: String,
+    advisories: u64,
+    skipped: u64,
+    errors: u64,
+    run_error: Option<String>,
+}
+
+async fn trigger_ingest(
+    State(state): State<ScannerState>,
+    Query(q): Query<IngestQuery>,
+) -> impl IntoResponse {
+    let mut reports = Vec::new();
+    for ing in &state.ingesters {
+        if let Some(sel) = &q.source {
+            if ing.source() != sel {
+                continue;
+            }
+        }
+        match ing.run(&state.pg).await {
+            Ok(stats) => reports.push(IngestReport {
+                source: ing.source().into(),
+                advisories: stats.advisories,
+                skipped: stats.skipped,
+                errors: stats.errors,
+                run_error: None,
+            }),
+            Err(e) => reports.push(IngestReport {
+                source: ing.source().into(),
+                advisories: 0,
+                skipped: 0,
+                errors: 0,
+                run_error: Some(e.to_string()),
+            }),
+        }
+    }
+    if reports.is_empty() {
+        return (StatusCode::NOT_FOUND, "no matching ingester").into_response();
+    }
+    Json(reports).into_response()
 }

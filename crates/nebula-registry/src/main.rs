@@ -2364,6 +2364,13 @@ async fn build_scanner_runtime(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8),
+        ingest_enabled: env::var("NEBULACR_SCANNER__INGEST_ENABLED")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(true),
+        ingest_interval_secs: env::var("NEBULACR_SCANNER__INGEST_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(21_600),
     };
 
     let rt = ScannerRuntime::build(cfg, store).await?;

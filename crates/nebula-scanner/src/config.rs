@@ -24,6 +24,13 @@ pub struct ScannerConfig {
     pub result_ttl_secs: u64,
     #[serde(default = "default_pg_conns")]
     pub pg_max_connections: u32,
+    /// Run vuln-DB ingesters on a schedule. Default on — operators who
+    /// don't want the ~300MB OSV download flip it off explicitly.
+    #[serde(default = "default_true")]
+    pub ingest_enabled: bool,
+    /// Interval between successive ingest runs, in seconds. Default 6h.
+    #[serde(default = "default_ingest_interval")]
+    pub ingest_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,4 +64,7 @@ fn default_result_ttl() -> u64 {
 }
 fn default_pg_conns() -> u32 {
     8
+}
+fn default_ingest_interval() -> u64 {
+    21_600 // 6h
 }

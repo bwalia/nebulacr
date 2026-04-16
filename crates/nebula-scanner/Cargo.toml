@@ -42,6 +42,8 @@ oci-spec.workspace = true
 tar.workspace = true
 flate2.workspace = true
 zstd.workspace = true
+zip.workspace = true
+tempfile.workspace = true
 
 # Vuln matching
 purl.workspace = true

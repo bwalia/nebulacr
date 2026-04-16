@@ -22,6 +22,7 @@ use crate::queue::{Queue, TokioQueue};
 use crate::settings::ImageSettingsStore;
 use crate::store::{EphemeralStore, RedisStore};
 use crate::suppress::Suppressions;
+use crate::vulndb::ingest::{spawn_scheduler, Ingester, OsvIngester};
 use crate::vulndb::{NebulaVulnDb, OsvClient, VulnDb};
 use crate::worker::Worker;
 use crate::Result;
@@ -30,6 +31,7 @@ pub struct ScannerRuntime {
     pub router: axum::Router,
     pub queue_sender: mpsc::Sender<ScanJob>,
     pub worker_handles: Vec<JoinHandle<()>>,
+    pub ingest_handles: Vec<JoinHandle<()>>,
     pub pg: PgPool,
 }
 
@@ -98,6 +100,19 @@ impl ScannerRuntime {
             None
         };
 
+        // ── Ingesters ────────────────────────────────────────────────────
+        let ingesters: Vec<Arc<dyn Ingester>> = vec![Arc::new(OsvIngester::new()?)];
+        let ingest_handles = if config.ingest_enabled {
+            spawn_scheduler(
+                ingesters.clone(),
+                pg.clone(),
+                std::time::Duration::from_secs(config.ingest_interval_secs),
+            )
+        } else {
+            info!("scanner ingest scheduler disabled");
+            Vec::new()
+        };
+
         // ── API router ───────────────────────────────────────────────────
         let router = router(ScannerState {
             pg: pg.clone(),
@@ -105,6 +120,7 @@ impl ScannerRuntime {
             queue: queue.clone(),
             suppressions: suppressions.clone(),
             settings: settings.clone(),
+            ingesters,
             ai,
         });
 
@@ -112,6 +128,7 @@ impl ScannerRuntime {
             router,
             queue_sender,
             worker_handles,
+            ingest_handles,
             pg,
         })
     }
