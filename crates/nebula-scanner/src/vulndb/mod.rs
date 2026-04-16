@@ -12,8 +12,10 @@ use crate::model::Vulnerability;
 use crate::sbom::Package;
 use crate::Result;
 
+pub mod ingest;
 pub mod nebula;
 pub mod osv;
+pub mod severity;
 
 pub use nebula::NebulaVulnDb;
 pub use osv::OsvClient;
