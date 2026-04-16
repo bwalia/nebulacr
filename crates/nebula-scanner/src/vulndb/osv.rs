@@ -15,11 +15,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::severity::{classify, parse_cvss_base};
 use super::VulnDb;
+use super::severity::{classify, parse_cvss_base};
+use crate::Result;
 use crate::model::Vulnerability;
 use crate::sbom::Package;
-use crate::Result;
 
 const BATCH_LIMIT: usize = 1000;
 
@@ -253,4 +253,3 @@ fn normalise(pkg: &Package, v: &OsvVuln) -> Vulnerability {
         suppressed: false,
     }
 }
-

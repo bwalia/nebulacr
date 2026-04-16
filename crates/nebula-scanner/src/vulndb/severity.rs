@@ -37,10 +37,30 @@ pub fn cvss3_base(vector: &str) -> Option<f64> {
     for tok in vector.split('/').skip(1) {
         let (k, v) = tok.split_once(':')?;
         match k {
-            "AV" => av = match v { "N" => Some(0.85), "A" => Some(0.62), "L" => Some(0.55), "P" => Some(0.20), _ => None },
-            "AC" => ac = match v { "L" => Some(0.77), "H" => Some(0.44), _ => None },
+            "AV" => {
+                av = match v {
+                    "N" => Some(0.85),
+                    "A" => Some(0.62),
+                    "L" => Some(0.55),
+                    "P" => Some(0.20),
+                    _ => None,
+                }
+            }
+            "AC" => {
+                ac = match v {
+                    "L" => Some(0.77),
+                    "H" => Some(0.44),
+                    _ => None,
+                }
+            }
             "PR" => pr_raw = Some(v.to_string()),
-            "UI" => ui = match v { "N" => Some(0.85), "R" => Some(0.62), _ => None },
+            "UI" => {
+                ui = match v {
+                    "N" => Some(0.85),
+                    "R" => Some(0.62),
+                    _ => None,
+                }
+            }
             "S" => scope = Some(v.to_string()),
             "C" => c_m = impact_metric(v),
             "I" => i_m = impact_metric(v),
@@ -60,9 +80,19 @@ pub fn cvss3_base(vector: &str) -> Option<f64> {
 
     let scope_changed = scope == "C";
     let pr = if scope_changed {
-        match pr_raw.as_str() { "N" => 0.85, "L" => 0.68, "H" => 0.50, _ => return None }
+        match pr_raw.as_str() {
+            "N" => 0.85,
+            "L" => 0.68,
+            "H" => 0.50,
+            _ => return None,
+        }
     } else {
-        match pr_raw.as_str() { "N" => 0.85, "L" => 0.62, "H" => 0.27, _ => return None }
+        match pr_raw.as_str() {
+            "N" => 0.85,
+            "L" => 0.62,
+            "H" => 0.27,
+            _ => return None,
+        }
     };
 
     let iss = 1.0 - ((1.0 - c) * (1.0 - i) * (1.0 - a));

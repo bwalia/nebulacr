@@ -54,7 +54,9 @@ impl Worker {
             .unwrap_or_else(|e| {
                 warn!(error = %e, "failed to read image_settings; using defaults");
                 crate::settings::ImageSettings::default_for(
-                    &job.tenant, &job.project, &job.repository,
+                    &job.tenant,
+                    &job.project,
+                    &job.repository,
                 )
             });
         if !settings.scan_enabled {
@@ -100,7 +102,9 @@ impl Worker {
             Err(e) => {
                 let msg = e.to_string();
                 error!(error = %msg, "pipeline error");
-                record_status(&self.pg, &job, ScanStatus::Failed, Some(&msg)).await.ok();
+                record_status(&self.pg, &job, ScanStatus::Failed, Some(&msg))
+                    .await
+                    .ok();
                 ScanResult {
                     status: ScanStatus::Failed,
                     error: Some(msg),
@@ -135,8 +139,11 @@ impl Worker {
         );
 
         // 2. Query vuln DB.
-        let mut vulns: Vec<Vulnerability> =
-            self.vulndb.query(&collector.packages).await.unwrap_or_else(|e| {
+        let mut vulns: Vec<Vulnerability> = self
+            .vulndb
+            .query(&collector.packages)
+            .await
+            .unwrap_or_else(|e| {
                 warn!(error = %e, "vulndb query failed; treating as empty");
                 vec![]
             });

@@ -17,8 +17,8 @@ use sqlx::PgPool;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::model::Severity;
 use crate::Result;
+use crate::model::Severity;
 
 pub mod normalise;
 pub mod osv;
@@ -95,7 +95,11 @@ pub fn spawn_scheduler(
         .map(|ing| {
             let pool = pool.clone();
             tokio::spawn(async move {
-                info!(source = ing.source(), secs = interval.as_secs(), "vuln-DB ingest scheduler starting");
+                info!(
+                    source = ing.source(),
+                    secs = interval.as_secs(),
+                    "vuln-DB ingest scheduler starting"
+                );
                 loop {
                     match ing.run(&pool).await {
                         Ok(stats) => info!(

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use flate2::read::GzDecoder;
-use object_store::{path::Path as StorePath, ObjectStore};
+use object_store::{ObjectStore, path::Path as StorePath};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -75,12 +75,8 @@ impl Puller {
 
     /// Read a layer blob by digest.
     async fn fetch_blob(&self, loc: &ImageLocator, digest: &str) -> Result<Bytes> {
-        let path = nebula_common::storage::blob_path(
-            &loc.tenant,
-            &loc.project,
-            &loc.repository,
-            digest,
-        );
+        let path =
+            nebula_common::storage::blob_path(&loc.tenant, &loc.project, &loc.repository, digest);
         let bytes = self
             .store
             .get(&StorePath::from(path))
@@ -177,7 +173,11 @@ impl Puller {
     }
 }
 
-fn walk_layer<V: LayerVisitor>(layer: &LayerDescriptor, data: &[u8], visitor: &mut V) -> Result<()> {
+fn walk_layer<V: LayerVisitor>(
+    layer: &LayerDescriptor,
+    data: &[u8],
+    visitor: &mut V,
+) -> Result<()> {
     let mt = layer.media_type.as_str();
     let decoded: Box<dyn Read> = if mt.contains("gzip") || mt.contains("tar+gzip") {
         Box::new(GzDecoder::new(data))

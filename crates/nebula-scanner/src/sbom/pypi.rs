@@ -18,7 +18,9 @@ pub fn parse(layer_digest: &str, path: &str, contents: &[u8], out: &mut Vec<Pack
 }
 
 fn parse_metadata(layer_digest: &str, contents: &[u8], out: &mut Vec<Package>) {
-    let Ok(text) = std::str::from_utf8(contents) else { return };
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return;
+    };
     let mut name: Option<&str> = None;
     let mut version: Option<&str> = None;
     // METADATA headers end at the first blank line.
@@ -48,7 +50,9 @@ fn parse_metadata(layer_digest: &str, contents: &[u8], out: &mut Vec<Package>) {
 }
 
 fn parse_requirements(layer_digest: &str, contents: &[u8], out: &mut Vec<Package>) {
-    let Ok(text) = std::str::from_utf8(contents) else { return };
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return;
+    };
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with('-') {
@@ -101,7 +105,12 @@ mod tests {
     fn metadata_file() {
         let m = b"Metadata-Version: 2.1\nName: Django\nVersion: 4.2.0\nSummary: ...\n\nBody\n";
         let mut out = Vec::new();
-        parse("sha256:l", "usr/lib/python3.11/site-packages/Django-4.2.0.dist-info/METADATA", m, &mut out);
+        parse(
+            "sha256:l",
+            "usr/lib/python3.11/site-packages/Django-4.2.0.dist-info/METADATA",
+            m,
+            &mut out,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "django");
         assert_eq!(out[0].version, "4.2.0");

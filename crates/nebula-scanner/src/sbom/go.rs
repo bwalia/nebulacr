@@ -64,7 +64,10 @@ github.com/pkg/errors v0.9.1/go.mod h1:mno=
         assert!(names.contains(&"github.com/gin-gonic/gin"));
         assert!(names.contains(&"golang.org/x/net"));
         assert!(names.contains(&"github.com/pkg/errors"));
-        let gin = out.iter().find(|p| p.name == "github.com/gin-gonic/gin").unwrap();
+        let gin = out
+            .iter()
+            .find(|p| p.name == "github.com/gin-gonic/gin")
+            .unwrap();
         assert_eq!(gin.version, "v1.9.1");
         assert_eq!(gin.ecosystem, "go");
         assert_eq!(gin.purl, "pkg:golang/github.com/gin-gonic/gin@v1.9.1");

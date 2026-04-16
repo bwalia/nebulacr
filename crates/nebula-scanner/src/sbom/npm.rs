@@ -26,7 +26,9 @@ pub fn parse(layer_digest: &str, contents: &[u8], out: &mut Vec<Package>) {
             if key.is_empty() {
                 continue; // workspace root
             }
-            let Some(name) = name_from_key(&key) else { continue };
+            let Some(name) = name_from_key(&key) else {
+                continue;
+            };
             let Some(version) = entry.get("version").and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -71,11 +73,7 @@ fn walk_v1(
 /// `"node_modules/@scope/pkg"` or `"node_modules/pkg/node_modules/inner"`.
 fn name_from_key(key: &str) -> Option<&str> {
     let after = key.rsplit("node_modules/").next()?;
-    if after.is_empty() {
-        None
-    } else {
-        Some(after)
-    }
+    if after.is_empty() { None } else { Some(after) }
 }
 
 fn npm_purl(name: &str, version: &str) -> String {

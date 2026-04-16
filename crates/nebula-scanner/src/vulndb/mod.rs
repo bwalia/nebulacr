@@ -8,9 +8,9 @@
 
 use async_trait::async_trait;
 
+use crate::Result;
 use crate::model::Vulnerability;
 use crate::sbom::Package;
-use crate::Result;
 
 pub mod ingest;
 pub mod nebula;

@@ -13,7 +13,8 @@ use tracing::{info, warn};
 
 use nebula_ai::{CveAnalyzer, OllamaClient, OllamaConfig};
 
-use crate::api::{router, ScannerState};
+use crate::Result;
+use crate::api::{ScannerState, router};
 use crate::config::{ScannerConfig, VulnDbBackend};
 use crate::image::Puller;
 use crate::model::ScanJob;
@@ -22,10 +23,9 @@ use crate::queue::{Queue, TokioQueue};
 use crate::settings::ImageSettingsStore;
 use crate::store::{EphemeralStore, RedisStore};
 use crate::suppress::Suppressions;
-use crate::vulndb::ingest::{spawn_scheduler, Ingester, OsvIngester};
+use crate::vulndb::ingest::{Ingester, OsvIngester, spawn_scheduler};
 use crate::vulndb::{NebulaVulnDb, OsvClient, VulnDb};
 use crate::worker::Worker;
-use crate::Result;
 
 pub struct ScannerRuntime {
     pub router: axum::Router,
@@ -36,18 +36,17 @@ pub struct ScannerRuntime {
 }
 
 impl ScannerRuntime {
-    pub async fn build(
-        config: ScannerConfig,
-        store: Arc<dyn ObjectStore>,
-    ) -> Result<Self> {
+    pub async fn build(config: ScannerConfig, store: Arc<dyn ObjectStore>) -> Result<Self> {
         // ── Postgres ─────────────────────────────────────────────────────
         let pg = nebula_db::connect(&config.postgres_url, config.pg_max_connections).await?;
         nebula_db::migrate(&pg).await?;
         info!("scanner postgres migrations applied");
 
         // ── Redis ────────────────────────────────────────────────────────
-        let redis: Arc<dyn EphemeralStore> =
-            Arc::new(RedisStore::connect(&config.redis_url, config.result_ttl_secs)?);
+        let redis: Arc<dyn EphemeralStore> = Arc::new(RedisStore::connect(
+            &config.redis_url,
+            config.result_ttl_secs,
+        )?);
 
         // ── Queue ────────────────────────────────────────────────────────
         let tq = Arc::new(TokioQueue::new(config.queue_capacity));

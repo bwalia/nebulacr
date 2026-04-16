@@ -13,7 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{PolicyEvaluation, PolicyStatus, PolicyViolation, ScanSummary, Severity, Vulnerability};
+use crate::model::{
+    PolicyEvaluation, PolicyStatus, PolicyViolation, ScanSummary, Severity, Vulnerability,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Policy {
@@ -41,21 +43,55 @@ impl Policy {
         }
 
         let mut violations = Vec::new();
-        self.check(Severity::Critical, summary.critical, self.block_if.critical.as_deref(), &mut violations);
-        self.check(Severity::High, summary.high, self.block_if.high.as_deref(), &mut violations);
-        self.check(Severity::Medium, summary.medium, self.block_if.medium.as_deref(), &mut violations);
-        self.check(Severity::Low, summary.low, self.block_if.low.as_deref(), &mut violations);
+        self.check(
+            Severity::Critical,
+            summary.critical,
+            self.block_if.critical.as_deref(),
+            &mut violations,
+        );
+        self.check(
+            Severity::High,
+            summary.high,
+            self.block_if.high.as_deref(),
+            &mut violations,
+        );
+        self.check(
+            Severity::Medium,
+            summary.medium,
+            self.block_if.medium.as_deref(),
+            &mut violations,
+        );
+        self.check(
+            Severity::Low,
+            summary.low,
+            self.block_if.low.as_deref(),
+            &mut violations,
+        );
 
-        let status = if violations.is_empty() { PolicyStatus::Pass } else { PolicyStatus::Fail };
+        let status = if violations.is_empty() {
+            PolicyStatus::Pass
+        } else {
+            PolicyStatus::Fail
+        };
         let reason = if violations.is_empty() {
             None
         } else {
             Some(format!("{} policy violation(s)", violations.len()))
         };
-        PolicyEvaluation { status, violations, reason }
+        PolicyEvaluation {
+            status,
+            violations,
+            reason,
+        }
     }
 
-    fn check(&self, severity: Severity, count: u32, rule: Option<&str>, out: &mut Vec<PolicyViolation>) {
+    fn check(
+        &self,
+        severity: Severity,
+        count: u32,
+        rule: Option<&str>,
+        out: &mut Vec<PolicyViolation>,
+    ) {
         let Some(rule) = rule else { return };
         if compare(count, rule) {
             out.push(PolicyViolation {
@@ -83,7 +119,9 @@ fn compare(count: u32, rule: &str) -> bool {
     } else {
         return false;
     };
-    let Ok(threshold) = rest.trim().parse::<u32>() else { return false };
+    let Ok(threshold) = rest.trim().parse::<u32>() else {
+        return false;
+    };
     match op {
         ">" => count > threshold,
         ">=" => count >= threshold,

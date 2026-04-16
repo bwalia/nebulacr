@@ -15,10 +15,10 @@ use sqlx::PgPool;
 use tracing::warn;
 
 use super::VulnDb;
+use crate::Result;
 use crate::matcher::{self, VersionCompare};
 use crate::model::{Severity, Vulnerability};
 use crate::sbom::Package;
-use crate::Result;
 
 pub struct NebulaVulnDb {
     pool: PgPool,

@@ -8,11 +8,11 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, patch, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -232,7 +232,10 @@ async fn create_suppression(
 }
 
 async fn search_cves() -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "cve search — needs own-DB (slice 2)")
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "cve search — needs own-DB (slice 2)",
+    )
 }
 
 #[derive(Deserialize)]
@@ -266,7 +269,14 @@ async fn update_image_settings(
     match state
         .settings
         // TODO: use auth-derived actor once the auth middleware is wired onto scanner routes.
-        .upsert("system", &tenant, &project, &repo, scan_enabled, policy_yaml.as_deref())
+        .upsert(
+            "system",
+            &tenant,
+            &project,
+            &repo,
+            scan_enabled,
+            policy_yaml.as_deref(),
+        )
         .await
     {
         Ok(s) => Json(s).into_response(),

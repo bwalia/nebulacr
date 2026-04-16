@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use super::normalise::{normalise, OsvRecord};
+use super::normalise::{OsvRecord, normalise};
 use super::writer::{stored_etag, update_cursor, write_advisory};
 use super::{IngestStats, Ingester};
 use crate::{Result, ScanError};

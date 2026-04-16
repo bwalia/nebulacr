@@ -5,7 +5,7 @@
 //! never calls the concrete queue directly.
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::model::ScanJob;
 

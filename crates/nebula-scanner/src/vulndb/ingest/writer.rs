@@ -122,4 +122,3 @@ pub async fn stored_etag(pool: &PgPool, source: &str) -> Result<Option<String>> 
             .map_err(nebula_db::DbError::from)?;
     Ok(row.and_then(|(e,)| e))
 }
-

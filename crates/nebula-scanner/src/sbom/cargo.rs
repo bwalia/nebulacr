@@ -91,7 +91,10 @@ source = "git+https://github.com/foo/bar.git#abc123"
         assert!(names.contains(&"serde"));
         assert!(names.contains(&"tokio"));
         assert!(names.contains(&"some-git-crate"));
-        assert!(!names.contains(&"my-app"), "workspace root must be excluded");
+        assert!(
+            !names.contains(&"my-app"),
+            "workspace root must be excluded"
+        );
         assert!(!names.contains(&"local-dep"), "path dep must be excluded");
 
         let serde = out.iter().find(|p| p.name == "serde").unwrap();
