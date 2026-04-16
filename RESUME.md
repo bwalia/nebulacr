@@ -19,9 +19,19 @@ assumed. Keep this file around until the scanner platform is feature-complete.
 
 ---
 
-## Session checkpoint (2026-04-15 → 2026-04-16)
+## Session checkpoint (2026-04-15 → 2026-04-16, session 2)
 
-### Latest commits
+**Four new commits since last checkpoint, all LOCAL (not pushed):**
+- `b90f65d` feat(scanner): OSV ingester trait + normaliser (slice 2a)
+- `0f574fa` feat(db): schema for vuln-DB ingestion (slice 2a)
+- `684b8ab` feat(scanner): Cargo.lock SBOM parser
+- `9df1cf9` feat(scanner): go.sum SBOM parser
+
+If this host dies before these are pushed, the work is gone. Consider
+`git push origin main` or `git push origin main:wip/slice-2a` before
+closing the session.
+
+### Previous checkpoint commits
 - `3d95d7f` feat(scanner): per-repo settings + full suppression CRUD + pypi parser
 - `14317fd` CVE scanners added (initial scaffolding)
 
@@ -41,14 +51,44 @@ assumed. Keep this file around until the scanner platform is feature-complete.
 - Suppression create → list → revoke → audit log rows present
 - `scan_enabled=false` gate: worker logs `scan skipped`
 
-### Known not-yet-done (from the original spec)
-1. **Own CVE DB (slice 2)** — ingestion jobs for NVD 2.0 API + OSV rsync + GHSA GraphQL → Postgres tables `vulnerabilities` / `affected_ranges` → swap `OsvClient` for `NebulaVulnDb` via config flip `NEBULACR_SCANNER__VULNDB=nebula`. **Biggest outstanding item.** 3-4 weeks realistic. User picked option **C** explicitly.
-2. **RPM SBOM parser** — needs BDB + sqlite header-blob decoding. Affects RHEL/UBI/CentOS images only.
-3. **Ecosystem version comparators** (task #8) — only matters once own-DB lands (OSV does its own matching).
-4. **`/v2/cve/search`** — needs own-DB; stub returns 501.
-5. **Go + Cargo SBOM parsers** — stubs today; modest work (`go.sum` parser, `Cargo.lock` TOML parser).
-6. **AI sequential bottleneck** — `analyse_all` calls Ollama one CVE at a time. Parallelise (bounded fan-out) when GPU is free.
-7. **Bonus items from original spec**: HTML report, S3 export, GitHub PR automation, VEX, SPDX, Dockerfile auto-fix suggestions. No concrete consumer yet — defer until asked.
+### Slice 2a — own CVE DB (OSV-only first pass), in progress
+
+User locked option C for own-DB. Decisions + progress so far:
+
+Locked design decisions:
+- **Distro-version precision**: collapse `Alpine:v3.16` → `apk`, `Debian:11` → `deb`, etc. Lose per-distro-version matching for 2a; revisit with NVD/GHSA.
+- **`source` column is developer-friendly**: classify by ID prefix — `CVE-*` → `nvd`, `GHSA-*` → `ghsa`, `PYSEC-*` → `pysec`, `GO-*` → `go`, `ALSA|DLA|DSA|USN|RHSA|RLSA-*` → `distro`, else `osv`. Filtering `WHERE source='nvd'` returns what a dev expects.
+- **`ingest_enabled=true` by default**, with a one-shot `warn!` on first run warning operators about the ~300MB `all.zip` download.
+
+Done (committed locally):
+- Migration `0002_vulndb_ingest.sql`: `ingest_cursor` table + indexes on `affected_ranges(vuln_id)` and `vulnerabilities(modified_at DESC)`. Already applied to running Postgres.
+- `vulndb/severity.rs`: extracted CVSS helpers (`parse_cvss_base`, `cvss3_base`, `classify`) out of `osv.rs` so ingesters and the online client share severity classification.
+- `vulndb/ingest/mod.rs`: `Ingester` trait (async, takes `&PgPool`), `IngestStats`, `VulnerabilityRow`, `AffectedRangeRow` — the DB-row shapes produced by the pure normaliser.
+- `vulndb/ingest/normalise.rs`: OSV JSON → `(VulnerabilityRow, Vec<AffectedRangeRow>)`, with 8 fixture tests covering multi-event ranges, `last_affected`, unclosed `introduced`, withdrawn filtering, distro-suffix collapse, ecosystem mapping table, source classifier.
+
+Next up (commit 3 of 2a) — **OSV zip ingester + writer + scheduler + admin endpoint**:
+- Add `zip = "2"` dependency.
+- Stream `all.zip` from `https://osv-vulnerabilities.storage.googleapis.com/` to a tempfile (never fully into memory).
+- Iterate entries with `zip::ZipArchive::by_index`, feed each `.json` to `normalise()`, UPSERT + DELETE-then-INSERT in a per-advisory tx.
+- Persist ETag to `ingest_cursor` so subsequent runs short-circuit on 304.
+- Config fields: `ingest_enabled: bool (default true)`, `ingest_interval_secs: u64 (default 21600)`.
+- Spawn scheduler from `ScannerRuntime::build`; first-run banner uses `warn!`.
+- `POST /admin/vulndb/ingest` — auth-gated manual trigger for dev.
+
+After that (commit 4 of 2a) — **`NebulaVulnDb::query` + smoke test**:
+- Per-package `SELECT ... FROM affected_ranges JOIN vulnerabilities ...`, filter via `matcher::for_ecosystem()`.
+- Re-scan `alpine:3.16` under `NEBULACR_SCANNER__VULNDB=nebula`; compare to baseline (1 crit / 3 high / 5 med / 2 low / 1 unk). ±a couple acceptable.
+
+Other not-yet-done (parked behind 2a):
+1. **RPM SBOM parser** — BDB + sqlite header-blob decoding. RHEL/UBI/CentOS only.
+2. **Ecosystem version comparators** (task #8) — needed once own-DB lands.
+3. **`/v2/cve/search`** — needs own-DB; stub returns 501.
+4. **AI sequential bottleneck** — `analyse_all` one CVE at a time. Parallelise when GPU free.
+5. **Bonus items** from original spec: HTML report, S3 export, GitHub PR automation, VEX, SPDX, Dockerfile auto-fix. No consumer yet — defer until asked.
+
+Done (earlier in this session, as commits above):
+- **Go SBOM parser** (`go.sum`, dedups `/go.mod` lines, handles pseudo-versions + `+incompatible`).
+- **Cargo SBOM parser** (`Cargo.lock`, via `toml` crate, excludes sourceless packages).
 
 ### Known pre-existing registry bugs I had to patch
 - `/v2/` returned 200 without auth → fixed to return 401 + WWW-Authenticate
@@ -79,18 +119,26 @@ Expected: `summary.critical = 1`, `policy_evaluation.status = FAIL` (if the
 per-repo rule from the previous session persisted via volume — it lives in
 Postgres, so yes).
 
-### For slice 2 (own CVE DB) when you pick it up
+### Test verification
 
-Design starting point I'd propose (get user confirmation first):
+All 32 scanner lib tests green as of `b90f65d`. Run in container:
 
-- New binary crate `nebula-vulndb-ingest` (or a subcommand of `nebula-registry`)
-- Three ingesters as tokio tasks on separate schedules:
-  - `nvd`: NVD 2.0 API, 5-minute pages, persist `last_modified` cursor
-  - `osv`: rsync the `all.zip` from `https://osv-vulnerabilities.storage.googleapis.com/` once/6h
-  - `ghsa`: GitHub GraphQL `securityAdvisories` query, 1h schedule
-- Normaliser trait `Ingester -> Vec<NormalisedAdvisory>`
-- Write path: UPSERT into `vulnerabilities` + DELETE-then-INSERT into `affected_ranges` inside a transaction per advisory
-- Matcher: `NebulaVulnDb::query` joins `affected_ranges` by `(ecosystem, package)`, then calls the per-ecosystem comparator from `matcher/`
+```bash
+docker run --rm -v /home/bwalia/nebulacr:/build -w /build \
+  -e CARGO_HOME=/build/.cargo-home rust:1.94-bookworm \
+  cargo test -p nebula-scanner --lib
+```
+
+No Rust toolchain installed directly on the host — the project always
+builds via the `rust:1.94-bookworm` image.
+
+### NVD / GHSA (slices 2b / 2c, after 2a lands)
+
+Once 2a is end-to-end:
+- `nvd`: NVD 2.0 API, paginated, persist `last_modified` cursor in `ingest_cursor`. 5-min sleep between pages (NVD rate limit).
+- `ghsa`: GitHub GraphQL `securityAdvisories` query, 1h schedule. Requires a GH token in config.
+
+Both feed the same `Ingester` trait + normaliser pattern established in 2a.
 
 The trait boundary at `VulnDb` is already there; flipping
 `NEBULACR_SCANNER__VULNDB=nebula` swaps implementations with zero caller changes.
