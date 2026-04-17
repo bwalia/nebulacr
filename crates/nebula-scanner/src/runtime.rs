@@ -139,6 +139,9 @@ impl ScannerRuntime {
 
         let cve_search = Arc::new(crate::cve_search::CveSearch::new(pg.clone()));
         let api_keys = Arc::new(crate::authkey::ApiKeys::new(pg.clone()));
+        let limiter = Arc::new(crate::ratelimit::ScannerLimiter::per_minute(
+            config.rate_limit_rpm,
+        ));
         // Signer-backed exports require a concrete backend wrapper; for now
         // we always push to the shared object store and return raw paths.
         // When operators wire up a dedicated S3 client for export, swap the
@@ -161,6 +164,7 @@ impl ScannerRuntime {
             cve_search,
             api_keys,
             exporter,
+            limiter,
         });
 
         Ok(Self {

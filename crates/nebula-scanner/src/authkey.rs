@@ -102,7 +102,32 @@ pub struct IssuedKey {
 pub struct NewKeyRequest {
     pub name: String,
     pub tenant: Option<String>,
+    #[serde(default)]
     pub permissions: Vec<String>,
+    /// Optional role preset. Expanded into `permissions` server-side; the
+    /// explicit `permissions` array is merged on top so callers can widen or
+    /// trim a role.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// Built-in role presets. Map role name → permission list. Unknown role
+/// names return an empty slice, so handlers can surface a clear error.
+pub fn role_permissions(role: &str) -> Vec<&'static str> {
+    match role {
+        "viewer" => vec!["scan:read", "cve:search"],
+        "ci" => vec!["scan:read", "policy:evaluate", "cve:search"],
+        "security_admin" => vec![
+            "scan:read",
+            "scan:write",
+            "policy:evaluate",
+            "cve:search",
+            "cve:suppress",
+            "settings:write",
+        ],
+        "admin" => vec!["admin"],
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -127,7 +152,31 @@ impl ApiKeys {
     }
 
     /// Generate a fresh key, persist its hash, and return the raw value once.
+    /// Role presets expand into permissions on the way in; the request's
+    /// explicit permission list is merged on top so callers can widen or
+    /// trim a role.
     pub async fn create(&self, actor: &str, req: NewKeyRequest) -> Result<IssuedKey> {
+        let mut perms: Vec<String> = match &req.role {
+            Some(r) => {
+                let base = role_permissions(r);
+                if base.is_empty() && r != "none" {
+                    return Err(ScanError::Other(format!("unknown role: {r}")));
+                }
+                base.into_iter().map(String::from).collect()
+            }
+            None => Vec::new(),
+        };
+        for p in &req.permissions {
+            if !perms.iter().any(|q| q == p) {
+                perms.push(p.clone());
+            }
+        }
+        if perms.is_empty() {
+            return Err(ScanError::Other(
+                "key must have at least one permission (use role or permissions)".into(),
+            ));
+        }
+
         let id = Uuid::new_v4();
         let raw = generate_raw_key();
         let hash = hash_key(&raw);
@@ -141,7 +190,7 @@ impl ApiKeys {
         .bind(&req.name)
         .bind(&hash)
         .bind(&req.tenant)
-        .bind(&req.permissions)
+        .bind(&perms)
         .bind(actor)
         .fetch_one(&self.pool)
         .await
@@ -150,7 +199,7 @@ impl ApiKeys {
             id,
             name: req.name,
             tenant: req.tenant,
-            permissions: req.permissions,
+            permissions: perms,
             created_at,
             key: raw,
         })

@@ -27,6 +27,7 @@ use crate::cve_search::{CveSearch, SearchQuery};
 use crate::export::Exporter;
 use crate::model::{ScanResult, Vulnerability};
 use crate::queue::Queue;
+use crate::ratelimit::{ScannerLimiter, limit_middleware};
 use crate::settings::ImageSettingsStore;
 use crate::store::EphemeralStore;
 use crate::suppress::{NewSuppression, Suppressions};
@@ -44,6 +45,7 @@ pub struct ScannerState {
     pub cve_search: Arc<CveSearch>,
     pub api_keys: Arc<ApiKeys>,
     pub exporter: Arc<Exporter>,
+    pub limiter: Arc<ScannerLimiter>,
 }
 
 impl FromRequestParts<ScannerState> for Principal {
@@ -100,6 +102,10 @@ pub fn router(state: ScannerState) -> Router {
         )
         .route("/admin/scanner-keys/{id}", delete(revoke_api_key))
         .route("/v2/export/s3/{id}", post(export_scan))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            limit_middleware,
+        ))
         .with_state(state)
 }
 

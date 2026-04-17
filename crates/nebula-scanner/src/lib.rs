@@ -38,6 +38,7 @@ pub mod authkey;
 pub mod config;
 pub mod cve_search;
 pub mod export;
+pub mod ratelimit;
 pub mod image;
 pub mod matcher;
 pub mod model;

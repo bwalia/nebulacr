@@ -57,6 +57,11 @@ pub struct ScannerConfig {
     /// GitHub token with read access; required when ghsa_enabled=true.
     #[serde(default)]
     pub ghsa_token: Option<String>,
+    /// Requests-per-minute cap per API key (or `system` bucket for
+    /// unauthenticated callers). Default 600 rpm ≈ 10 rps — enough headroom
+    /// for a CI polling /scan/live every few seconds and a dashboard.
+    #[serde(default = "default_rate_limit_rpm")]
+    pub rate_limit_rpm: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,4 +107,7 @@ fn default_nvd_bootstrap() -> u32 {
 }
 fn default_nvd_sleep() -> u64 {
     6
+}
+fn default_rate_limit_rpm() -> u32 {
+    600
 }
