@@ -107,6 +107,7 @@ pub fn router(state: ScannerState) -> Router {
             "/v2/scan/{id}/recommendations",
             get(get_scan_recommendations),
         )
+        .route("/v2/scan/{id}/dockerfile-fix", get(get_dockerfile_fix))
         .route("/v2/vex", post(ingest_vex))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -601,6 +602,29 @@ async fn get_scan_report(
         )
             .into_response()
     }
+}
+
+// ── Dockerfile fix suggestions ─────────────────────────────────────────────
+
+async fn get_dockerfile_fix(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let result = match state.store.get(&digest).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::GONE, "scan expired from ephemeral store").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    Json(crate::dockerfile::suggest(&result)).into_response()
 }
 
 // ── Base-image recommendations ──────────────────────────────────────────────
