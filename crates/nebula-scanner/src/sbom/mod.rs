@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod apk;
+pub mod binary;
 pub mod cargo;
 pub mod dpkg;
 pub mod go;
@@ -62,5 +63,22 @@ pub fn dispatch(layer_digest: &str, path: &str, contents: &[u8], out: &mut Vec<P
     }
     if path.ends_with("go.sum") {
         go::parse(layer_digest, contents, out);
+        return;
     }
+    // Fall-through: executable-looking paths get a binary-level scan. Most
+    // Go vendored containers ship the binary under /app, /usr/local/bin, or
+    // /go/bin — we skip paths clearly unrelated to executables to keep
+    // scan times sane.
+    if is_likely_binary_path(path) && binary::looks_like_binary(contents) {
+        binary::parse(layer_digest, contents, out);
+    }
+}
+
+fn is_likely_binary_path(path: &str) -> bool {
+    // Common install locations for single-binary containers.
+    path.starts_with("app/")
+        || path.starts_with("usr/local/bin/")
+        || path.starts_with("usr/bin/")
+        || path.starts_with("go/bin/")
+        || path.starts_with("bin/")
 }
