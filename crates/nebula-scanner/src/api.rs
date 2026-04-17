@@ -130,11 +130,15 @@ struct AiAnnotated {
 struct LiveQuery {
     #[serde(default)]
     ai: Option<u8>,
-    /// Optional cap on how many CVEs to analyse. Each call to Ollama is
-    /// sequential and can take tens of seconds on contended GPUs, so callers
-    /// can bound the response time with a small limit while iterating.
+    /// Optional cap on how many CVEs to analyse. Each call to Ollama can
+    /// take tens of seconds on contended GPUs, so callers can bound the
+    /// response time with a small limit while iterating.
     #[serde(default)]
     ai_limit: Option<usize>,
+    /// Concurrent in-flight AI calls. Default 2 (see DEFAULT_AI_CONCURRENCY);
+    /// set to 1 on single-GPU hosts where the model server queues anyway.
+    #[serde(default)]
+    ai_concurrency: Option<usize>,
 }
 
 async fn live_scan(
@@ -168,7 +172,8 @@ async fn live_scan(
             Some(n) if n < result.vulnerabilities.len() => &result.vulnerabilities[..n],
             _ => &result.vulnerabilities,
         };
-        Some(analyse_all(state.ai.as_ref().unwrap(), slice).await)
+        let concurrency = q.ai_concurrency.unwrap_or(DEFAULT_AI_CONCURRENCY);
+        Some(analyse_all(state.ai.as_ref().unwrap(), slice, concurrency).await)
     } else {
         None
     };
@@ -193,33 +198,62 @@ async fn live_scan(
         .into_response()
 }
 
-async fn analyse_all(ai: &Arc<dyn CveAnalyzer>, vulns: &[Vulnerability]) -> Vec<AiAnnotated> {
-    let mut out = Vec::with_capacity(vulns.len());
-    for v in vulns {
-        let input = CveInput {
-            cve_id: v.id.clone(),
-            package: v.package.clone(),
-            installed_version: v.installed_version.clone(),
-            fixed_version: v.fixed_version.clone(),
-            severity: format!("{:?}", v.severity).to_uppercase(),
-            description: v.description.clone().or_else(|| v.summary.clone()),
-            ecosystem: v.ecosystem.clone(),
-        };
-        match ai.analyze(&input).await {
-            Ok(analysis) => out.push(AiAnnotated {
+/// Per-CVE analysis cap. Default matches the typical GPU concurrency an
+/// Ollama instance handles well; single-GPU hosts should run with 1 to
+/// avoid queueing inside the model server. Configurable via `ai_concurrency`
+/// on `LiveQuery`.
+const DEFAULT_AI_CONCURRENCY: usize = 2;
+
+async fn analyse_all(
+    ai: &Arc<dyn CveAnalyzer>,
+    vulns: &[Vulnerability],
+    concurrency: usize,
+) -> Vec<AiAnnotated> {
+    use futures::stream::{FuturesOrdered, StreamExt};
+
+    // Bounded-concurrency fan-out. `FuturesOrdered` preserves input order so
+    // the response array lines up 1:1 with the vulnerabilities list the
+    // caller already sees — a plain unordered fan-out would scramble that.
+    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
+    let mut pending: FuturesOrdered<_> = vulns
+        .iter()
+        .map(|v| {
+            let ai = ai.clone();
+            let sem = sem.clone();
+            let input = CveInput {
                 cve_id: v.id.clone(),
-                analysis: Some(analysis),
-                error: None,
-            }),
-            Err(e) => {
-                warn!(cve = %v.id, error = %e, "ai analysis failed");
-                out.push(AiAnnotated {
-                    cve_id: v.id.clone(),
-                    analysis: None,
-                    error: Some(e.to_string()),
-                });
+                package: v.package.clone(),
+                installed_version: v.installed_version.clone(),
+                fixed_version: v.fixed_version.clone(),
+                severity: format!("{:?}", v.severity).to_uppercase(),
+                description: v.description.clone().or_else(|| v.summary.clone()),
+                ecosystem: v.ecosystem.clone(),
+            };
+            let cve_id = v.id.clone();
+            async move {
+                let _permit = sem.acquire().await.expect("semaphore never closed");
+                match ai.analyze(&input).await {
+                    Ok(analysis) => AiAnnotated {
+                        cve_id,
+                        analysis: Some(analysis),
+                        error: None,
+                    },
+                    Err(e) => {
+                        warn!(cve = %cve_id, error = %e, "ai analysis failed");
+                        AiAnnotated {
+                            cve_id,
+                            analysis: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
+                }
             }
-        }
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(vulns.len());
+    while let Some(item) = pending.next().await {
+        out.push(item);
     }
     out
 }
