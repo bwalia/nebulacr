@@ -614,7 +614,7 @@ pub async fn api_image_detail(
             }
         })
         .collect();
-    layers.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    layers.sort_by_key(|l| std::cmp::Reverse(l.size_bytes));
 
     // ── Step 4: orphan blobs (on disk but unreferenced by any tag) ─────
     let mut orphans: Vec<OrphanBlob> = blob_sizes
@@ -627,7 +627,7 @@ pub async fn api_image_detail(
             size: format_bytes(*size),
         })
         .collect();
-    orphans.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    orphans.sort_by_key(|o| std::cmp::Reverse(o.size_bytes));
     let orphan_blob_bytes: u64 = orphans.iter().map(|o| o.size_bytes).sum();
     let orphan_blob_count = orphans.len();
 
@@ -653,7 +653,7 @@ pub async fn api_image_detail(
         orphan_blob_bytes,
     );
 
-    tags.sort_by(|a, b| b.image_size_bytes.cmp(&a.image_size_bytes));
+    tags.sort_by_key(|t| std::cmp::Reverse(t.image_size_bytes));
 
     let resp = ImageDetailResponse {
         repository: format!("{tenant}/{project}/{name}"),
