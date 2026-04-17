@@ -38,6 +38,7 @@ pub mod authkey;
 pub mod config;
 pub mod cve_search;
 pub mod export;
+pub mod notify;
 pub mod ratelimit;
 pub mod sbom_export;
 pub mod vex;

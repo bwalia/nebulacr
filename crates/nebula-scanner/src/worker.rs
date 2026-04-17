@@ -26,6 +26,7 @@ pub struct Worker {
     pub settings: Arc<ImageSettingsStore>,
     pub pg: PgPool,
     pub default_policy: Policy,
+    pub notifier: Option<Arc<crate::notify::Notifier>>,
 }
 
 impl Worker {
@@ -119,6 +120,9 @@ impl Worker {
         if matches!(final_result.status, ScanStatus::Completed) {
             update_counts(&self.pg, &job, &final_result.summary).await?;
             record_status(&self.pg, &job, ScanStatus::Completed, None).await?;
+            if let Some(n) = &self.notifier {
+                n.on_scan_complete(&final_result).await;
+            }
         }
         Ok(())
     }

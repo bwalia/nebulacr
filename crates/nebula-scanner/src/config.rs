@@ -62,6 +62,14 @@ pub struct ScannerConfig {
     /// for a CI polling /scan/live every few seconds and a dashboard.
     #[serde(default = "default_rate_limit_rpm")]
     pub rate_limit_rpm: u32,
+    /// Optional webhook URL. Alerts fire on scan FAIL only; PASS scans are
+    /// silent.
+    #[serde(default)]
+    pub alerts_webhook_url: Option<String>,
+    /// `slack` | `teams` | `generic`. Default `generic` emits a flat JSON
+    /// event — useful for self-hosted receivers or tools like n8n.
+    #[serde(default = "default_alerts_format")]
+    pub alerts_format: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,4 +118,7 @@ fn default_nvd_sleep() -> u64 {
 }
 fn default_rate_limit_rpm() -> u32 {
     600
+}
+fn default_alerts_format() -> String {
+    "generic".into()
 }

@@ -66,6 +66,13 @@ impl ScannerRuntime {
         // image_settings.policy_yaml will override this once task #12 lands.
         let default_policy = Policy::default();
 
+        let notifier = config.alerts_webhook_url.clone().map(|url| {
+            Arc::new(crate::notify::Notifier::new(
+                url,
+                crate::notify::AlertFormat::parse(&config.alerts_format),
+            ))
+        });
+
         // ── Workers ──────────────────────────────────────────────────────
         let mut worker_handles = Vec::with_capacity(config.workers);
         for n in 0..config.workers {
@@ -78,6 +85,7 @@ impl ScannerRuntime {
                 settings: settings.clone(),
                 pg: pg.clone(),
                 default_policy: default_policy.clone(),
+                notifier: notifier.clone(),
             });
             let handle = tokio::spawn(async move {
                 info!(worker = n, "spawning scan worker");
