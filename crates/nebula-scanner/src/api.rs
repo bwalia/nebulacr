@@ -103,6 +103,7 @@ pub fn router(state: ScannerState) -> Router {
         .route("/admin/scanner-keys/{id}", delete(revoke_api_key))
         .route("/v2/export/s3/{id}", post(export_scan))
         .route("/v2/scan/{id}/sbom", get(get_scan_sbom))
+        .route("/v2/vex", post(ingest_vex))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             limit_middleware,
@@ -595,6 +596,41 @@ async fn get_scan_report(
             body,
         )
             .into_response()
+    }
+}
+
+// ── VEX ingest ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct VexQuery {
+    /// Optional scope narrowing — a `not_affected` statement with these
+    /// filters will only suppress the CVE for the given tenant/project/repo.
+    tenant: Option<String>,
+    project: Option<String>,
+    repository: Option<String>,
+}
+
+async fn ingest_vex(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Query(q): Query<VexQuery>,
+    Json(doc): Json<crate::vex::OpenVex>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::CveSuppress) {
+        return forbidden(e).into_response();
+    }
+    match crate::vex::apply_openvex(
+        &doc,
+        &state.suppressions,
+        Some(&principal.actor),
+        q.tenant.as_deref(),
+        q.project.as_deref(),
+        q.repository.as_deref(),
+    )
+    .await
+    {
+        Ok(report) => (StatusCode::CREATED, Json(report)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
