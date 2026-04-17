@@ -33,12 +33,27 @@ jobs:
           }
           ansible --version | head -1
 
-      - name: Set up SSH key
+      - name: Resolve SSH key
+        id: ssh
         run: |
+          # Prefer a MIRROR_SSH_KEY secret when provided; fall back to an
+          # on-runner key at ~/.ssh/id_rsa. The self-hosted runner holds an
+          # operator-managed key — secret configuration stays optional.
           mkdir -p ~/.ssh
-          echo "${{ secrets.MIRROR_SSH_KEY }}" > ~/.ssh/mirror_key
-          chmod 600 ~/.ssh/mirror_key
-          ssh-keyscan -H 187.77.179.206 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H 187.77.179.206 >> ~/.ssh/known_hosts 2>/dev/null || true
+          if [ -n "${{ secrets.MIRROR_SSH_KEY }}" ]; then
+            echo "${{ secrets.MIRROR_SSH_KEY }}" > ~/.ssh/mirror_key
+            chmod 600 ~/.ssh/mirror_key
+            echo "key=$HOME/.ssh/mirror_key" >> "$GITHUB_OUTPUT"
+            echo "cleanup=true" >> "$GITHUB_OUTPUT"
+          elif [ -f "$HOME/.ssh/id_rsa" ]; then
+            echo "Using runner-local $HOME/.ssh/id_rsa"
+            echo "key=$HOME/.ssh/id_rsa" >> "$GITHUB_OUTPUT"
+            echo "cleanup=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No SSH key available — set MIRROR_SSH_KEY secret or drop a key at ~/.ssh/id_rsa on the runner"
+            exit 1
+          fi
 
       - name: Run Ansible playbook
         env:
@@ -46,7 +61,7 @@ jobs:
         run: |
           cd deploy/ansible
           ansible-playbook -i inventory.yml deploy-mirror.yml \
-            --private-key ~/.ssh/mirror_key \
+            --private-key "${{ steps.ssh.outputs.key }}" \
             -e "nebulacr_version=${{ github.event.inputs.version || 'latest' }}" \
             -v
 
@@ -54,7 +69,7 @@ jobs:
         run: |
           echo "Testing mirror health..."
           for i in 1 2 3 4 5; do
-            if ssh -i ~/.ssh/mirror_key -o StrictHostKeyChecking=no root@187.77.179.206 \
+            if ssh -i "${{ steps.ssh.outputs.key }}" -o StrictHostKeyChecking=no root@187.77.179.206 \
               "curl -sf http://127.0.0.1:5050/health" 2>/dev/null; then
               echo ""
               echo "Mirror is healthy!"
@@ -67,5 +82,5 @@ jobs:
           exit 1
 
       - name: Cleanup SSH key
-        if: always()
+        if: always() && steps.ssh.outputs.cleanup == 'true'
         run: rm -f ~/.ssh/mirror_key
