@@ -114,6 +114,15 @@ impl ScannerRuntime {
 
         let cve_search = Arc::new(crate::cve_search::CveSearch::new(pg.clone()));
         let api_keys = Arc::new(crate::authkey::ApiKeys::new(pg.clone()));
+        // Signer-backed exports require a concrete backend wrapper; for now
+        // we always push to the shared object store and return raw paths.
+        // When operators wire up a dedicated S3 client for export, swap the
+        // `None` below for `Some(Arc<AmazonS3>)`.
+        let exporter = Arc::new(crate::export::Exporter::new(
+            store.clone(),
+            None,
+            config.export_prefix.clone(),
+        ));
 
         // ── API router ───────────────────────────────────────────────────
         let router = router(ScannerState {
@@ -126,6 +135,7 @@ impl ScannerRuntime {
             ai,
             cve_search,
             api_keys,
+            exporter,
         });
 
         Ok(Self {

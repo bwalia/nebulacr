@@ -24,6 +24,7 @@ use nebula_ai::{CveAnalysis, CveAnalyzer, CveInput};
 
 use crate::authkey::{ApiKeys, NewKeyRequest, Permission, Principal};
 use crate::cve_search::{CveSearch, SearchQuery};
+use crate::export::Exporter;
 use crate::model::{ScanResult, Vulnerability};
 use crate::queue::Queue;
 use crate::settings::ImageSettingsStore;
@@ -42,6 +43,7 @@ pub struct ScannerState {
     pub ai: Option<Arc<dyn CveAnalyzer>>,
     pub cve_search: Arc<CveSearch>,
     pub api_keys: Arc<ApiKeys>,
+    pub exporter: Arc<Exporter>,
 }
 
 impl FromRequestParts<ScannerState> for Principal {
@@ -97,6 +99,7 @@ pub fn router(state: ScannerState) -> Router {
             post(create_api_key).get(list_api_keys),
         )
         .route("/admin/scanner-keys/{id}", delete(revoke_api_key))
+        .route("/v2/export/s3/{id}", post(export_scan))
         .with_state(state)
 }
 
@@ -551,6 +554,45 @@ async fn get_scan_report(
             body,
         )
             .into_response()
+    }
+}
+
+// ── S3 export ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct ExportQuery {
+    /// Pre-signed URL lifetime in seconds. Clamped to [60, 604800].
+    /// Ignored when the configured object store backend doesn't sign
+    /// (e.g. LocalFileSystem).
+    sign_ttl_secs: Option<u64>,
+}
+
+async fn export_scan(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<ExportQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let result = match state.store.get(&digest).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::GONE, "scan expired from ephemeral store").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let ttl = std::time::Duration::from_secs(
+        q.sign_ttl_secs.unwrap_or(3600).clamp(60, 604_800),
+    );
+    match state.exporter.export(&result, ttl).await {
+        Ok(out) => Json(out).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

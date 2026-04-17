@@ -31,6 +31,11 @@ pub struct ScannerConfig {
     /// Interval between successive ingest runs, in seconds. Default 6h.
     #[serde(default = "default_ingest_interval")]
     pub ingest_interval_secs: u64,
+    /// Object-store prefix under which `/v2/export/s3/{id}` writes report
+    /// pairs. Defaults to `scanner-exports`; callers with a dedicated
+    /// export bucket can point this at an empty string.
+    #[serde(default = "default_export_prefix")]
+    pub export_prefix: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,4 +72,7 @@ fn default_pg_conns() -> u32 {
 }
 fn default_ingest_interval() -> u64 {
     21_600 // 6h
+}
+fn default_export_prefix() -> String {
+    "scanner-exports".into()
 }
