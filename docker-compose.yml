@@ -41,7 +41,7 @@ services:
       NEBULACR_SCANNER__ENABLED: "true"
       NEBULACR_SCANNER__POSTGRES_URL: "postgres://nebulacr:nebulacr@postgres:5432/nebulacr"
       NEBULACR_SCANNER__REDIS_URL: "redis://redis:6379"
-      NEBULACR_SCANNER__VULNDB: "osv"
+      NEBULACR_SCANNER__VULNDB: "nebula"
       NEBULACR_SCANNER__AI_ENABLED: "true"
       NEBULACR_SCANNER__AI_ENDPOINT: "http://host.docker.internal:11434"
       NEBULACR_SCANNER__AI_MODEL: "qwen2.5-coder:7b"
