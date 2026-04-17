@@ -3352,10 +3352,8 @@ async fn scim_patch_user(
                 }
             }
             "add" => {
-                // Handle group additions
-                if op.path.as_deref() == Some("members") || op.path.is_none() {
-                    // Group member additions handled at group level
-                }
+                // Group member additions handled at group level
+                // (path == "members" or none)
             }
             "remove" => {
                 // Handle group removals
