@@ -40,6 +40,7 @@ pub mod cve_search;
 pub mod export;
 pub mod notify;
 pub mod ratelimit;
+pub mod recommend;
 pub mod sbom_export;
 pub mod vex;
 pub mod image;
