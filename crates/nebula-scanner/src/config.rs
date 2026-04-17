@@ -51,6 +51,12 @@ pub struct ScannerConfig {
     /// API key a value of 1s stays comfortably under the 50/30s limit.
     #[serde(default = "default_nvd_sleep")]
     pub nvd_sleep_between_pages_secs: u64,
+    /// Enable the GHSA ingester. Requires `ghsa_token`. Off by default.
+    #[serde(default)]
+    pub ghsa_enabled: bool,
+    /// GitHub token with read access; required when ghsa_enabled=true.
+    #[serde(default)]
+    pub ghsa_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

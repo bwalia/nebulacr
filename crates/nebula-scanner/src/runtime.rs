@@ -111,6 +111,20 @@ impl ScannerRuntime {
                 },
             )?));
         }
+        if config.ghsa_enabled {
+            let token = config.ghsa_token.clone().ok_or_else(|| {
+                crate::ScanError::Other(
+                    "ghsa_enabled=true requires ghsa_token".into(),
+                )
+            })?;
+            ingesters.push(Arc::new(crate::vulndb::ingest::GhsaIngester::new(
+                crate::vulndb::ingest::GhsaConfig {
+                    endpoint: None,
+                    token,
+                    page_size: None,
+                },
+            )?));
+        }
         let ingesters = ingesters;
         let ingest_handles = if config.ingest_enabled {
             spawn_scheduler(

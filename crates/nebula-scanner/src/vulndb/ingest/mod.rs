@@ -20,11 +20,13 @@ use tracing::{info, warn};
 use crate::Result;
 use crate::model::Severity;
 
+pub mod ghsa;
 pub mod normalise;
 pub mod nvd;
 pub mod osv;
 pub mod writer;
 
+pub use ghsa::{GhsaConfig, GhsaIngester};
 pub use nvd::{NvdConfig, NvdIngester};
 pub use osv::OsvIngester;
 
