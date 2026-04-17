@@ -91,6 +91,7 @@ pub fn router(state: ScannerState) -> Router {
         )
         .route("/v2/cve/suppress/{id}", delete(revoke_suppression))
         .route("/v2/cve/search", get(search_cves))
+        .route("/v2/cve/{id}/fix-commits", get(cve_fix_commits))
         .route(
             "/v2/image/{tenant}/{project}/{repo}/settings",
             patch(update_image_settings).get(get_image_settings),
@@ -354,6 +355,66 @@ async fn search_cves(
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+#[derive(Deserialize, Default)]
+struct FixCommitsQuery {
+    /// GitHub token for the fetch — anonymous calls hit a 60/hr limit.
+    /// Optional; unset falls back to unauthenticated.
+    token: Option<String>,
+    base_url: Option<String>,
+    /// Cap on how many commits to fetch when the CVE has many. Default 5.
+    limit: Option<usize>,
+}
+
+async fn cve_fix_commits(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<FixCommitsQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::CveSearch) {
+        return forbidden(e).into_response();
+    }
+    // Fetch references for the CVE directly from own DB.
+    let row: Result<Option<(Vec<String>,)>, _> = sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT refs FROM vulnerabilities WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.pg)
+    .await
+    .map(|o| {
+        o.map(|(v,)| {
+            (match v {
+                serde_json::Value::Array(items) => items
+                    .into_iter()
+                    .filter_map(|i| i.as_str().map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            },)
+        })
+    });
+    let refs = match row {
+        Ok(Some((r,))) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "cve not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let commits = crate::github_crawl::extract_commit_refs(&refs);
+    let limit = q.limit.unwrap_or(5).min(10);
+    let mut out = Vec::with_capacity(commits.len().min(limit));
+    for c in commits.into_iter().take(limit) {
+        match crate::github_crawl::fetch_commit(
+            q.token.as_deref(),
+            q.base_url.as_deref(),
+            &c,
+        )
+        .await
+        {
+            Ok(fc) => out.push(fc),
+            Err(e) => warn!(cve = %id, sha = %c.sha, error = %e, "fix-commit fetch failed"),
+        }
+    }
+    Json(out).into_response()
 }
 
 #[derive(Deserialize)]
