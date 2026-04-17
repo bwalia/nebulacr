@@ -39,6 +39,7 @@ pub mod config;
 pub mod cve_search;
 pub mod dockerfile;
 pub mod export;
+pub mod github_pr;
 pub mod notify;
 pub mod ratelimit;
 pub mod recommend;

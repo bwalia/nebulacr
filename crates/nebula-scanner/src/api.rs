@@ -108,6 +108,7 @@ pub fn router(state: ScannerState) -> Router {
             get(get_scan_recommendations),
         )
         .route("/v2/scan/{id}/dockerfile-fix", get(get_dockerfile_fix))
+        .route("/v2/scan/{id}/pr-comment", post(post_pr_comment))
         .route("/v2/vex", post(ingest_vex))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -601,6 +602,34 @@ async fn get_scan_report(
             body,
         )
             .into_response()
+    }
+}
+
+// ── GitHub PR comments ──────────────────────────────────────────────────────
+
+async fn post_pr_comment(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+    Json(req): Json<crate::github_pr::PrCommentRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let result = match state.store.get(&digest).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::GONE, "scan expired from ephemeral store").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let body = crate::github_pr::render_comment(&result);
+    match crate::github_pr::post_comment(&req, &body).await {
+        Ok(report) => (StatusCode::CREATED, Json(report)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
     }
 }
 
