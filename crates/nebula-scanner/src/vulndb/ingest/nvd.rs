@@ -289,6 +289,7 @@ struct NvdCvssData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct NvdWeakness {
     #[serde(default)]
     description: Vec<NvdDescription>,
