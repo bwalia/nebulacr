@@ -7,8 +7,19 @@
 # backend (no bootstrap), disables the ingest scheduler, and disables AI.
 
 services:
+  # Both services use the pre-built GHCR image in CI instead of rebuilding
+  # from source — that took >20 min on the runner's constrained docker and
+  # also isn't what's actually shipped. We test the artifact that k3s +
+  # mirror consume.
   registry:
+    image: ghcr.io/bwalia/nebulacr:latest
+    pull_policy: always
+    build: !reset null
     environment:
       NEBULACR_SCANNER__VULNDB: "osv"
       NEBULACR_SCANNER__INGEST_ENABLED: "false"
       NEBULACR_SCANNER__AI_ENABLED: "false"
+  auth:
+    image: ghcr.io/bwalia/nebulacr:latest
+    pull_policy: always
+    build: !reset null
