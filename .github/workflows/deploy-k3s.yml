@@ -69,9 +69,15 @@ jobs:
 
       - name: Deploy with Helm
         run: |
+          # Bump a pod-annotation every run so pods roll even when the tag is
+          # :latest and the spec is otherwise unchanged. Without this a helm
+          # upgrade with unchanged values is a no-op and new images never get
+          # pulled — which bit us once.
+          ROLL_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:0:7}"
           helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
             -n "${{ steps.values.outputs.namespace }}" \
             -f "${{ steps.values.outputs.file }}" \
+            --set "podAnnotations.nebulacr\\.io/rolled-at=${ROLL_ID}" \
             --wait --timeout 5m
 
       - name: Verify deployment
@@ -92,23 +98,24 @@ jobs:
 
       - name: Smoke test
         run: |
-          REGISTRY_HOST=$(kubectl get ingress -n "${{ steps.values.outputs.namespace }}" \
+          NS="${{ steps.values.outputs.namespace }}"
+          REGISTRY_HOST=$(kubectl get ingress -n "$NS" \
             "$RELEASE_NAME" -o jsonpath='{.spec.rules[0].host}')
           echo "Registry: $REGISTRY_HOST"
 
-          # Test via cluster-internal service
-          AUTH_SVC="nebulacr-auth.${{ steps.values.outputs.namespace }}.svc.cluster.local:5001"
-          REG_SVC="nebulacr-registry.${{ steps.values.outputs.namespace }}.svc.cluster.local:5000"
-
-          kubectl run smoke-test --rm -i --restart=Never \
-            --image=curlimages/curl:latest \
-            -n "${{ steps.values.outputs.namespace }}" -- \
-            sh -c "
-              echo '=== Registry health ===' && \
-              curl -sf http://${REG_SVC}/health && echo && \
-              echo '=== Auth health ===' && \
-              curl -sf http://${AUTH_SVC}/health && echo && \
-              echo '=== Registry v2 ===' && \
-              curl -sf http://${REG_SVC}/v2/ && echo && \
-              echo '=== Smoke test PASSED ==='
-            "
+          # Prefer the external ingress — the NetworkPolicy restricts intra-
+          # namespace traffic to labelled pods, so a random curl sidecar gets
+          # connection-refused even when the registry is healthy.
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "https://$REGISTRY_HOST/health" >/dev/null 2>&1; then
+              echo "=== Registry health OK (via ingress) ==="
+              curl -fsS "https://$REGISTRY_HOST/health" && echo
+              curl -fsS "https://$REGISTRY_HOST/v2/" -H "Accept: application/json" -o /dev/null -w "v2 status: %{http_code}\n"
+              echo "=== Smoke test PASSED ==="
+              exit 0
+            fi
+            echo "Attempt $i: not ready yet"
+            sleep 10
+          done
+          echo "::error::Smoke test failed — /health unreachable via ingress after 6 attempts"
+          exit 1
