@@ -58,10 +58,10 @@ struct Platform {
 }
 
 #[derive(Deserialize, Clone)]
-struct LayerDescriptor {
-    digest: String,
+pub struct LayerDescriptor {
+    pub digest: String,
     #[serde(rename = "mediaType")]
-    media_type: String,
+    pub media_type: String,
 }
 
 pub struct Puller {
@@ -111,7 +111,7 @@ impl Puller {
 
     /// Resolve the image's effective layer list, following an index manifest
     /// to the linux/amd64 manifest when necessary.
-    async fn resolve_layers(&self, loc: &ImageLocator) -> Result<Vec<LayerDescriptor>> {
+    pub async fn resolve_layers(&self, loc: &ImageLocator) -> Result<Vec<LayerDescriptor>> {
         let bytes = self.fetch_manifest(loc).await?;
         let manifest: Manifest = serde_json::from_slice(&bytes)?;
 
@@ -155,8 +155,18 @@ impl Puller {
         visitor: &mut V,
     ) -> Result<()> {
         let layers = self.resolve_layers(loc).await?;
-        debug!(digest = %loc.digest, layers = layers.len(), "walking image layers");
+        self.walk_selected_layers(loc, &layers, visitor).await
+    }
 
+    /// Walk an explicit subset of layers. Used by the layer-SBOM cache so we
+    /// only fetch + decompress layers whose SBOM isn't already in Redis.
+    pub async fn walk_selected_layers<V: LayerVisitor>(
+        &self,
+        loc: &ImageLocator,
+        layers: &[LayerDescriptor],
+        visitor: &mut V,
+    ) -> Result<()> {
+        debug!(digest = %loc.digest, layers = layers.len(), "walking image layers");
         for layer in layers {
             let data = self.fetch_blob(loc, &layer.digest).await?;
             if data.len() as u64 > MAX_LAYER_BYTES {
@@ -167,7 +177,7 @@ impl Puller {
                 );
                 continue;
             }
-            walk_layer(&layer, &data, visitor)?;
+            walk_layer(layer, &data, visitor)?;
         }
         Ok(())
     }

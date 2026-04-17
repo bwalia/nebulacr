@@ -129,14 +129,63 @@ impl Worker {
         started: chrono::DateTime<Utc>,
         settings: &crate::settings::ImageSettings,
     ) -> Result<ScanResult> {
-        // 1. Walk layers and collect packages.
-        let mut collector = SbomCollector::default();
-        self.puller.walk_layers(loc, &mut collector).await?;
+        // 1. SBOM extraction — per-layer, Redis-cached. Layer content is
+        //    content-addressed, so a cache hit is always safe.
+        let layers = self.puller.resolve_layers(loc).await?;
+        let mut all_packages: Vec<Package> = Vec::new();
+        let mut layers_to_walk = Vec::with_capacity(layers.len());
+        let mut cache_hits = 0usize;
+        for layer in &layers {
+            match self.store.get_layer_sbom(&layer.digest).await {
+                Ok(Some(mut cached)) => {
+                    // The cached entry was stored with the real layer digest,
+                    // but normalise to be defensive in case the cache schema
+                    // drifts between versions.
+                    for p in cached.iter_mut() {
+                        if p.layer_digest.is_none() {
+                            p.layer_digest = Some(layer.digest.clone());
+                        }
+                    }
+                    all_packages.extend(cached);
+                    cache_hits += 1;
+                }
+                _ => layers_to_walk.push(layer.clone()),
+            }
+        }
+
+        if !layers_to_walk.is_empty() {
+            let mut collector = PerLayerCollector::default();
+            self.puller
+                .walk_selected_layers(loc, &layers_to_walk, &mut collector)
+                .await?;
+            // Cache and merge per-layer. We group the flat packages list by
+            // layer_digest because each parser emits one package at a time
+            // rather than a per-layer batch.
+            let mut by_layer: std::collections::HashMap<String, Vec<Package>> =
+                std::collections::HashMap::new();
+            for p in collector.packages {
+                let k = p.layer_digest.clone().unwrap_or_default();
+                by_layer.entry(k).or_default().push(p);
+            }
+            for layer in &layers_to_walk {
+                let pkgs = by_layer.remove(&layer.digest).unwrap_or_default();
+                if let Err(e) = self.store.put_layer_sbom(&layer.digest, &pkgs).await {
+                    warn!(layer = %layer.digest, error = %e, "layer-sbom cache write failed");
+                }
+                all_packages.extend(pkgs);
+            }
+        }
+
         info!(
             digest = %loc.digest,
-            packages = collector.packages.len(),
+            layers = layers.len(),
+            cached_layers = cache_hits,
+            packages = all_packages.len(),
             "sbom extracted"
         );
+        let collector = SbomCollector {
+            packages: all_packages,
+        };
 
         // 2. Query vuln DB.
         let mut vulns: Vec<Vulnerability> = self
@@ -193,7 +242,15 @@ struct SbomCollector {
     packages: Vec<Package>,
 }
 
-impl LayerVisitor for SbomCollector {
+/// Single collector re-used across the "layers we actually walk" list. The
+/// per-layer `Package.layer_digest` is populated by each parser, so we can
+/// regroup the flat list by layer after the walk for cache writes.
+#[derive(Default)]
+struct PerLayerCollector {
+    packages: Vec<Package>,
+}
+
+impl LayerVisitor for PerLayerCollector {
     fn visit(&mut self, layer_digest: &str, path: &str, contents: &[u8]) {
         sbom::dispatch(layer_digest, path, contents, &mut self.packages);
     }
