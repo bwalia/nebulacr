@@ -77,6 +77,8 @@ fn forbidden<E: ToString>(e: E) -> (StatusCode, String) {
 pub fn router(state: ScannerState) -> Router {
     Router::new()
         .route("/v2/scan/live/{digest}", get(live_scan))
+        .route("/v2/scan/{id}", get(get_scan_by_id))
+        .route("/v2/scan/{id}/report", get(get_scan_report))
         .route("/v2/scan", post(trigger_scan))
         .route("/v2/policy/evaluate", post(evaluate_policy))
         .route(
@@ -457,6 +459,99 @@ async fn trigger_ingest(
         return (StatusCode::NOT_FOUND, "no matching ingester").into_response();
     }
     Json(reports).into_response()
+}
+
+// ── Scan-by-id fetch + report ───────────────────────────────────────────────
+
+async fn digest_for_scan(state: &ScannerState, id: uuid::Uuid) -> Result<Option<String>, String> {
+    sqlx::query_scalar::<_, String>("SELECT digest FROM scans WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn get_scan_by_id(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    match state.store.get(&digest).await {
+        Ok(Some(r)) => Json(r).into_response(),
+        // Scan row exists but Redis TTL expired — callers can re-queue via POST /v2/scan.
+        Ok(None) => (
+            StatusCode::GONE,
+            "scan result expired from ephemeral store",
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ReportQuery {
+    /// `html` (default) or `json`. Query param wins over Accept negotiation.
+    format: Option<String>,
+}
+
+async fn get_scan_report(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<ReportQuery>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let result = match state.store.get(&digest).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::GONE, "scan result expired from ephemeral store").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let want_json = match q.format.as_deref() {
+        Some("json") => true,
+        Some("html") => false,
+        _ => headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("application/json") && !v.contains("text/html"))
+            .unwrap_or(false),
+    };
+
+    if want_json {
+        match crate::report::to_json(&result) {
+            Ok(body) => (
+                StatusCode::OK,
+                [("content-type", "application/json; charset=utf-8")],
+                body,
+            )
+                .into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    } else {
+        let body = crate::report::to_html(&result);
+        (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            body,
+        )
+            .into_response()
+    }
 }
 
 // ── API key management (admin) ──────────────────────────────────────────────
