@@ -112,6 +112,8 @@ impl ScannerRuntime {
             Vec::new()
         };
 
+        let cve_search = Arc::new(crate::cve_search::CveSearch::new(pg.clone()));
+
         // ── API router ───────────────────────────────────────────────────
         let router = router(ScannerState {
             pg: pg.clone(),
@@ -121,6 +123,7 @@ impl ScannerRuntime {
             settings: settings.clone(),
             ingesters,
             ai,
+            cve_search,
         });
 
         Ok(Self {

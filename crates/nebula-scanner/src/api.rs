@@ -20,6 +20,7 @@ use tracing::warn;
 
 use nebula_ai::{CveAnalysis, CveAnalyzer, CveInput};
 
+use crate::cve_search::{CveSearch, SearchQuery};
 use crate::model::{ScanResult, Vulnerability};
 use crate::queue::Queue;
 use crate::settings::ImageSettingsStore;
@@ -36,6 +37,7 @@ pub struct ScannerState {
     pub settings: Arc<ImageSettingsStore>,
     pub ingesters: Vec<Arc<dyn Ingester>>,
     pub ai: Option<Arc<dyn CveAnalyzer>>,
+    pub cve_search: Arc<CveSearch>,
 }
 
 pub fn router(state: ScannerState) -> Router {
@@ -231,11 +233,14 @@ async fn create_suppression(
     }
 }
 
-async fn search_cves() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "cve search — needs own-DB (slice 2)",
-    )
+async fn search_cves(
+    State(state): State<ScannerState>,
+    Query(q): Query<SearchQuery>,
+) -> impl IntoResponse {
+    match state.cve_search.search(&q).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
