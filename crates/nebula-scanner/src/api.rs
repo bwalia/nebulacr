@@ -102,6 +102,7 @@ pub fn router(state: ScannerState) -> Router {
         )
         .route("/admin/scanner-keys/{id}", delete(revoke_api_key))
         .route("/v2/export/s3/{id}", post(export_scan))
+        .route("/v2/scan/{id}/sbom", get(get_scan_sbom))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             limit_middleware,
@@ -595,6 +596,40 @@ async fn get_scan_report(
         )
             .into_response()
     }
+}
+
+// ── SBOM export ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct SbomQuery {
+    /// `cyclonedx` (default) or `spdx`.
+    format: Option<String>,
+}
+
+async fn get_scan_sbom(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<SbomQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let result = match state.store.get(&digest).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::GONE, "scan expired from ephemeral store").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let body = match q.format.as_deref() {
+        Some("spdx") => crate::sbom_export::spdx_2_3(&result),
+        _ => crate::sbom_export::cyclonedx_1_5(&result),
+    };
+    Json(body).into_response()
 }
 
 // ── S3 export ───────────────────────────────────────────────────────────────

@@ -111,6 +111,11 @@ pub struct ScanResult {
     pub summary: ScanSummary,
     pub vulnerabilities: Vec<Vulnerability>,
     pub policy_evaluation: Option<PolicyEvaluation>,
+    /// Full package list extracted from the image layers — the raw material
+    /// for SBOM export (CycloneDX / SPDX). Kept separate from
+    /// `vulnerabilities` so packages with no findings still show up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<crate::sbom::Package>,
 }
 
 /// Enqueued scan job, produced by the manifest.push webhook subscriber and

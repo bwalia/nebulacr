@@ -87,6 +87,7 @@ impl Worker {
             summary: ScanSummary::default(),
             vulnerabilities: vec![],
             policy_evaluation: None,
+            packages: vec![],
         };
         let _ = self.store.put(&in_progress).await;
 
@@ -233,6 +234,7 @@ impl Worker {
             summary,
             vulnerabilities: vulns,
             policy_evaluation: Some(policy_eval),
+            packages: collector.packages,
         })
     }
 }

@@ -317,6 +317,7 @@ mod tests {
                 }],
                 reason: Some("critical vulnerabilities exceed threshold".into()),
             }),
+            packages: vec![],
         }
     }
 
