@@ -84,10 +84,12 @@
     - name: Extract nebula-registry binary
       command: docker cp nebulacr-extract:/usr/local/bin/nebula-registry {{ bin_dir }}/nebula-registry
       changed_when: true
+      notify: restart nebulacr-registry
 
     - name: Extract nebula-auth binary
       command: docker cp nebulacr-extract:/usr/local/bin/nebula-auth {{ bin_dir }}/nebula-auth
       changed_when: true
+      notify: restart nebulacr-auth
 
     - name: Remove temp container
       command: docker rm nebulacr-extract
