@@ -46,6 +46,7 @@ pub mod ratelimit;
 pub mod recommend;
 pub mod sbom_export;
 pub mod vex;
+pub mod ws;
 pub mod image;
 pub mod matcher;
 pub mod model;

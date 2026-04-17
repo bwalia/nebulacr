@@ -111,6 +111,7 @@ pub fn router(state: ScannerState) -> Router {
         .route("/v2/scan/{id}/dockerfile-fix", get(get_dockerfile_fix))
         .route("/v2/scan/{id}/dockerfile-patch", post(post_dockerfile_patch))
         .route("/v2/scan/{id}/pr-comment", post(post_pr_comment))
+        .route("/v2/ws/scan/{digest}", get(crate::ws::progress_ws))
         .route("/v2/vex", post(ingest_vex))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
