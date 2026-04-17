@@ -113,6 +113,7 @@ impl ScannerRuntime {
         };
 
         let cve_search = Arc::new(crate::cve_search::CveSearch::new(pg.clone()));
+        let api_keys = Arc::new(crate::authkey::ApiKeys::new(pg.clone()));
 
         // ── API router ───────────────────────────────────────────────────
         let router = router(ScannerState {
@@ -124,6 +125,7 @@ impl ScannerRuntime {
             ingesters,
             ai,
             cve_search,
+            api_keys,
         });
 
         Ok(Self {

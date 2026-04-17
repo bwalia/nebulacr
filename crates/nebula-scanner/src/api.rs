@@ -1,16 +1,18 @@
 //! Axum router mounted into `nebula-registry`.
 //!
-//! Auth is intentionally *not* applied inside this module — the registry
-//! binary wraps the returned router with its own `AuthenticatedClaims`
-//! middleware so all scanner routes go through the same token validation
-//! as the rest of the registry.
+//! Requests carrying `Authorization: Bearer nck_<secret>` are resolved to
+//! a [`Principal`] with the permissions assigned to that scanner API key.
+//! Requests without such a header land as a permissive `system` principal
+//! for backward compatibility with pre-API-key deploys; handlers call
+//! `principal.require(...)` on the perms they actually need, so only keyed
+//! callers get permission-checked.
 
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{FromRequestParts, Path, Query, State},
+    http::{StatusCode, header, request::Parts},
     response::IntoResponse,
     routing::{delete, get, patch, post},
 };
@@ -20,6 +22,7 @@ use tracing::warn;
 
 use nebula_ai::{CveAnalysis, CveAnalyzer, CveInput};
 
+use crate::authkey::{ApiKeys, NewKeyRequest, Permission, Principal};
 use crate::cve_search::{CveSearch, SearchQuery};
 use crate::model::{ScanResult, Vulnerability};
 use crate::queue::Queue;
@@ -38,6 +41,37 @@ pub struct ScannerState {
     pub ingesters: Vec<Arc<dyn Ingester>>,
     pub ai: Option<Arc<dyn CveAnalyzer>>,
     pub cve_search: Arc<CveSearch>,
+    pub api_keys: Arc<ApiKeys>,
+}
+
+impl FromRequestParts<ScannerState> for Principal {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ScannerState,
+    ) -> Result<Self, Self::Rejection> {
+        let bearer = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        let Some(token) = bearer else {
+            return Ok(Principal::system());
+        };
+        if !token.starts_with("nck_") {
+            return Ok(Principal::system());
+        }
+        match state.api_keys.lookup(token).await {
+            Ok(Some(p)) => Ok(p),
+            Ok(None) => Err((StatusCode::UNAUTHORIZED, "invalid or revoked api key".into())),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        }
+    }
+}
+
+fn forbidden<E: ToString>(e: E) -> (StatusCode, String) {
+    (StatusCode::FORBIDDEN, e.to_string())
 }
 
 pub fn router(state: ScannerState) -> Router {
@@ -56,6 +90,11 @@ pub fn router(state: ScannerState) -> Router {
             patch(update_image_settings).get(get_image_settings),
         )
         .route("/admin/vulndb/ingest", post(trigger_ingest))
+        .route(
+            "/admin/scanner-keys",
+            post(create_api_key).get(list_api_keys),
+        )
+        .route("/admin/scanner-keys/{id}", delete(revoke_api_key))
         .with_state(state)
 }
 
@@ -89,9 +128,13 @@ struct LiveQuery {
 
 async fn live_scan(
     State(state): State<ScannerState>,
+    principal: Principal,
     Path(digest): Path<String>,
     Query(q): Query<LiveQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
     let result = match state.store.get(&digest).await {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -181,8 +224,12 @@ struct TriggerScanReq {
 
 async fn trigger_scan(
     State(state): State<ScannerState>,
+    principal: Principal,
     Json(req): Json<TriggerScanReq>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanWrite) {
+        return forbidden(e).into_response();
+    }
     let job = crate::model::ScanJob {
         id: uuid::Uuid::new_v4(),
         digest: req.digest,
@@ -205,7 +252,13 @@ struct EvalReq {
     policy_yaml: Option<String>,
 }
 
-async fn evaluate_policy(Json(req): Json<EvalReq>) -> impl IntoResponse {
+async fn evaluate_policy(
+    principal: Principal,
+    Json(req): Json<EvalReq>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::PolicyEvaluate) {
+        return forbidden(e).into_response();
+    }
     let policy = match req.policy_yaml.as_deref() {
         Some(y) => match crate::policy::Policy::from_yaml(y) {
             Ok(p) => p,
@@ -224,10 +277,13 @@ struct SuppressReq {
 
 async fn create_suppression(
     State(state): State<ScannerState>,
+    principal: Principal,
     Json(req): Json<SuppressReq>,
 ) -> impl IntoResponse {
-    // TODO: pull actor from auth middleware once wired in nebula-registry main.
-    match state.suppressions.create("system", req.body).await {
+    if let Err(e) = principal.require(Permission::CveSuppress) {
+        return forbidden(e).into_response();
+    }
+    match state.suppressions.create(&principal.actor, req.body).await {
         Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -235,8 +291,12 @@ async fn create_suppression(
 
 async fn search_cves(
     State(state): State<ScannerState>,
+    principal: Principal,
     Query(q): Query<SearchQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::CveSearch) {
+        return forbidden(e).into_response();
+    }
     match state.cve_search.search(&q).await {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -251,8 +311,12 @@ struct SettingsPatch {
 
 async fn get_image_settings(
     State(state): State<ScannerState>,
+    principal: Principal,
     Path((tenant, project, repo)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
     match state.settings.get(&tenant, &project, &repo).await {
         Ok(s) => Json(s).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -261,9 +325,13 @@ async fn get_image_settings(
 
 async fn update_image_settings(
     State(state): State<ScannerState>,
+    principal: Principal,
     Path((tenant, project, repo)): Path<(String, String, String)>,
     Json(patch): Json<SettingsPatch>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::SettingsWrite) {
+        return forbidden(e).into_response();
+    }
     // Merge onto current record so callers can PATCH one field at a time.
     let current = match state.settings.get(&tenant, &project, &repo).await {
         Ok(s) => s,
@@ -273,9 +341,8 @@ async fn update_image_settings(
     let policy_yaml = patch.policy_yaml.or(current.policy_yaml);
     match state
         .settings
-        // TODO: use auth-derived actor once the auth middleware is wired onto scanner routes.
         .upsert(
-            "system",
+            &principal.actor,
             &tenant,
             &project,
             &repo,
@@ -301,8 +368,12 @@ struct ListSuppressQuery {
 
 async fn list_suppressions(
     State(state): State<ScannerState>,
+    principal: Principal,
     Query(q): Query<ListSuppressQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
     match state
         .suppressions
         .list(
@@ -321,9 +392,13 @@ async fn list_suppressions(
 
 async fn revoke_suppression(
     State(state): State<ScannerState>,
+    principal: Principal,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.suppressions.revoke("system", id).await {
+    if let Err(e) = principal.require(Permission::CveSuppress) {
+        return forbidden(e).into_response();
+    }
+    match state.suppressions.revoke(&principal.actor, id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "suppression not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -348,8 +423,12 @@ struct IngestReport {
 
 async fn trigger_ingest(
     State(state): State<ScannerState>,
+    principal: Principal,
     Query(q): Query<IngestQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::Admin) {
+        return forbidden(e).into_response();
+    }
     let mut reports = Vec::new();
     for ing in &state.ingesters {
         if let Some(sel) = &q.source {
@@ -378,4 +457,55 @@ async fn trigger_ingest(
         return (StatusCode::NOT_FOUND, "no matching ingester").into_response();
     }
     Json(reports).into_response()
+}
+
+// ── API key management (admin) ──────────────────────────────────────────────
+
+async fn create_api_key(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Json(req): Json<NewKeyRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::Admin) {
+        return forbidden(e).into_response();
+    }
+    match state.api_keys.create(&principal.actor, req).await {
+        Ok(issued) => (StatusCode::CREATED, Json(issued)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ListKeysQuery {
+    #[serde(default)]
+    include_revoked: bool,
+}
+
+async fn list_api_keys(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Query(q): Query<ListKeysQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::Admin) {
+        return forbidden(e).into_response();
+    }
+    match state.api_keys.list(q.include_revoked).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn revoke_api_key(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::Admin) {
+        return forbidden(e).into_response();
+    }
+    match state.api_keys.revoke(id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "api key not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }

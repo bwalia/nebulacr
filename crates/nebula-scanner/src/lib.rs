@@ -34,6 +34,7 @@
 //! ```
 
 pub mod api;
+pub mod authkey;
 pub mod config;
 pub mod cve_search;
 pub mod image;
