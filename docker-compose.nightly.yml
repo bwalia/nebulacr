@@ -1,0 +1,14 @@
+# Compose override used by the nightly CVE scan workflow.
+#
+# The baseline docker-compose.yml hard-codes vulndb=nebula, ingest_enabled=true,
+# and ai_enabled=true — fine for local dev with a GPU host and a patient
+# operator, but a CI run can't afford the 300MB OSV zip download or the
+# Ollama dependency. This file flips the scanner to the on-demand OSV HTTP
+# backend (no bootstrap), disables the ingest scheduler, and disables AI.
+
+services:
+  registry:
+    environment:
+      NEBULACR_SCANNER__VULNDB: "osv"
+      NEBULACR_SCANNER__INGEST_ENABLED: "false"
+      NEBULACR_SCANNER__AI_ENABLED: "false"
