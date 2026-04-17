@@ -101,7 +101,7 @@ impl Ingester for OsvIngester {
             if upstream == stored {
                 info!(etag = %upstream, "OSV ingest: etag unchanged, skipping");
                 let stats = IngestStats::default();
-                update_cursor(pool, SOURCE, Some(upstream), &stats, None).await?;
+                update_cursor(pool, SOURCE, Some(upstream), None, &stats, None).await?;
                 return Ok(stats);
             }
         }
@@ -116,7 +116,7 @@ impl Ingester for OsvIngester {
         .await
         .map_err(|e| ScanError::Other(format!("osv ingest join: {e}")))??;
 
-        update_cursor(pool, SOURCE, upstream_etag.as_deref(), &stats, None).await?;
+        update_cursor(pool, SOURCE, upstream_etag.as_deref(), None, &stats, None).await?;
         info!(
             advisories = stats.advisories,
             skipped = stats.skipped,
@@ -152,7 +152,8 @@ impl OsvIngester {
         // don't lose the fact that we tried. stats are zeroed here and
         // overwritten once ingestion succeeds.
         if let Some(etag) = upstream_etag {
-            let _ = update_cursor(pool, SOURCE, Some(etag), &IngestStats::default(), None).await;
+            let _ =
+                update_cursor(pool, SOURCE, Some(etag), None, &IngestStats::default(), None).await;
         }
         Ok(tmp)
     }

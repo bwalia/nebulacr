@@ -21,9 +21,11 @@ use crate::Result;
 use crate::model::Severity;
 
 pub mod normalise;
+pub mod nvd;
 pub mod osv;
 pub mod writer;
 
+pub use nvd::{NvdConfig, NvdIngester};
 pub use osv::OsvIngester;
 
 /// A vuln ingester. Each implementation owns its own upstream feed, cursor

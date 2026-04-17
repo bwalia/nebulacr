@@ -36,6 +36,21 @@ pub struct ScannerConfig {
     /// export bucket can point this at an empty string.
     #[serde(default = "default_export_prefix")]
     pub export_prefix: String,
+    /// Enable the NVD 2.0 ingester. Off by default because public-rate-limit
+    /// bootstrap takes hours; flip on after minting an NVD API key.
+    #[serde(default)]
+    pub nvd_enabled: bool,
+    /// NVD API key; without one the public rate limit (5 req / 30s) applies.
+    #[serde(default)]
+    pub nvd_api_key: Option<String>,
+    /// Days of backfill on first run. Default 30 — wider windows cost more
+    /// rate-limit budget.
+    #[serde(default = "default_nvd_bootstrap")]
+    pub nvd_bootstrap_window_days: u32,
+    /// Sleep between paged requests. Default 6s (public limit). With an
+    /// API key a value of 1s stays comfortably under the 50/30s limit.
+    #[serde(default = "default_nvd_sleep")]
+    pub nvd_sleep_between_pages_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,4 +90,10 @@ fn default_ingest_interval() -> u64 {
 }
 fn default_export_prefix() -> String {
     "scanner-exports".into()
+}
+fn default_nvd_bootstrap() -> u32 {
+    30
+}
+fn default_nvd_sleep() -> u64 {
+    6
 }

@@ -100,7 +100,18 @@ impl ScannerRuntime {
         };
 
         // ── Ingesters ────────────────────────────────────────────────────
-        let ingesters: Vec<Arc<dyn Ingester>> = vec![Arc::new(OsvIngester::new()?)];
+        let mut ingesters: Vec<Arc<dyn Ingester>> = vec![Arc::new(OsvIngester::new()?)];
+        if config.nvd_enabled {
+            ingesters.push(Arc::new(crate::vulndb::ingest::NvdIngester::new(
+                crate::vulndb::ingest::NvdConfig {
+                    base_url: None,
+                    api_key: config.nvd_api_key.clone(),
+                    bootstrap_window_days: config.nvd_bootstrap_window_days as i64,
+                    sleep_between_pages_secs: config.nvd_sleep_between_pages_secs,
+                },
+            )?));
+        }
+        let ingesters = ingesters;
         let ingest_handles = if config.ingest_enabled {
             spawn_scheduler(
                 ingesters.clone(),
