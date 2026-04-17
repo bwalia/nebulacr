@@ -109,6 +109,7 @@ pub fn router(state: ScannerState) -> Router {
             get(get_scan_recommendations),
         )
         .route("/v2/scan/{id}/dockerfile-fix", get(get_dockerfile_fix))
+        .route("/v2/scan/{id}/dockerfile-patch", post(post_dockerfile_patch))
         .route("/v2/scan/{id}/pr-comment", post(post_pr_comment))
         .route("/v2/vex", post(ingest_vex))
         .layer(axum::middleware::from_fn_with_state(
@@ -664,6 +665,53 @@ async fn get_scan_report(
         )
             .into_response()
     }
+}
+
+// ── Dockerfile patch (auto-rebuild precursor) ──────────────────────────────
+
+#[derive(Deserialize)]
+struct DockerfilePatchReq {
+    dockerfile: String,
+}
+
+#[derive(Serialize)]
+struct DockerfilePatchResp {
+    patched_dockerfile: String,
+    applied_pins: Vec<String>,
+}
+
+async fn post_dockerfile_patch(
+    State(state): State<ScannerState>,
+    principal: Principal,
+    Path(id): Path<uuid::Uuid>,
+    Json(req): Json<DockerfilePatchReq>,
+) -> impl IntoResponse {
+    if let Err(e) = principal.require(Permission::ScanRead) {
+        return forbidden(e).into_response();
+    }
+    let digest = match digest_for_scan(&state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "scan id not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let result = match state.store.get(&digest).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::GONE, "scan expired from ephemeral store").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let suggestions = crate::dockerfile::suggest(&result);
+    let applied_pins: Vec<String> = suggestions
+        .package_pins
+        .iter()
+        .filter(|p| matches!(p.ecosystem.as_str(), "deb" | "rpm" | "apk"))
+        .map(|p| format!("{}={}", p.package, p.suggested_version))
+        .collect();
+    let patched = crate::dockerfile::patch_dockerfile(&req.dockerfile, &suggestions);
+    Json(DockerfilePatchResp {
+        patched_dockerfile: patched,
+        applied_pins,
+    })
+    .into_response()
 }
 
 // ── GitHub PR comments ──────────────────────────────────────────────────────

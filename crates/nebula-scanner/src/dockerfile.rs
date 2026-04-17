@@ -129,6 +129,49 @@ fn install_snippet(
     }
 }
 
+/// Apply the suggested fixes to a caller-supplied Dockerfile. We deliberately
+/// don't rewrite existing RUN lines — multi-stage layouts and build-arg
+/// substitution make that hazardous — so the strategy is:
+///   1. Preserve the input verbatim.
+///   2. Append an idempotent `RUN` block that upgrades the vulnerable distro
+///      packages to their pinned versions. The package manager will no-op
+///      when those versions are already installed.
+///   3. Prepend a `# suggested base-image swap` comment naming the hardened
+///      alternative — the operator applies it when safe.
+///
+/// The result is a Dockerfile that closes distro-package CVEs on rebuild
+/// without breaking an arbitrary existing layout.
+pub fn patch_dockerfile(dockerfile: &str, suggestions: &DockerfileFixSuggestions) -> String {
+    let mut out = String::new();
+    if let Some(swap) = &suggestions.base_image_swap {
+        out.push_str(&format!(
+            "# NebulaCR: suggested base-image swap → {image} ({reason})\n",
+            image = swap.suggested_image,
+            reason = swap.rationale
+        ));
+    }
+    out.push_str(dockerfile.trim_end());
+    out.push('\n');
+
+    let distro_pins: Vec<&PackagePin> = suggestions
+        .package_pins
+        .iter()
+        .filter(|p| matches!(p.ecosystem.as_str(), "deb" | "rpm" | "apk"))
+        .collect();
+    if !distro_pins.is_empty() {
+        out.push_str("\n# NebulaCR: auto-patch distro packages\n");
+        for pin in distro_pins {
+            if let Some(snip) = &pin.install_snippet {
+                out.push_str(&format!(
+                    "# closes: {cves}\n{snip}\n",
+                    cves = pin.closes_cves.join(", ")
+                ));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +272,20 @@ mod tests {
     fn language_ecosystem_has_no_install_snippet() {
         let snip = install_snippet("npm", "left-pad", "1.5.0", DistroFamily::Unknown);
         assert!(snip.is_none());
+    }
+
+    #[test]
+    fn patch_preserves_input_and_appends_fix_block() {
+        let suggestions = suggest(&make_result());
+        let input = "FROM debian:12\nRUN apt-get update && apt-get install -y openssl curl";
+        let patched = patch_dockerfile(input, &suggestions);
+        // Input preserved verbatim
+        assert!(patched.contains("FROM debian:12"));
+        assert!(patched.contains("RUN apt-get update && apt-get install -y openssl curl"));
+        // Appended block references the pinned version
+        assert!(patched.contains("# NebulaCR: auto-patch distro packages"));
+        assert!(patched.contains("1.1.1k"));
+        // Base-image swap hint is a comment, not an edit
+        assert!(patched.lines().next().unwrap().starts_with("# NebulaCR: suggested base-image swap"));
     }
 }
