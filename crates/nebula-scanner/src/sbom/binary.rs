@@ -164,7 +164,10 @@ mod tests {
         assert!(names.contains(&"github.com/acme/app"));
         assert!(names.contains(&"golang.org/x/sync"));
         assert!(names.contains(&"github.com/foo/bar"));
-        let bar = pkgs.iter().find(|p| p.name == "github.com/foo/bar").unwrap();
+        let bar = pkgs
+            .iter()
+            .find(|p| p.name == "github.com/foo/bar")
+            .unwrap();
         assert_eq!(bar.version, "v1.2.3");
         assert_eq!(bar.ecosystem, "go");
         assert_eq!(bar.purl, "pkg:golang/github.com/foo/bar@v1.2.3");
@@ -189,8 +192,7 @@ mod tests {
 
     #[test]
     fn deduplicates_repeated_entries() {
-        let modinfo =
-            "dep\tgolang.org/x/net\tv0.1.0\nnsum\ndep\tgolang.org/x/net\tv0.1.0\nnsum";
+        let modinfo = "dep\tgolang.org/x/net\tv0.1.0\nnsum\ndep\tgolang.org/x/net\tv0.1.0\nnsum";
         let bin = synth_go_binary("go1.21", modinfo);
         let mut pkgs = Vec::new();
         parse("layer", &bin, &mut pkgs);

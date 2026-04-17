@@ -6,11 +6,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use object_store::{
-    ObjectStore, PutPayload,
-    path::Path as StorePath,
-    signer::Signer,
-};
+use object_store::{ObjectStore, PutPayload, path::Path as StorePath, signer::Signer};
 use serde::Serialize;
 
 use crate::model::ScanResult;
@@ -26,7 +22,11 @@ pub struct Exporter {
 }
 
 impl Exporter {
-    pub fn new(store: Arc<dyn ObjectStore>, signer: Option<Arc<dyn Signer>>, prefix: String) -> Self {
+    pub fn new(
+        store: Arc<dyn ObjectStore>,
+        signer: Option<Arc<dyn Signer>>,
+        prefix: String,
+    ) -> Self {
         Self {
             store,
             signer,
@@ -72,11 +72,7 @@ impl Exporter {
         })
     }
 
-    async fn sign_or_path(
-        &self,
-        path: &StorePath,
-        ttl: Duration,
-    ) -> Result<(String, bool)> {
+    async fn sign_or_path(&self, path: &StorePath, ttl: Duration) -> Result<(String, bool)> {
         match &self.signer {
             Some(s) => {
                 let url = s

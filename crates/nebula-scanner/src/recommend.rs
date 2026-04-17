@@ -51,10 +51,8 @@ pub enum DistroFamily {
 
 pub fn recommend(result: &ScanResult) -> RecommendationSet {
     let family = infer_family(result);
-    let total = result.summary.critical
-        + result.summary.high
-        + result.summary.medium
-        + result.summary.low;
+    let total =
+        result.summary.critical + result.summary.high + result.summary.medium + result.summary.low;
     let recs = if total == 0 {
         Vec::new()
     } else {
@@ -206,10 +204,11 @@ mod tests {
         );
         let rec = recommend(&r);
         assert_eq!(rec.detected_family, DistroFamily::Debian);
-        assert!(rec
-            .recommendations
-            .iter()
-            .any(|r| r.suggested_image.contains("distroless/base-debian")));
+        assert!(
+            rec.recommendations
+                .iter()
+                .any(|r| r.suggested_image.contains("distroless/base-debian"))
+        );
     }
 
     #[test]
@@ -226,10 +225,11 @@ mod tests {
         let r = make(vec![("github.com/x/y", "go")], 2);
         let rec = recommend(&r);
         assert_eq!(rec.cve_count, 2);
-        assert!(rec
-            .recommendations
-            .iter()
-            .any(|r| r.suggested_image.contains("distroless/static")));
+        assert!(
+            rec.recommendations
+                .iter()
+                .any(|r| r.suggested_image.contains("distroless/static"))
+        );
     }
 
     #[test]

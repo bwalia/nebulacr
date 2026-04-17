@@ -73,10 +73,7 @@ impl CveSearch {
     }
 
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResponse> {
-        let limit = query
-            .limit
-            .unwrap_or(DEFAULT_LIMIT)
-            .clamp(1, MAX_LIMIT);
+        let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let offset = query.offset.unwrap_or(0).max(0);
 
         let severities: Vec<String> = query
@@ -144,7 +141,9 @@ impl CveSearch {
                     .try_get::<Vec<String>, _>("aliases")
                     .map_err(nebula_db::DbError::from)?,
                 severity: row.try_get("severity").map_err(nebula_db::DbError::from)?,
-                cvss_score: row.try_get("cvss_score").map_err(nebula_db::DbError::from)?,
+                cvss_score: row
+                    .try_get("cvss_score")
+                    .map_err(nebula_db::DbError::from)?,
                 summary: row.try_get("summary").map_err(nebula_db::DbError::from)?,
                 description: row
                     .try_get("description")
@@ -181,7 +180,8 @@ fn apply_filters<'a>(
         qb.push(" AND v.source = ").push_bind(src);
     }
     if !severities.is_empty() {
-        qb.push(" AND v.severity = ANY(").push_bind(severities.to_vec());
+        qb.push(" AND v.severity = ANY(")
+            .push_bind(severities.to_vec());
         qb.push(")");
     }
     if let Some(text) = q.q.as_deref() {
@@ -193,9 +193,7 @@ fn apply_filters<'a>(
             .push(")");
     }
     if q.package.is_some() || q.ecosystem.is_some() {
-        qb.push(
-            " AND EXISTS (SELECT 1 FROM affected_ranges r WHERE r.vuln_id = v.id",
-        );
+        qb.push(" AND EXISTS (SELECT 1 FROM affected_ranges r WHERE r.vuln_id = v.id");
         if let Some(pkg) = q.package.as_deref() {
             qb.push(" AND r.package = ").push_bind(pkg);
         }
@@ -226,8 +224,14 @@ fn parse_affected(v: &serde_json::Value) -> Vec<AffectedRange> {
             Some(AffectedRange {
                 ecosystem: obj.get("ecosystem")?.as_str()?.to_string(),
                 package: obj.get("package")?.as_str()?.to_string(),
-                introduced: obj.get("introduced").and_then(|s| s.as_str()).map(str::to_string),
-                fixed: obj.get("fixed").and_then(|s| s.as_str()).map(str::to_string),
+                introduced: obj
+                    .get("introduced")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string),
+                fixed: obj
+                    .get("fixed")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string),
                 last_affected: obj
                     .get("last_affected")
                     .and_then(|s| s.as_str())

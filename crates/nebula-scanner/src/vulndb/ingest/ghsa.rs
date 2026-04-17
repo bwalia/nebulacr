@@ -79,7 +79,8 @@ impl Ingester for GhsaIngester {
         let _guard = self.lock.lock().await;
         let updated_since = stored_last_modified(pool, SOURCE).await?;
         let mut stats = IngestStats::default();
-        let mut max_modified = updated_since.unwrap_or_else(|| Utc::now() - chrono::Duration::days(3650));
+        let mut max_modified =
+            updated_since.unwrap_or_else(|| Utc::now() - chrono::Duration::days(3650));
         let mut cursor: Option<String> = None;
 
         loop {
@@ -150,17 +151,18 @@ impl GhsaIngester {
             .send()
             .await?
             .error_for_status()?;
-        let body: GraphqlResponse = resp.json().await.map_err(|e| {
-            ScanError::VulnDb(format!("ghsa json decode: {e}"))
-        })?;
+        let body: GraphqlResponse = resp
+            .json()
+            .await
+            .map_err(|e| ScanError::VulnDb(format!("ghsa json decode: {e}")))?;
         if let Some(errs) = body.errors {
             if !errs.is_empty() {
                 return Err(ScanError::VulnDb(format!("ghsa graphql errors: {errs:?}")));
             }
         }
-        let data = body.data.ok_or_else(|| {
-            ScanError::VulnDb("ghsa graphql response missing data".into())
-        })?;
+        let data = body
+            .data
+            .ok_or_else(|| ScanError::VulnDb("ghsa graphql response missing data".into()))?;
         Ok(Page {
             nodes: data.security_advisories.nodes,
             end_cursor: data.security_advisories.page_info.end_cursor,
@@ -504,10 +506,10 @@ mod tests {
         ).unwrap();
 
         let (v, ranges) = normalise_ghsa(&node).unwrap();
-        assert_eq!(v.id, "CVE-2025-42");  // CVE alias wins
+        assert_eq!(v.id, "CVE-2025-42"); // CVE alias wins
         assert_eq!(v.severity, Severity::High);
         assert_eq!(v.cvss_score, Some(8.1));
-        assert_eq!(ranges.len(), 1);  // PUB skipped
+        assert_eq!(ranges.len(), 1); // PUB skipped
         assert_eq!(ranges[0].ecosystem, "npm");
         assert_eq!(ranges[0].package, "left-pad");
         assert_eq!(ranges[0].fixed.as_deref(), Some("1.5"));

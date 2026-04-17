@@ -51,7 +51,11 @@ pub fn render_comment(result: &ScanResult) -> String {
     out.push_str("\n\n");
     out.push_str(&format!(
         "**Image**: `{}/{}/{}:{}` · **Digest**: `{}`\n\n",
-        result.tenant, result.project, result.repository, result.reference, short_digest(&result.digest),
+        result.tenant,
+        result.project,
+        result.repository,
+        result.reference,
+        short_digest(&result.digest),
     ));
     out.push_str(&format!(
         "| Severity | Count |\n|---|---:|\n| 🔴 Critical | {c} |\n| 🟠 High | {h} |\n| 🟡 Medium | {m} |\n| 🔵 Low | {l} |\n\n",
@@ -93,13 +97,14 @@ pub fn render_comment(result: &ScanResult) -> String {
 }
 
 fn short_digest(d: &str) -> String {
-    d.strip_prefix("sha256:").unwrap_or(d).chars().take(12).collect()
+    d.strip_prefix("sha256:")
+        .unwrap_or(d)
+        .chars()
+        .take(12)
+        .collect()
 }
 
-pub async fn post_comment(
-    req: &PrCommentRequest,
-    body: &str,
-) -> Result<PrCommentReport, String> {
+pub async fn post_comment(req: &PrCommentRequest, body: &str) -> Result<PrCommentReport, String> {
     let base = req
         .base_url
         .clone()

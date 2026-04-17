@@ -44,9 +44,7 @@ pub fn to_html(result: &ScanResult) -> String {
         status = status_label,
         started = result.started_at,
         completed = match result.completed_at {
-            Some(t) => format!(
-                "<br><span class=\"k\">completed</span> {t}"
-            ),
+            Some(t) => format!("<br><span class=\"k\">completed</span> {t}"),
             None => String::new(),
         },
         css = INLINE_CSS,
@@ -104,7 +102,13 @@ pub fn to_html(result: &ScanResult) -> String {
 
     // ── Vulnerabilities table ────────────────────────────────────────────
     let mut vulns: Vec<&Vulnerability> = result.vulnerabilities.iter().collect();
-    vulns.sort_by_key(|v| (std::cmp::Reverse(v.severity.rank()), v.package.clone(), v.id.clone()));
+    vulns.sort_by_key(|v| {
+        (
+            std::cmp::Reverse(v.severity.rank()),
+            v.package.clone(),
+            v.id.clone(),
+        )
+    });
 
     s.push_str(
         "<section><h2>Findings</h2>\
@@ -160,18 +164,18 @@ pub fn to_html(result: &ScanResult) -> String {
                 .as_deref()
                 .map(|l| format!("<code title=\"{l}\">{}…</code>", escape(&short_digest(l))))
                 .unwrap_or_else(|| "—".into()),
-            summary = v
-                .summary
-                .as_deref()
-                .map(escape)
-                .unwrap_or_else(String::new),
+            summary = v.summary.as_deref().map(escape).unwrap_or_else(String::new),
         )
         .unwrap();
     }
     s.push_str("</tbody></table></section>");
 
     // ── Suppressions callout ─────────────────────────────────────────────
-    let suppressed: Vec<&Vulnerability> = result.vulnerabilities.iter().filter(|v| v.suppressed).collect();
+    let suppressed: Vec<&Vulnerability> = result
+        .vulnerabilities
+        .iter()
+        .filter(|v| v.suppressed)
+        .collect();
     if !suppressed.is_empty() {
         write!(
             s,

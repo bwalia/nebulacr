@@ -76,7 +76,14 @@ impl OllamaClient {
             name: String,
         }
         let url = format!("{}/api/tags", self.config.endpoint);
-        let resp: TagsResp = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+        let resp: TagsResp = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         Ok(resp.models.into_iter().map(|m| m.name).collect())
     }
 }
@@ -140,8 +147,14 @@ impl CveAnalyzer for OllamaClient {
 }
 
 fn build_prompt(input: &CveInput) -> String {
-    let description = input.description.as_deref().unwrap_or("(no description provided)");
-    let fixed = input.fixed_version.as_deref().unwrap_or("(no fix available)");
+    let description = input
+        .description
+        .as_deref()
+        .unwrap_or("(no description provided)");
+    let fixed = input
+        .fixed_version
+        .as_deref()
+        .unwrap_or("(no fix available)");
     format!(
         r#"You are a container-security analyst. Analyse one vulnerability and reply with STRICT JSON.
 

@@ -133,10 +133,7 @@ pub async fn stored_last_modified(
 /// Upsert a vulnerability row without touching its `affected_ranges`. Used
 /// by metadata-only ingesters (NVD) so we don't clobber ecosystem ranges
 /// produced by OSV or GHSA.
-pub async fn write_advisory_metadata_only(
-    pool: &PgPool,
-    vuln: &VulnerabilityRow,
-) -> Result<()> {
+pub async fn write_advisory_metadata_only(pool: &PgPool, vuln: &VulnerabilityRow) -> Result<()> {
     let severity_str = format!("{:?}", vuln.severity).to_uppercase();
     sqlx::query(
         r#"INSERT INTO vulnerabilities

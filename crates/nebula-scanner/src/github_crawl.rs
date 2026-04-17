@@ -128,10 +128,7 @@ pub async fn fetch_commit(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let author = gc
-        .commit
-        .author
-        .and_then(|a| a.name.or(a.email));
+    let author = gc.commit.author.and_then(|a| a.name.or(a.email));
 
     Ok(FixCommit {
         commit: CommitRef {
@@ -155,8 +152,7 @@ mod tests {
     fn extracts_commit_urls_from_references() {
         let refs = vec![
             "https://github.com/rust-lang/rust/commit/abc1234".into(),
-            "https://github.com/example/app/commit/a1b2c3d4e5f6789012345678901234567890abcd"
-                .into(),
+            "https://github.com/example/app/commit/a1b2c3d4e5f6789012345678901234567890abcd".into(),
             "https://example.com/commits/abc".into(),
         ];
         let commits = extract_commit_refs(&refs);

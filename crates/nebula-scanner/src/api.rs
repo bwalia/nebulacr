@@ -68,7 +68,10 @@ impl FromRequestParts<ScannerState> for Principal {
         }
         match state.api_keys.lookup(token).await {
             Ok(Some(p)) => Ok(p),
-            Ok(None) => Err((StatusCode::UNAUTHORIZED, "invalid or revoked api key".into())),
+            Ok(None) => Err((
+                StatusCode::UNAUTHORIZED,
+                "invalid or revoked api key".into(),
+            )),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
         }
     }
@@ -109,7 +112,10 @@ pub fn router(state: ScannerState) -> Router {
             get(get_scan_recommendations),
         )
         .route("/v2/scan/{id}/dockerfile-fix", get(get_dockerfile_fix))
-        .route("/v2/scan/{id}/dockerfile-patch", post(post_dockerfile_patch))
+        .route(
+            "/v2/scan/{id}/dockerfile-patch",
+            post(post_dockerfile_patch),
+        )
         .route("/v2/scan/{id}/pr-comment", post(post_pr_comment))
         .route("/v2/ws/scan/{digest}", get(crate::ws::progress_ws))
         .route("/v2/vex", post(ingest_vex))
@@ -308,10 +314,7 @@ struct EvalReq {
     policy_yaml: Option<String>,
 }
 
-async fn evaluate_policy(
-    principal: Principal,
-    Json(req): Json<EvalReq>,
-) -> impl IntoResponse {
+async fn evaluate_policy(principal: Principal, Json(req): Json<EvalReq>) -> impl IntoResponse {
     if let Err(e) = principal.require(Permission::PolicyEvaluate) {
         return forbidden(e).into_response();
     }
@@ -379,23 +382,22 @@ async fn cve_fix_commits(
         return forbidden(e).into_response();
     }
     // Fetch references for the CVE directly from own DB.
-    let row: Result<Option<(Vec<String>,)>, _> = sqlx::query_as::<_, (serde_json::Value,)>(
-        "SELECT refs FROM vulnerabilities WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(&state.pg)
-    .await
-    .map(|o| {
-        o.map(|(v,)| {
-            (match v {
-                serde_json::Value::Array(items) => items
-                    .into_iter()
-                    .filter_map(|i| i.as_str().map(String::from))
-                    .collect(),
-                _ => Vec::new(),
-            },)
-        })
-    });
+    let row: Result<Option<(Vec<String>,)>, _> =
+        sqlx::query_as::<_, (serde_json::Value,)>("SELECT refs FROM vulnerabilities WHERE id = $1")
+            .bind(&id)
+            .fetch_optional(&state.pg)
+            .await
+            .map(|o| {
+                o.map(|(v,)| {
+                    (match v {
+                        serde_json::Value::Array(items) => items
+                            .into_iter()
+                            .filter_map(|i| i.as_str().map(String::from))
+                            .collect(),
+                        _ => Vec::new(),
+                    },)
+                })
+            });
     let refs = match row {
         Ok(Some((r,))) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "cve not found").into_response(),
@@ -405,12 +407,7 @@ async fn cve_fix_commits(
     let limit = q.limit.unwrap_or(5).min(10);
     let mut out = Vec::with_capacity(commits.len().min(limit));
     for c in commits.into_iter().take(limit) {
-        match crate::github_crawl::fetch_commit(
-            q.token.as_deref(),
-            q.base_url.as_deref(),
-            &c,
-        )
-        .await
+        match crate::github_crawl::fetch_commit(q.token.as_deref(), q.base_url.as_deref(), &c).await
         {
             Ok(fc) => out.push(fc),
             Err(e) => warn!(cve = %id, sha = %c.sha, error = %e, "fix-commit fetch failed"),
@@ -601,11 +598,7 @@ async fn get_scan_by_id(
     match state.store.get(&digest).await {
         Ok(Some(r)) => Json(r).into_response(),
         // Scan row exists but Redis TTL expired — callers can re-queue via POST /v2/scan.
-        Ok(None) => (
-            StatusCode::GONE,
-            "scan result expired from ephemeral store",
-        )
-            .into_response(),
+        Ok(None) => (StatusCode::GONE, "scan result expired from ephemeral store").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -633,7 +626,9 @@ async fn get_scan_report(
     };
     let result = match state.store.get(&digest).await {
         Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::GONE, "scan result expired from ephemeral store").into_response(),
+        Ok(None) => {
+            return (StatusCode::GONE, "scan result expired from ephemeral store").into_response();
+        }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
@@ -888,9 +883,7 @@ async fn export_scan(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    let ttl = std::time::Duration::from_secs(
-        q.sign_ttl_secs.unwrap_or(3600).clamp(60, 604_800),
-    );
+    let ttl = std::time::Duration::from_secs(q.sign_ttl_secs.unwrap_or(3600).clamp(60, 604_800));
     match state.exporter.export(&result, ttl).await {
         Ok(out) => Json(out).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

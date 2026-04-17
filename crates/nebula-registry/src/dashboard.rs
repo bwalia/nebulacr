@@ -814,9 +814,10 @@ fn parse_single_manifest(
             };
             // Prefer on-disk size if we have it (authoritative); fall back to
             // the size declared in the manifest.
-            let size = blob_sizes.get(digest).copied().unwrap_or_else(|| {
-                layer.get("size").and_then(|v| v.as_u64()).unwrap_or(0)
-            });
+            let size = blob_sizes
+                .get(digest)
+                .copied()
+                .unwrap_or_else(|| layer.get("size").and_then(|v| v.as_u64()).unwrap_or(0));
             layer_total += size;
             layer_digests.push(digest.to_string());
             referenced_blobs.insert(digest.to_string());
@@ -863,7 +864,11 @@ fn build_explanation(
     }
 
     let tag_word = if tag_count == 1 { "tag" } else { "tags" };
-    let layer_word = if unique_layers == 1 { "layer" } else { "layers" };
+    let layer_word = if unique_layers == 1 {
+        "layer"
+    } else {
+        "layers"
+    };
     let mut s = format!(
         "A container image is built from a stack of read-only filesystem slices called \"layers\". \
 This repository has {tag_count} {tag_word} sharing {unique_layers} unique {layer_word}. \
@@ -1803,17 +1808,14 @@ mod image_detail_tests {
 
     #[test]
     fn short_digest_truncates_long_hex() {
-        let d = short_digest(
-            "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-        );
+        let d =
+            short_digest("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
         assert_eq!(d, "sha256:abcdef123456");
     }
 
     #[test]
     fn short_digest_handles_missing_prefix() {
-        let d = short_digest(
-            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-        );
+        let d = short_digest("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
         assert_eq!(d, "sha256:abcdef123456");
     }
 
@@ -1897,7 +1899,11 @@ mod image_detail_tests {
         // authoritative l1 + manifest-declared l2 + config
         assert_eq!(tag.image_size_bytes, 1_100_000 + 2_000_000 + 1500);
 
-        assert_eq!(referenced.len(), 3, "config + two layers should be referenced");
+        assert_eq!(
+            referenced.len(),
+            3,
+            "config + two layers should be referenced"
+        );
         assert!(referenced.contains(cfg));
         assert!(referenced.contains(l1));
         assert!(referenced.contains(l2));
@@ -1909,8 +1915,7 @@ mod image_detail_tests {
 
     #[test]
     fn parse_single_manifest_records_fan_out_across_tags() {
-        let shared_layer =
-            "sha256:sharedsharedsharedsharedsharedsharedsharedsharedsharedsharedaa";
+        let shared_layer = "sha256:sharedsharedsharedsharedsharedsharedsharedsharedsharedsharedaa";
         let make_manifest = |cfg_digest: &str| {
             serde_json::to_vec(&serde_json::json!({
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -1926,7 +1931,9 @@ mod image_detail_tests {
         let blob_sizes: HashMap<String, u64> = HashMap::new();
 
         for tag in ["v1", "v2", "latest"] {
-            let bytes = make_manifest("sha256:cfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcf01");
+            let bytes = make_manifest(
+                "sha256:cfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcfgcf01",
+            );
             parse_single_manifest(
                 tag,
                 tag,

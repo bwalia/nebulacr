@@ -41,11 +41,7 @@ impl RedisStore {
         Self::connect_with(url, ttl_secs, 7 * 24 * 3600)
     }
 
-    pub fn connect_with(
-        url: &str,
-        ttl_secs: u64,
-        layer_ttl_secs: u64,
-    ) -> Result<Self> {
+    pub fn connect_with(url: &str, ttl_secs: u64, layer_ttl_secs: u64) -> Result<Self> {
         let cfg = RedisConfig::from_url(url);
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1))

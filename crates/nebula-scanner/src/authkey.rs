@@ -72,7 +72,8 @@ impl Principal {
         if self.system {
             return true;
         }
-        self.permissions.iter().any(|p| p == "admin") || self.permissions.iter().any(|p| p == perm.as_str())
+        self.permissions.iter().any(|p| p == "admin")
+            || self.permissions.iter().any(|p| p == perm.as_str())
     }
 
     pub fn require(&self, perm: Permission) -> Result<()> {
@@ -253,10 +254,11 @@ impl ApiKeys {
             return Ok(None);
         };
         // Best-effort `last_used_at` stamp; failures shouldn't deny a valid key.
-        if let Err(e) = sqlx::query("UPDATE scanner_api_keys SET last_used_at = NOW() WHERE id = $1")
-            .bind(row.id)
-            .execute(&self.pool)
-            .await
+        if let Err(e) =
+            sqlx::query("UPDATE scanner_api_keys SET last_used_at = NOW() WHERE id = $1")
+                .bind(row.id)
+                .execute(&self.pool)
+                .await
         {
             warn!(error = %e, key_id = %row.id, "failed to stamp last_used_at");
         }

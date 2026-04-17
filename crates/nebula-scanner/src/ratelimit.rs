@@ -36,8 +36,7 @@ impl ScannerLimiter {
     pub fn disabled() -> Self {
         // A huge quota is effectively "no limit"; avoids branching in the
         // hot path while letting operators keep the middleware in place.
-        let quota =
-            Quota::per_second(NonZeroU32::new(u32::MAX).expect("max"));
+        let quota = Quota::per_second(NonZeroU32::new(u32::MAX).expect("max"));
         Self {
             inner: Arc::new(RateLimiter::keyed(quota)),
         }

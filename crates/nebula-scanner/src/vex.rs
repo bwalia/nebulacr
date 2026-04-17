@@ -97,7 +97,11 @@ pub async fn apply_openvex(
             report.skipped += 1;
             continue;
         };
-        let reason = build_reason(&stmt.status, stmt.justification.as_deref(), stmt.impact.as_deref());
+        let reason = build_reason(
+            &stmt.status,
+            stmt.justification.as_deref(),
+            stmt.impact.as_deref(),
+        );
 
         // One suppression per (CVE, package). If products is empty we fall
         // back to a CVE-scoped suppression.

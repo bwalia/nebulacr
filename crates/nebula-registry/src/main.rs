@@ -54,7 +54,7 @@ use nebula_replication::region::{
 };
 use nebula_replication::replicator::{ReplicationHandle, Replicator};
 use nebula_resilience::{CircuitBreakerConfig, ResilientObjectStore, RetryPolicy};
-use nebula_scanner::{config::ScannerConfig, model::ScanJob, ScannerRuntime};
+use nebula_scanner::{ScannerRuntime, config::ScannerConfig, model::ScanJob};
 
 // ── Application State ────────────────────────────────────────────────────────
 
@@ -2323,10 +2323,12 @@ async fn build_scanner_runtime(
     if !enabled {
         return Ok(None);
     }
-    let postgres_url = env::var("NEBULACR_SCANNER__POSTGRES_URL")
-        .map_err(|_| anyhow::anyhow!("NEBULACR_SCANNER__POSTGRES_URL required when scanner enabled"))?;
-    let redis_url = env::var("NEBULACR_SCANNER__REDIS_URL")
-        .map_err(|_| anyhow::anyhow!("NEBULACR_SCANNER__REDIS_URL required when scanner enabled"))?;
+    let postgres_url = env::var("NEBULACR_SCANNER__POSTGRES_URL").map_err(|_| {
+        anyhow::anyhow!("NEBULACR_SCANNER__POSTGRES_URL required when scanner enabled")
+    })?;
+    let redis_url = env::var("NEBULACR_SCANNER__REDIS_URL").map_err(|_| {
+        anyhow::anyhow!("NEBULACR_SCANNER__REDIS_URL required when scanner enabled")
+    })?;
     let vulndb = env::var("NEBULACR_SCANNER__VULNDB").unwrap_or_else(|_| "osv".into());
     let vulndb = match vulndb.as_str() {
         "nebula" => nebula_scanner::config::VulnDbBackend::Nebula,
@@ -2371,10 +2373,38 @@ async fn build_scanner_runtime(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(21_600),
+        export_prefix: env::var("NEBULACR_SCANNER__EXPORT_PREFIX")
+            .unwrap_or_else(|_| "scanner-exports".into()),
+        nvd_enabled: env::var("NEBULACR_SCANNER__NVD_ENABLED")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false),
+        nvd_api_key: env::var("NEBULACR_SCANNER__NVD_API_KEY").ok(),
+        nvd_bootstrap_window_days: env::var("NEBULACR_SCANNER__NVD_BOOTSTRAP_WINDOW_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
+        nvd_sleep_between_pages_secs: env::var("NEBULACR_SCANNER__NVD_SLEEP_BETWEEN_PAGES_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6),
+        ghsa_enabled: env::var("NEBULACR_SCANNER__GHSA_ENABLED")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false),
+        ghsa_token: env::var("NEBULACR_SCANNER__GHSA_TOKEN").ok(),
+        rate_limit_rpm: env::var("NEBULACR_SCANNER__RATE_LIMIT_RPM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600),
+        alerts_webhook_url: env::var("NEBULACR_SCANNER__ALERTS_WEBHOOK_URL").ok(),
+        alerts_format: env::var("NEBULACR_SCANNER__ALERTS_FORMAT")
+            .unwrap_or_else(|_| "generic".into()),
     };
 
     let rt = ScannerRuntime::build(cfg, store).await?;
-    info!("scanner runtime ready (workers={})", rt.worker_handles.len());
+    info!(
+        "scanner runtime ready (workers={})",
+        rt.worker_handles.len()
+    );
     Ok(Some(rt))
 }
 

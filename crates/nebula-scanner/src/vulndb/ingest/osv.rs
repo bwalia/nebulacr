@@ -152,8 +152,15 @@ impl OsvIngester {
         // don't lose the fact that we tried. stats are zeroed here and
         // overwritten once ingestion succeeds.
         if let Some(etag) = upstream_etag {
-            let _ =
-                update_cursor(pool, SOURCE, Some(etag), None, &IngestStats::default(), None).await;
+            let _ = update_cursor(
+                pool,
+                SOURCE,
+                Some(etag),
+                None,
+                &IngestStats::default(),
+                None,
+            )
+            .await;
         }
         Ok(tmp)
     }

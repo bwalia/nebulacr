@@ -61,7 +61,13 @@ impl Notifier {
             AlertFormat::Teams => teams_payload(result),
             AlertFormat::Generic => generic_payload(result),
         };
-        if let Err(e) = self.http.post(&self.webhook_url).json(&payload).send().await {
+        if let Err(e) = self
+            .http
+            .post(&self.webhook_url)
+            .json(&payload)
+            .send()
+            .await
+        {
             warn!(error = %e, "scan alert webhook failed");
         }
     }
@@ -86,7 +92,11 @@ fn image_ref(r: &ScanResult) -> String {
 }
 
 fn short_digest(d: &str) -> String {
-    d.strip_prefix("sha256:").unwrap_or(d).chars().take(12).collect()
+    d.strip_prefix("sha256:")
+        .unwrap_or(d)
+        .chars()
+        .take(12)
+        .collect()
 }
 
 fn slack_payload(r: &ScanResult) -> Value {

@@ -108,8 +108,7 @@ impl Ingester for NvdIngester {
         let mut max_modified = start;
         let mut cursor = start;
         while cursor < now {
-            let window_end =
-                (cursor + chrono::Duration::days(MAX_WINDOW_DAYS)).min(now);
+            let window_end = (cursor + chrono::Duration::days(MAX_WINDOW_DAYS)).min(now);
             match self
                 .ingest_window(pool, cursor, window_end, &mut max_modified, &mut stats)
                 .await
@@ -196,22 +195,20 @@ impl NvdIngester {
         end: DateTime<Utc>,
         start_index: usize,
     ) -> Result<NvdApiResponse> {
-        let mut req = self
-            .http
-            .get(&self.base_url)
-            .query(&[
-                ("lastModStartDate", format_nvd_ts(start)),
-                ("lastModEndDate", format_nvd_ts(end)),
-                ("resultsPerPage", PAGE_SIZE.to_string()),
-                ("startIndex", start_index.to_string()),
-            ]);
+        let mut req = self.http.get(&self.base_url).query(&[
+            ("lastModStartDate", format_nvd_ts(start)),
+            ("lastModEndDate", format_nvd_ts(end)),
+            ("resultsPerPage", PAGE_SIZE.to_string()),
+            ("startIndex", start_index.to_string()),
+        ]);
         if let Some(key) = &self.api_key {
             req = req.header("apiKey", key);
         }
         let resp = req.send().await?.error_for_status()?;
-        let body: NvdApiResponse = resp.json().await.map_err(|e| {
-            ScanError::VulnDb(format!("nvd json decode: {e}"))
-        })?;
+        let body: NvdApiResponse = resp
+            .json()
+            .await
+            .map_err(|e| ScanError::VulnDb(format!("nvd json decode: {e}")))?;
         Ok(body)
     }
 }
@@ -403,11 +400,9 @@ mod tests {
 
     #[test]
     fn falls_back_when_severity_missing() {
-        let row = normalise_nvd(&raw(
-            r#"{"cve":{"id":"CVE-2024-0001",
+        let row = normalise_nvd(&raw(r#"{"cve":{"id":"CVE-2024-0001",
                 "descriptions":[{"lang":"en","value":"x"}],
-                "references":[],"metrics":{},"weaknesses":[]}}"#,
-        ))
+                "references":[],"metrics":{},"weaknesses":[]}}"#))
         .unwrap();
         assert_eq!(row.severity, Severity::Unknown);
         assert!(row.cvss_score.is_none());
@@ -415,13 +410,11 @@ mod tests {
 
     #[test]
     fn infers_severity_from_score_when_label_absent() {
-        let row = normalise_nvd(&raw(
-            r#"{"cve":{"id":"CVE-2024-0002",
+        let row = normalise_nvd(&raw(r#"{"cve":{"id":"CVE-2024-0002",
                 "descriptions":[{"lang":"en","value":"x"}],
                 "references":[],
                 "metrics":{"cvssMetricV30":[{"cvssData":{"baseScore":9.8}}]},
-                "weaknesses":[]}}"#,
-        ))
+                "weaknesses":[]}}"#))
         .unwrap();
         assert_eq!(row.cvss_score, Some(9.8));
         assert_eq!(row.severity, Severity::Critical);

@@ -46,21 +46,16 @@ pub struct PackagePin {
 
 pub fn suggest(result: &ScanResult) -> DockerfileFixSuggestions {
     let recs = recommend(result);
-    let base_image_swap = recs
-        .recommendations
-        .first()
-        .map(|r| BaseSwap {
-            suggested_image: r.suggested_image.to_string(),
-            rationale: r.rationale.to_string(),
-        });
+    let base_image_swap = recs.recommendations.first().map(|r| BaseSwap {
+        suggested_image: r.suggested_image.to_string(),
+        rationale: r.rationale.to_string(),
+    });
 
     // Group vulnerabilities by (package, ecosystem). Pick the highest-severity
     // fixed_version per group — if any entry in the group has a fix, the
     // pin is actionable.
-    let mut by_pkg: std::collections::HashMap<
-        (String, String),
-        PackagePin,
-    > = std::collections::HashMap::new();
+    let mut by_pkg: std::collections::HashMap<(String, String), PackagePin> =
+        std::collections::HashMap::new();
     for v in &result.vulnerabilities {
         if v.suppressed {
             continue;
@@ -75,7 +70,12 @@ pub fn suggest(result: &ScanResult) -> DockerfileFixSuggestions {
             current_version: v.installed_version.clone(),
             suggested_version: fixed.clone(),
             closes_cves: Vec::new(),
-            install_snippet: install_snippet(&v.ecosystem, &v.package, &fixed, recs.detected_family),
+            install_snippet: install_snippet(
+                &v.ecosystem,
+                &v.package,
+                &fixed,
+                recs.detected_family,
+            ),
         });
         entry.closes_cves.push(v.id.clone());
         // If this vuln has a higher severity, bump the suggested version.
@@ -86,9 +86,10 @@ pub fn suggest(result: &ScanResult) -> DockerfileFixSuggestions {
 
     let mut pins: Vec<PackagePin> = by_pkg.into_values().collect();
     pins.sort_by(|a, b| {
-        b.closes_cves.len().cmp(&a.closes_cves.len()).then_with(|| {
-            a.package.cmp(&b.package)
-        })
+        b.closes_cves
+            .len()
+            .cmp(&a.closes_cves.len())
+            .then_with(|| a.package.cmp(&b.package))
     });
 
     DockerfileFixSuggestions {
@@ -119,12 +120,8 @@ fn install_snippet(
         ("deb", _) => Some(format!(
             "RUN apt-get update && apt-get install -y --no-install-recommends {package}={fixed}* && rm -rf /var/lib/apt/lists/*"
         )),
-        ("rpm", _) => Some(format!(
-            "RUN microdnf install -y {package}-{fixed}"
-        )),
-        ("apk", _) => Some(format!(
-            "RUN apk add --no-cache {package}={fixed}"
-        )),
+        ("rpm", _) => Some(format!("RUN microdnf install -y {package}-{fixed}")),
+        ("apk", _) => Some(format!("RUN apk add --no-cache {package}={fixed}")),
         _ => None, // language ecosystems — caller updates the lock file.
     }
 }
@@ -265,7 +262,12 @@ mod tests {
         assert_eq!(pin.package, "openssl");
         assert_eq!(pin.suggested_version, "1.1.1k");
         assert_eq!(pin.closes_cves.len(), 2);
-        assert!(pin.install_snippet.as_deref().unwrap().starts_with("RUN apt-get"));
+        assert!(
+            pin.install_snippet
+                .as_deref()
+                .unwrap()
+                .starts_with("RUN apt-get")
+        );
     }
 
     #[test]
@@ -286,6 +288,12 @@ mod tests {
         assert!(patched.contains("# NebulaCR: auto-patch distro packages"));
         assert!(patched.contains("1.1.1k"));
         // Base-image swap hint is a comment, not an edit
-        assert!(patched.lines().next().unwrap().starts_with("# NebulaCR: suggested base-image swap"));
+        assert!(
+            patched
+                .lines()
+                .next()
+                .unwrap()
+                .starts_with("# NebulaCR: suggested base-image swap")
+        );
     }
 }
