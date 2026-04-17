@@ -97,13 +97,12 @@ impl Ingester for OsvIngester {
         if let (Some(upstream), Some(stored)) = (
             upstream_etag.as_ref(),
             stored_etag(pool, SOURCE).await?.as_ref(),
-        ) {
-            if upstream == stored {
-                info!(etag = %upstream, "OSV ingest: etag unchanged, skipping");
-                let stats = IngestStats::default();
-                update_cursor(pool, SOURCE, Some(upstream), None, &stats, None).await?;
-                return Ok(stats);
-            }
+        ) && upstream == stored
+        {
+            info!(etag = %upstream, "OSV ingest: etag unchanged, skipping");
+            let stats = IngestStats::default();
+            update_cursor(pool, SOURCE, Some(upstream), None, &stats, None).await?;
+            return Ok(stats);
         }
 
         let tmp = self.download(pool, upstream_etag.as_deref()).await?;

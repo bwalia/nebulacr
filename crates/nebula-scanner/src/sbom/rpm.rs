@@ -165,7 +165,7 @@ mod tests {
         let mut index_entries = Vec::new();
         for (tag, ty, payload) in entries {
             let offset = data.len() as u32;
-            let count = if *ty == TYPE_INT32 { 1u32 } else { 1u32 };
+            let count = 1u32;
             data.extend_from_slice(payload);
             if *ty == TYPE_STRING {
                 // strings are null-terminated

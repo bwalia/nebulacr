@@ -184,15 +184,16 @@ async fn live_scan(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    let ai_analysis = if q.ai.unwrap_or(0) > 0 && state.ai.is_some() {
-        let slice: &[Vulnerability] = match q.ai_limit {
-            Some(n) if n < result.vulnerabilities.len() => &result.vulnerabilities[..n],
-            _ => &result.vulnerabilities,
-        };
-        let concurrency = q.ai_concurrency.unwrap_or(DEFAULT_AI_CONCURRENCY);
-        Some(analyse_all(state.ai.as_ref().unwrap(), slice, concurrency).await)
-    } else {
-        None
+    let ai_analysis = match (q.ai.unwrap_or(0) > 0).then_some(()).and(state.ai.as_ref()) {
+        Some(ai) => {
+            let slice: &[Vulnerability] = match q.ai_limit {
+                Some(n) if n < result.vulnerabilities.len() => &result.vulnerabilities[..n],
+                _ => &result.vulnerabilities,
+            };
+            let concurrency = q.ai_concurrency.unwrap_or(DEFAULT_AI_CONCURRENCY);
+            Some(analyse_all(ai, slice, concurrency).await)
+        }
+        None => None,
     };
 
     let status = match result.status {
@@ -544,10 +545,10 @@ async fn trigger_ingest(
     }
     let mut reports = Vec::new();
     for ing in &state.ingesters {
-        if let Some(sel) = &q.source {
-            if ing.source() != sel {
-                continue;
-            }
+        if let Some(sel) = &q.source
+            && ing.source() != sel
+        {
+            continue;
         }
         match ing.run(&state.pg).await {
             Ok(stats) => reports.push(IngestReport {

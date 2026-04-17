@@ -101,16 +101,16 @@ impl VulnDb for NebulaVulnDb {
 /// is treated as "no lower bound" — comparators can't parse "0" for
 /// ecosystems like Go or PyPI.
 fn in_range(cmp: &dyn VersionCompare, installed: &str, row: &QueryRow) -> bool {
-    if let Some(intro) = row.introduced.as_deref() {
-        if intro != "0" {
-            match cmp.compare(installed, intro) {
-                Ok(Ordering::Less) => return false,
-                Err(e) => {
-                    warn!(installed, introduced = intro, error = %e, "version compare failed");
-                    return false;
-                }
-                _ => {}
+    if let Some(intro) = row.introduced.as_deref()
+        && intro != "0"
+    {
+        match cmp.compare(installed, intro) {
+            Ok(Ordering::Less) => return false,
+            Err(e) => {
+                warn!(installed, introduced = intro, error = %e, "version compare failed");
+                return false;
             }
+            _ => {}
         }
     }
     if let Some(fixed) = row.fixed.as_deref() {

@@ -163,10 +163,10 @@ impl NvdIngester {
             for item in page.vulnerabilities {
                 match normalise_nvd(&item) {
                     Some(row) => {
-                        if let Some(t) = row.modified_at {
-                            if t > *max_modified {
-                                *max_modified = t;
-                            }
+                        if let Some(t) = row.modified_at
+                            && t > *max_modified
+                        {
+                            *max_modified = t;
                         }
                         match write_advisory_metadata_only(pool, &row).await {
                             Ok(()) => stats.advisories += 1,

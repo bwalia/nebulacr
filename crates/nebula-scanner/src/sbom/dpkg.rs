@@ -25,16 +25,16 @@ pub fn parse(layer_digest: &str, contents: &[u8], out: &mut Vec<Package>) {
                 status_installed = v.split_whitespace().any(|tok| tok == "installed");
             }
         }
-        if let (Some(n), Some(v)) = (name, version) {
-            if status_installed {
-                out.push(Package {
-                    name: n.to_string(),
-                    version: v.to_string(),
-                    ecosystem: "deb".into(),
-                    purl: format!("pkg:deb/debian/{}@{}", n, v),
-                    layer_digest: Some(layer_digest.to_string()),
-                });
-            }
+        if let (Some(n), Some(v)) = (name, version)
+            && status_installed
+        {
+            out.push(Package {
+                name: n.to_string(),
+                version: v.to_string(),
+                ecosystem: "deb".into(),
+                purl: format!("pkg:deb/debian/{}@{}", n, v),
+                layer_digest: Some(layer_digest.to_string()),
+            });
         }
     }
 }

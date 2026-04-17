@@ -103,10 +103,10 @@ impl Ingester for GhsaIngester {
             for node in &page.nodes {
                 match normalise_ghsa(node) {
                     Some((vuln, ranges)) => {
-                        if let Some(t) = vuln.modified_at {
-                            if t > max_modified {
-                                max_modified = t;
-                            }
+                        if let Some(t) = vuln.modified_at
+                            && t > max_modified
+                        {
+                            max_modified = t;
                         }
                         match write_advisory(pool, &vuln, &ranges).await {
                             Ok(()) => stats.advisories += 1,
@@ -155,10 +155,10 @@ impl GhsaIngester {
             .json()
             .await
             .map_err(|e| ScanError::VulnDb(format!("ghsa json decode: {e}")))?;
-        if let Some(errs) = body.errors {
-            if !errs.is_empty() {
-                return Err(ScanError::VulnDb(format!("ghsa graphql errors: {errs:?}")));
-            }
+        if let Some(errs) = body.errors
+            && !errs.is_empty()
+        {
+            return Err(ScanError::VulnDb(format!("ghsa graphql errors: {errs:?}")));
         }
         let data = body
             .data
@@ -327,7 +327,7 @@ fn normalise_ghsa(node: &GhsaNode) -> Option<(VulnerabilityRow, Vec<AffectedRang
         .vulnerabilities
         .nodes
         .iter()
-        .filter_map(|v| vuln_node_to_range(v))
+        .filter_map(vuln_node_to_range)
         .collect();
     if ranges.is_empty() {
         // No matchable ecosystem — skip to avoid orphaning the vuln row.
@@ -349,7 +349,10 @@ fn normalise_ghsa(node: &GhsaNode) -> Option<(VulnerabilityRow, Vec<AffectedRang
     // Prefer the CVE id as the canonical id when present so OSV/NVD rows
     // collapse onto the same row; fall back to the GHSA id otherwise.
     let canonical_id = cve_alias.clone().unwrap_or_else(|| node.ghsa_id.clone());
-    let source = if cve_alias.is_some() { "ghsa" } else { "ghsa" };
+    // Stays `ghsa` regardless — even if the advisory surfaces a CVE alias, it
+    // was sourced from the GHSA feed. OSV/NVD later enrich the same id via
+    // their own ingesters.
+    let source = "ghsa";
 
     let severity = parse_ghsa_severity(&node.severity);
     let cvss = node.cvss.as_ref().and_then(|c| c.score);
@@ -444,10 +447,10 @@ fn parse_range(
         }
     }
 
-    if fixed.is_none() {
-        if let Some(p) = first_patched {
-            fixed = Some(p.to_string());
-        }
+    if fixed.is_none()
+        && let Some(p) = first_patched
+    {
+        fixed = Some(p.to_string());
     }
 
     (introduced, fixed, last_affected)

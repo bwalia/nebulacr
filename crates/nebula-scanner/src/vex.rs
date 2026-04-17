@@ -108,10 +108,7 @@ pub async fn apply_openvex(
         let packages: Vec<Option<String>> = if stmt.products.is_empty() {
             vec![None]
         } else {
-            stmt.products
-                .iter()
-                .map(|p| package_from_product(p))
-                .collect()
+            stmt.products.iter().map(package_from_product).collect()
         };
 
         for pkg in packages {

@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn cvss_vector_medium() {
         let s = parse_cvss_base("CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N").unwrap();
-        assert!(s >= 4.0 && s < 7.0, "got {s}");
+        assert!((4.0..7.0).contains(&s), "got {s}");
     }
 
     #[test]

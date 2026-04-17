@@ -77,10 +77,10 @@ fn name_from_key(key: &str) -> Option<&str> {
 }
 
 fn npm_purl(name: &str, version: &str) -> String {
-    if let Some(rest) = name.strip_prefix('@') {
-        if let Some((scope, pkg)) = rest.split_once('/') {
-            return format!("pkg:npm/%40{}/{}@{}", scope, pkg, version);
-        }
+    if let Some(rest) = name.strip_prefix('@')
+        && let Some((scope, pkg)) = rest.split_once('/')
+    {
+        return format!("pkg:npm/%40{}/{}@{}", scope, pkg, version);
     }
     format!("pkg:npm/{}@{}", name, version)
 }
