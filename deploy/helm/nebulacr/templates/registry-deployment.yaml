@@ -65,6 +65,32 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and .Values.scanner.enabled .Values.postgres.enabled }}
+      initContainers:
+        # Scanner init tries to open a pool against postgres at registry
+        # start; if postgres isn't ready yet, scanner falls back to
+        # "continuing without it" and never picks up scan jobs. Block the
+        # registry until postgres accepts connections.
+        - name: wait-for-postgres
+          image: {{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "nebulacr.postgres.fullname" . }} \
+                                -p 5432 \
+                                -U {{ .Values.postgres.username | default "nebulacr" | quote }}; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      {{- end }}
       containers:
         - name: registry
           image: {{ include "nebulacr.registry.image" . }}
