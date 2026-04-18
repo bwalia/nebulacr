@@ -34,7 +34,8 @@ RUN mkdir -p crates/nebula-common/src      && echo "pub fn _stub(){}" > crates/n
  && mkdir -p crates/nebula-replication/src && echo "pub fn _stub(){}" > crates/nebula-replication/src/lib.rs \
  && mkdir -p crates/nebula-db/src          && echo "pub fn _stub(){}" > crates/nebula-db/src/lib.rs \
  && mkdir -p crates/nebula-ai/src          && echo "pub fn _stub(){}" > crates/nebula-ai/src/lib.rs \
- && mkdir -p crates/nebula-scanner/src     && echo "pub fn _stub(){}" > crates/nebula-scanner/src/lib.rs
+ && mkdir -p crates/nebula-scanner/src     && echo "pub fn _stub(){}" > crates/nebula-scanner/src/lib.rs \
+ && mkdir -p crates/nebula-scanner/src/bin && echo "fn main(){}" > crates/nebula-scanner/src/bin/nebula-scanner.rs
 
 # Build dependencies only (this layer is cached unless Cargo.toml/lock change)
 RUN cargo build --release --workspace 2>&1 || true
@@ -52,7 +53,7 @@ COPY crates/ crates/
 # Build the real binaries (embed git SHA as build hash)
 ARG NEBULACR_BUILD_HASH=dev
 ENV NEBULACR_BUILD_HASH=${NEBULACR_BUILD_HASH}
-RUN cargo build --release --bin nebula-auth --bin nebula-registry
+RUN cargo build --release --bin nebula-auth --bin nebula-registry --bin nebula-scanner
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
 
@@ -76,9 +77,10 @@ RUN mkdir -p /var/lib/nebulacr/data \
 # Copy binaries from the builder stage
 COPY --from=builder /build/target/release/nebula-auth     /usr/local/bin/nebula-auth
 COPY --from=builder /build/target/release/nebula-registry /usr/local/bin/nebula-registry
+COPY --from=builder /build/target/release/nebula-scanner  /usr/local/bin/nebula-scanner
 
 # Ensure binaries are executable
-RUN chmod +x /usr/local/bin/nebula-auth /usr/local/bin/nebula-registry
+RUN chmod +x /usr/local/bin/nebula-auth /usr/local/bin/nebula-registry /usr/local/bin/nebula-scanner
 
 # Switch to non-root user
 USER nebulacr

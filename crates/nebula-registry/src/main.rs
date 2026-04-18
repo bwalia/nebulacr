@@ -54,7 +54,7 @@ use nebula_replication::region::{
 };
 use nebula_replication::replicator::{ReplicationHandle, Replicator};
 use nebula_resilience::{CircuitBreakerConfig, ResilientObjectStore, RetryPolicy};
-use nebula_scanner::{ScannerRuntime, config::ScannerConfig, model::ScanJob};
+use nebula_scanner::{ScannerRuntime, config::ScannerConfig, model::ScanJob, queue::Queue as ScanQueue};
 
 // ── Application State ────────────────────────────────────────────────────────
 
@@ -78,9 +78,11 @@ struct AppState {
     failover_manager: Option<Arc<FailoverManager>>,
     /// Webhook notifier handle for external event notifications (optional).
     webhook_handle: Option<webhook::WebhookHandle>,
-    /// Scanner job queue sender (optional). When present, successful manifest
-    /// pushes enqueue a background scan job.
-    scanner_queue: Option<tokio::sync::mpsc::Sender<ScanJob>>,
+    /// Scanner job queue (optional). When present, successful manifest
+    /// pushes enqueue a background scan job. The concrete impl is either
+    /// in-process (`TokioQueue`) or durable (`PostgresQueue`) depending on
+    /// `NEBULACR_SCANNER__QUEUE_BACKEND`.
+    scanner_queue: Option<Arc<dyn ScanQueue>>,
     /// Registry audit log for tracking who pushed/pulled what.
     audit_log: Arc<audit::RegistryAuditLog>,
     /// Process start time for uptime tracking.
@@ -969,10 +971,11 @@ async fn put_manifest(
         .await;
     }
 
-    // Enqueue a background vulnerability scan (non-blocking). try_send is
-    // used so a saturated queue does not stall the push — the scan is
-    // best-effort and can be re-triggered via POST /v2/scan.
-    if let Some(ref tx) = state.scanner_queue {
+    // Enqueue a background vulnerability scan (fire-and-forget). The
+    // enqueue call is spawned so an INSERT-backed queue (PostgresQueue)
+    // never blocks the push path; scans are best-effort and can be
+    // re-triggered via POST /v2/scan.
+    if let Some(ref q) = state.scanner_queue {
         let job = ScanJob {
             id: Uuid::new_v4(),
             digest: digest.clone(),
@@ -982,15 +985,14 @@ async fn put_manifest(
             reference: params.reference.clone(),
             enqueued_at: chrono::Utc::now(),
         };
-        match tx.try_send(job) {
-            Ok(()) => debug!(%digest, "scan job enqueued"),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                warn!(%digest, "scan queue full; push not auto-scanned")
+        let q = q.clone();
+        let digest_copy = digest.clone();
+        tokio::spawn(async move {
+            match q.enqueue(job).await {
+                Ok(()) => debug!(digest = %digest_copy, "scan job enqueued"),
+                Err(e) => warn!(digest = %digest_copy, error = %e, "scan enqueue failed"),
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                warn!(%digest, "scan queue closed")
-            }
-        }
+        });
     }
 
     let location = format!(
@@ -2398,6 +2400,17 @@ async fn build_scanner_runtime(
         alerts_webhook_url: env::var("NEBULACR_SCANNER__ALERTS_WEBHOOK_URL").ok(),
         alerts_format: env::var("NEBULACR_SCANNER__ALERTS_FORMAT")
             .unwrap_or_else(|_| "generic".into()),
+        queue_backend: match env::var("NEBULACR_SCANNER__QUEUE_BACKEND")
+            .unwrap_or_else(|_| "tokio".into())
+            .to_lowercase()
+            .as_str()
+        {
+            "postgres" => nebula_scanner::config::QueueBackend::Postgres,
+            _ => nebula_scanner::config::QueueBackend::Tokio,
+        },
+        enqueue_only: env::var("NEBULACR_SCANNER__ENQUEUE_ONLY")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false),
     };
 
     let rt = ScannerRuntime::build(cfg, store).await?;
@@ -2847,7 +2860,7 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
-    let scanner_queue = scanner_runtime.as_ref().map(|rt| rt.queue_sender.clone());
+    let scanner_queue = scanner_runtime.as_ref().map(|rt| rt.queue.clone());
     let scanner_router = scanner_runtime.as_ref().map(|rt| rt.router.clone());
 
     let state = AppState {

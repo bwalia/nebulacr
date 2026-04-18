@@ -60,7 +60,16 @@ governor.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 metrics.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# Standalone worker binary. Shares the same crate's library so the
+# ScannerRuntime code path is identical to the in-registry one; this bin
+# just loads config + storage and runs workers (no Axum server needed —
+# the /v2/scan/* routes still live in the registry process).
+[[bin]]
+name = "nebula-scanner"
+path = "src/bin/nebula-scanner.rs"

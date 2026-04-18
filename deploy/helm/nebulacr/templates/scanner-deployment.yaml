@@ -1,0 +1,138 @@
+{{- /*
+Standalone scan-worker Deployment (optional).
+
+When `scanner.worker.enabled` is true, this deploys `nebula-scanner` —
+the library-shared worker binary — as its own Deployment. The registry
+still enqueues (NEBULACR_SCANNER__QUEUE_BACKEND=postgres) and serves
+/v2/scan/live/{digest}, but the CPU-heavy SBOM extraction + vuln-DB
+lookups happen in this separate pool.
+
+Enable this WITH a companion flip on the registry side:
+  registry's NEBULACR_SCANNER__WORKERS=0 (or scanner.enqueueOnly=true)
+so in-process workers stop and don't race the external ones. This chart
+does that automatically — see registry-deployment.yaml.
+
+Storage note: workers need read access to the same image blobs the
+registry writes. Filesystem backend + RWO PVC needs shared storage
+(NFS, longhorn, …) or co-scheduling on the same node with careful
+mount management. For S3/GCS/Azure backends, no shared-volume issue.
+*/ -}}
+{{- if and .Values.scanner.enabled .Values.scanner.worker.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-scanner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "nebulacr.name" . }}-scanner
+    app.kubernetes.io/component: scanner
+spec:
+  replicas: {{ .Values.scanner.worker.replicas | default 0 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "nebulacr.name" . }}-scanner
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: scanner
+  template:
+    metadata:
+      labels:
+        {{- include "nebulacr.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ include "nebulacr.name" . }}-scanner
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: scanner
+    spec:
+      {{- with .Values.scanner.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "nebulacr.postgres.fullname" . }} \
+                                -p 5432 \
+                                -U {{ .Values.postgres.username | default "nebulacr" | quote }}; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+      {{- end }}
+      containers:
+        - name: scanner
+          image: {{ include "nebulacr.registry.image" . }}
+          imagePullPolicy: {{ .Values.registry.image.pullPolicy }}
+          command: ["nebula-scanner"]
+          env:
+            - name: NEBULACR_LOG_LEVEL
+              value: {{ .Values.observability.logLevel | quote }}
+            - name: NEBULACR_SCANNER__ENABLED
+              value: "true"
+            - name: NEBULACR_SCANNER__QUEUE_BACKEND
+              value: "postgres"
+            {{- if .Values.postgres.enabled }}
+            - name: NEBULACR_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nebulacr.postgres.secretName" . }}
+                  key: password
+            - name: NEBULACR_SCANNER__POSTGRES_URL
+              value: {{ include "nebulacr.scanner.postgresUrl" . | quote }}
+            {{- end }}
+            {{- if .Values.redis.enabled }}
+            - name: NEBULACR_SCANNER__REDIS_URL
+              value: {{ include "nebulacr.scanner.redisUrl" . | quote }}
+            {{- end }}
+            - name: NEBULACR_SCANNER__VULNDB
+              value: {{ .Values.scanner.vulndb | default "osv" | quote }}
+            - name: NEBULACR_SCANNER__WORKERS
+              value: {{ .Values.scanner.worker.workers | default 2 | quote }}
+            - name: NEBULACR_SCANNER__INGEST_ENABLED
+              value: {{ .Values.scanner.ingest.enabled | default false | quote }}
+            {{- if .Values.scanner.ingest.intervalSecs }}
+            - name: NEBULACR_SCANNER__INGEST_INTERVAL_SECS
+              value: {{ .Values.scanner.ingest.intervalSecs | quote }}
+            {{- end }}
+            - name: NEBULACR_SCANNER__AI_ENABLED
+              value: {{ .Values.scanner.ai.enabled | default false | quote }}
+            {{- if .Values.scanner.ai.enabled }}
+            - name: NEBULACR_SCANNER__AI_ENDPOINT
+              value: {{ .Values.scanner.ai.endpoint | quote }}
+            {{- if .Values.scanner.ai.model }}
+            - name: NEBULACR_SCANNER__AI_MODEL
+              value: {{ .Values.scanner.ai.model | quote }}
+            {{- end }}
+            {{- end }}
+            # Storage config — the worker reads image blobs directly from
+            # the same backend the registry writes to.
+            - name: NEBULACR_STORAGE__BACKEND
+              value: {{ .Values.storage.backend | quote }}
+            {{- if eq .Values.storage.backend "filesystem" }}
+            - name: NEBULACR_STORAGE__ROOT
+              value: {{ .Values.storage.filesystem.rootDirectory | quote }}
+            {{- end }}
+            {{- with .Values.scanner.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.scanner.worker.resources | nindent 12 }}
+          {{- if eq .Values.storage.backend "filesystem" }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.storage.filesystem.rootDirectory }}
+              readOnly: true
+          {{- end }}
+      {{- if eq .Values.storage.backend "filesystem" }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "nebulacr.fullname" .)) .Values.storage.filesystem.persistence.existingClaim }}
+      {{- end }}
+{{- end }}

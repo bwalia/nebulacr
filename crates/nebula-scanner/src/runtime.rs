@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 use sqlx::PgPool;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -15,11 +14,10 @@ use nebula_ai::{CveAnalyzer, OllamaClient, OllamaConfig};
 
 use crate::Result;
 use crate::api::{ScannerState, router};
-use crate::config::{ScannerConfig, VulnDbBackend};
+use crate::config::{QueueBackend, ScannerConfig, VulnDbBackend};
 use crate::image::Puller;
-use crate::model::ScanJob;
 use crate::policy::Policy;
-use crate::queue::{Queue, TokioQueue};
+use crate::queue::{PostgresQueue, Queue, TokioQueue};
 use crate::settings::ImageSettingsStore;
 use crate::store::{EphemeralStore, RedisStore};
 use crate::suppress::Suppressions;
@@ -29,7 +27,10 @@ use crate::worker::Worker;
 
 pub struct ScannerRuntime {
     pub router: axum::Router,
-    pub queue_sender: mpsc::Sender<ScanJob>,
+    /// Enqueue handle. Producers (registry) clone this and call
+    /// `queue.enqueue(job)`. Implementation is either `TokioQueue` (in-proc)
+    /// or `PostgresQueue` (durable, cross-process).
+    pub queue: Arc<dyn Queue>,
     pub worker_handles: Vec<JoinHandle<()>>,
     pub ingest_handles: Vec<JoinHandle<()>>,
     pub pg: PgPool,
@@ -49,9 +50,16 @@ impl ScannerRuntime {
         )?);
 
         // ── Queue ────────────────────────────────────────────────────────
-        let tq = Arc::new(TokioQueue::new(config.queue_capacity));
-        let queue: Arc<dyn Queue> = tq.clone();
-        let queue_sender = tq.sender();
+        let queue: Arc<dyn Queue> = match config.queue_backend {
+            QueueBackend::Tokio => {
+                info!("scanner queue backend: tokio (in-process)");
+                Arc::new(TokioQueue::new(config.queue_capacity))
+            }
+            QueueBackend::Postgres => {
+                info!("scanner queue backend: postgres (durable)");
+                Arc::new(PostgresQueue::new(pg.clone()))
+            }
+        };
 
         // ── Pipeline stages ──────────────────────────────────────────────
         let puller = Arc::new(Puller::new(store.clone()));
@@ -74,25 +82,34 @@ impl ScannerRuntime {
         });
 
         // ── Workers ──────────────────────────────────────────────────────
-        let mut worker_handles = Vec::with_capacity(config.workers);
-        for n in 0..config.workers {
-            let worker = Arc::new(Worker {
-                queue: queue.clone(),
-                puller: puller.clone(),
-                vulndb: vulndb.clone(),
-                store: redis.clone(),
-                suppressions: suppressions.clone(),
-                settings: settings.clone(),
-                pg: pg.clone(),
-                default_policy: default_policy.clone(),
-                notifier: notifier.clone(),
-            });
-            let handle = tokio::spawn(async move {
-                info!(worker = n, "spawning scan worker");
-                worker.run().await;
-            });
-            worker_handles.push(handle);
-        }
+        // In `enqueue_only` mode the registry only produces work; real
+        // workers run in the separate `nebula-scanner` binary, so skip
+        // spawning them here.
+        let worker_handles = if config.enqueue_only {
+            info!("scanner workers skipped (enqueue_only=true)");
+            Vec::new()
+        } else {
+            let mut handles = Vec::with_capacity(config.workers);
+            for n in 0..config.workers {
+                let worker = Arc::new(Worker {
+                    queue: queue.clone(),
+                    puller: puller.clone(),
+                    vulndb: vulndb.clone(),
+                    store: redis.clone(),
+                    suppressions: suppressions.clone(),
+                    settings: settings.clone(),
+                    pg: pg.clone(),
+                    default_policy: default_policy.clone(),
+                    notifier: notifier.clone(),
+                });
+                let handle = tokio::spawn(async move {
+                    info!(worker = n, "spawning scan worker");
+                    worker.run().await;
+                });
+                handles.push(handle);
+            }
+            handles
+        };
 
         // ── AI (optional) ────────────────────────────────────────────────
         let ai: Option<Arc<dyn CveAnalyzer>> = if config.ai_enabled {
@@ -132,14 +149,18 @@ impl ScannerRuntime {
             )?));
         }
         let ingesters = ingesters;
-        let ingest_handles = if config.ingest_enabled {
+        let ingest_handles = if config.ingest_enabled && !config.enqueue_only {
             spawn_scheduler(
                 ingesters.clone(),
                 pg.clone(),
                 std::time::Duration::from_secs(config.ingest_interval_secs),
             )
         } else {
-            info!("scanner ingest scheduler disabled");
+            if config.enqueue_only {
+                info!("scanner ingest scheduler skipped (enqueue_only=true)");
+            } else {
+                info!("scanner ingest scheduler disabled");
+            }
             Vec::new()
         };
 
@@ -175,7 +196,7 @@ impl ScannerRuntime {
 
         Ok(Self {
             router,
-            queue_sender,
+            queue,
             worker_handles,
             ingest_handles,
             pg,

@@ -70,6 +70,25 @@ pub struct ScannerConfig {
     /// event — useful for self-hosted receivers or tools like n8n.
     #[serde(default = "default_alerts_format")]
     pub alerts_format: String,
+    /// Queue backend. `tokio` (default) keeps the queue in-process — fine
+    /// when workers run in the same binary as the enqueue side. `postgres`
+    /// writes into the `scan_jobs` table so workers in a separate
+    /// `nebula-scanner` binary can claim jobs.
+    #[serde(default)]
+    pub queue_backend: QueueBackend,
+    /// When true, build the queue + API router but don't spawn workers or
+    /// the ingest scheduler. Set this in the registry process when workers
+    /// run in a separate `nebula-scanner` deployment. Default false.
+    #[serde(default)]
+    pub enqueue_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QueueBackend {
+    #[default]
+    Tokio,
+    Postgres,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

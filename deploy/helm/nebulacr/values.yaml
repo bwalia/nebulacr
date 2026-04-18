@@ -444,6 +444,25 @@ scanner:
     # Ollama (or compatible) endpoint used when ai.enabled=true.
     endpoint: "http://127.0.0.1:11434"
     model: "qwen2.5-coder:7b"
+  # Standalone scan-worker Deployment (runs `nebula-scanner` binary).
+  # Disabled by default — in-process workers in the registry pod cover
+  # most use cases. Enable this to scale scans independently of the
+  # registry data plane. Requires scanner.enabled=true and a Postgres
+  # queue (both flip automatically when worker.enabled=true). The
+  # registry switches to enqueue-only so there are no double-claims.
+  worker:
+    enabled: false
+    replicas: 0                      # start at 0 so rollout is a no-op
+    workers: 2                       # worker goroutines per pod
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+    nodeSelector: {}
+    extraEnv: []
 
 ## -- Postgres (scanner metadata store) --
 ## In-chart singleton StatefulSet. Set enabled=false + point scanner at an

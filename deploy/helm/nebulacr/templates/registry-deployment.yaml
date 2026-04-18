@@ -167,11 +167,18 @@ spec:
             {{- end }}
             {{- if .Values.scanner.enabled }}
             # ── Scanner ────────────────────────────────────────────────
-            # The scanner runs in-process inside the registry — no extra
-            # Deployment. Workers dequeue scan jobs enqueued by manifest
-            # pushes and materialize results into Redis (1h TTL) + Postgres.
+            # When scanner.worker.enabled=false (default), workers run
+            # in-process here. When true, this pod switches to
+            # enqueue-only mode and a separate nebula-scanner Deployment
+            # dequeues from the `scan_jobs` Postgres table.
             - name: NEBULACR_SCANNER__ENABLED
               value: "true"
+            {{- if .Values.scanner.worker.enabled }}
+            - name: NEBULACR_SCANNER__QUEUE_BACKEND
+              value: "postgres"
+            - name: NEBULACR_SCANNER__ENQUEUE_ONLY
+              value: "true"
+            {{- end }}
             - name: NEBULACR_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
