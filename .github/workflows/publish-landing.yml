@@ -1,0 +1,64 @@
+name: Publish landing page to S3
+
+# Uploads docs/landing/** to s3://nebulacr-docs/landing/ on any main
+# push touching the landing content. Skips if nothing actually changed.
+#
+# Required repo secrets:
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY — IAM user with
+#     s3:PutObject / s3:PutObjectAcl on the nebulacr-docs bucket.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/landing/**"
+      - ".github/workflows/publish-landing.yml"
+  workflow_dispatch:
+    inputs:
+      cache_control:
+        description: "Cache-Control for uploaded objects"
+        required: false
+        default: "public, max-age=300"
+
+env:
+  AWS_REGION: eu-west-2
+  BUCKET: nebulacr-docs
+  PREFIX: landing
+
+jobs:
+  publish:
+    name: Sync landing/ to S3
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Single-object PUT for the index to set the correct content-type +
+      # cache-control; `sync` for any sibling assets (css, js, images)
+      # without overwriting unchanged objects.
+      - name: Upload index.html
+        run: |
+          aws s3 cp docs/landing/index.html \
+            "s3://${BUCKET}/${PREFIX}/index.html" \
+            --content-type "text/html; charset=utf-8" \
+            --cache-control "${{ github.event.inputs.cache_control || 'public, max-age=300' }}"
+
+      - name: Sync remaining assets
+        run: |
+          # Exclude index.html (already uploaded with tuned headers).
+          aws s3 sync docs/landing/ "s3://${BUCKET}/${PREFIX}/" \
+            --exclude "index.html" \
+            --delete \
+            --cache-control "${{ github.event.inputs.cache_control || 'public, max-age=300' }}"
+
+      - name: Report endpoint
+        run: |
+          echo "Object URL: https://${BUCKET}.s3.${AWS_REGION}.amazonaws.com/${PREFIX}/index.html"
+          echo "Website   : http://${BUCKET}.s3-website.${AWS_REGION}.amazonaws.com/${PREFIX}/"
