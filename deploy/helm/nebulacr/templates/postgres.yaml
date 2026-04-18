@@ -1,0 +1,125 @@
+{{- /*
+In-chart Postgres singleton for the scanner's persistent state (scan audit
+log, suppressions, image policy, ingest progress). Keep it lightweight —
+single replica, one PVC, fixed creds via Secret. Users wanting HA should
+point scanner.postgresUrl at an external DB and set postgres.enabled=false.
+*/ -}}
+{{- if .Values.postgres.enabled }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "nebulacr.postgres.secretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.postgres.labels" . | nindent 4 }}
+  # Keep the Secret across helm uninstalls so the PVC data stays usable.
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  username: {{ .Values.postgres.username | default "nebulacr" | b64enc }}
+  password: {{ include "nebulacr.postgres.password" . | b64enc }}
+  database: {{ .Values.postgres.database | default "nebulacr" | b64enc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nebulacr.postgres.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.postgres.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    {{- include "nebulacr.postgres.selectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nebulacr.postgres.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.postgres.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "nebulacr.postgres.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nebulacr.postgres.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nebulacr.postgres.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.postgres.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nebulacr.postgres.secretName" . }}
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nebulacr.postgres.secretName" . }}
+                  key: password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nebulacr.postgres.secretName" . }}
+                  key: database
+            # Force data under a subPath so the bind-mounted volume can be
+            # re-used across helm upgrades without the initdb check firing.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "nebulacr.postgres.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.postgres.persistence.accessMode | default "ReadWriteOnce" }}
+        {{- if .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ .Values.postgres.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size | default "50Gi" }}
+{{- end }}

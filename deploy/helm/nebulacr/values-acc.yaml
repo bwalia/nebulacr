@@ -114,6 +114,25 @@ multiRegion:
       internalEndpoint: "https://acc-nebulacr-mirror.diytaxreturn.co.uk"
       isPrimary: false
       priority: 2
+scanner:
+  enabled: true
+  vulndb: osv
+  workers: 2
+  ingest:
+    enabled: false
+  ai:
+    enabled: true
+    endpoint: "https://ollama.workstation.co.uk/"
+    model: "qwen2.5-coder:7b"
+postgres:
+  enabled: true
+  persistence:
+    size: 50Gi
+    storageClass: local-path
+  nodeSelector:
+    kubernetes.io/hostname: debian001
+redis:
+  enabled: true
 storage:
   backend: filesystem
   filesystem:

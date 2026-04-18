@@ -139,6 +139,65 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             {{- end }}
+            {{- if .Values.scanner.enabled }}
+            # ── Scanner ────────────────────────────────────────────────
+            # The scanner runs in-process inside the registry — no extra
+            # Deployment. Workers dequeue scan jobs enqueued by manifest
+            # pushes and materialize results into Redis (1h TTL) + Postgres.
+            - name: NEBULACR_SCANNER__ENABLED
+              value: "true"
+            - name: NEBULACR_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nebulacr.postgres.secretName" . }}
+                  key: password
+            - name: NEBULACR_SCANNER__POSTGRES_URL
+              value: {{ include "nebulacr.scanner.postgresUrl" . | quote }}
+            - name: NEBULACR_SCANNER__REDIS_URL
+              value: {{ include "nebulacr.scanner.redisUrl" . | quote }}
+            - name: NEBULACR_SCANNER__VULNDB
+              value: {{ .Values.scanner.vulndb | default "osv" | quote }}
+            - name: NEBULACR_SCANNER__WORKERS
+              value: {{ .Values.scanner.workers | default 2 | quote }}
+            - name: NEBULACR_SCANNER__INGEST_ENABLED
+              value: {{ .Values.scanner.ingest.enabled | default false | quote }}
+            {{- if .Values.scanner.ingest.intervalSecs }}
+            - name: NEBULACR_SCANNER__INGEST_INTERVAL_SECS
+              value: {{ .Values.scanner.ingest.intervalSecs | quote }}
+            {{- end }}
+            {{- if .Values.scanner.ingest.nvdEnabled }}
+            - name: NEBULACR_SCANNER__NVD_ENABLED
+              value: "true"
+            {{- if .Values.scanner.ingest.nvdApiKeySecret }}
+            - name: NEBULACR_SCANNER__NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.scanner.ingest.nvdApiKeySecret.name }}
+                  key: {{ .Values.scanner.ingest.nvdApiKeySecret.key | default "api-key" }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.scanner.ingest.ghsaEnabled }}
+            - name: NEBULACR_SCANNER__GHSA_ENABLED
+              value: "true"
+            {{- if .Values.scanner.ingest.ghsaTokenSecret }}
+            - name: NEBULACR_SCANNER__GHSA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.scanner.ingest.ghsaTokenSecret.name }}
+                  key: {{ .Values.scanner.ingest.ghsaTokenSecret.key | default "token" }}
+            {{- end }}
+            {{- end }}
+            - name: NEBULACR_SCANNER__AI_ENABLED
+              value: {{ .Values.scanner.ai.enabled | default false | quote }}
+            {{- if .Values.scanner.ai.enabled }}
+            - name: NEBULACR_SCANNER__AI_ENDPOINT
+              value: {{ .Values.scanner.ai.endpoint | quote }}
+            {{- if .Values.scanner.ai.model }}
+            - name: NEBULACR_SCANNER__AI_MODEL
+              value: {{ .Values.scanner.ai.model | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.registry.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -166,6 +166,81 @@ Fails the render if no signing key source is configured in production.
 {{- end }}
 
 {{/*
+Postgres (scanner metadata store).
+*/}}
+{{- define "nebulacr.postgres.fullname" -}}
+{{- printf "%s-postgres" (include "nebulacr.fullname" .) -}}
+{{- end }}
+
+{{- define "nebulacr.postgres.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "nebulacr.name" . }}-postgres
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: postgres
+{{- end }}
+
+{{- define "nebulacr.postgres.labels" -}}
+{{ include "nebulacr.labels" . }}
+{{ include "nebulacr.postgres.selectorLabels" . }}
+{{- end }}
+
+{{- define "nebulacr.postgres.secretName" -}}
+{{- if .Values.postgres.existingSecret }}
+{{- .Values.postgres.existingSecret }}
+{{- else }}
+{{- printf "%s-postgres" (include "nebulacr.fullname" .) -}}
+{{- end }}
+{{- end }}
+
+{{/*
+Resolve a postgres password. Priority: user-supplied → existing in-cluster
+secret → fresh 24-char random. The lookup preserves the generated password
+across helm upgrades so the registry doesn't break after re-render.
+*/}}
+{{- define "nebulacr.postgres.password" -}}
+{{- if .Values.postgres.password -}}
+{{- .Values.postgres.password -}}
+{{- else -}}
+  {{- $secretName := printf "%s-postgres" (include "nebulacr.fullname" .) -}}
+  {{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+  {{- if and $existing $existing.data (index $existing.data "password") -}}
+    {{- index $existing.data "password" | b64dec -}}
+  {{- else -}}
+    {{- randAlphaNum 24 -}}
+  {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "nebulacr.scanner.postgresUrl" -}}
+{{- $user := .Values.postgres.username | default "nebulacr" -}}
+{{- $db := .Values.postgres.database | default "nebulacr" -}}
+{{- $host := printf "%s.%s.svc.cluster.local" (include "nebulacr.postgres.fullname" .) .Release.Namespace -}}
+{{- printf "postgres://%s:$(NEBULACR_POSTGRES_PASSWORD)@%s:5432/%s?sslmode=disable" $user $host $db -}}
+{{- end }}
+
+{{/*
+Redis (scanner ephemeral result cache).
+*/}}
+{{- define "nebulacr.redis.fullname" -}}
+{{- printf "%s-redis" (include "nebulacr.fullname" .) -}}
+{{- end }}
+
+{{- define "nebulacr.redis.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "nebulacr.name" . }}-redis
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: redis
+{{- end }}
+
+{{- define "nebulacr.redis.labels" -}}
+{{ include "nebulacr.labels" . }}
+{{ include "nebulacr.redis.selectorLabels" . }}
+{{- end }}
+
+{{- define "nebulacr.scanner.redisUrl" -}}
+{{- $host := printf "%s.%s.svc.cluster.local" (include "nebulacr.redis.fullname" .) .Release.Namespace -}}
+{{- printf "redis://%s:6379" $host -}}
+{{- end }}
+
+{{/*
 Upstream registry secret name
 */}}
 {{- define "nebulacr.upstream.secretName" -}}

@@ -422,6 +422,76 @@ multiRegion:
   #     priority: 2
   regions: []
 
+## -- Scanner (CVE scanning — runs in-process inside the registry) --
+## When enabled, every manifest push enqueues a scan; workers materialize
+## results to Redis (1h TTL) and Postgres (audit log + suppressions). The
+## endpoint `/v2/scan/live/{digest}` reads from those stores.
+scanner:
+  enabled: false
+  # osv = per-scan HTTP lookups against OSV.dev (zero infra). Use "nebula"
+  # for a local DB populated by the ingester (needs NVD / GHSA tokens).
+  vulndb: osv
+  workers: 2
+  ingest:
+    enabled: false
+    intervalSecs: 21600    # 6h
+    nvdEnabled: false
+    # nvdApiKeySecret: { name: nebulacr-ingest, key: nvd-api-key }
+    ghsaEnabled: false
+    # ghsaTokenSecret: { name: nebulacr-ingest, key: ghsa-token }
+  ai:
+    enabled: false
+    # Ollama (or compatible) endpoint used when ai.enabled=true.
+    endpoint: "http://127.0.0.1:11434"
+    model: "qwen2.5-coder:7b"
+
+## -- Postgres (scanner metadata store) --
+## In-chart singleton StatefulSet. Set enabled=false + point scanner at an
+## external URL for HA deployments. Password is auto-generated on first
+## install and preserved across upgrades via `lookup` + a kept Secret.
+postgres:
+  enabled: false
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  username: nebulacr
+  database: nebulacr
+  # Leave empty to auto-generate (stable across helm upgrades). Set to
+  # override (e.g. when reusing an existing Secret manually).
+  password: ""
+  # existingSecret: ""  # must expose keys: username, password, database
+  persistence:
+    size: 50Gi
+    accessMode: ReadWriteOnce
+    storageClass: ""     # e.g. "local-path"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  nodeSelector: {}
+
+## -- Redis (scanner ephemeral result cache) --
+redis:
+  enabled: false
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  maxmemory: "512mb"
+  maxmemoryPolicy: "allkeys-lru"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+  nodeSelector: {}
+
 ## -- Network policy --
 networkPolicy:
   enabled: false
