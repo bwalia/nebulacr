@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="NebulaCR — Cloud-Native OCI Container Registry. Enterprise-grade, multi-region, Rust-powered." />
+  <meta name="theme-color" content="#0a0a1a" />
+  <title>NebulaCR — Cloud-Native OCI Container Registry</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0a0a1a;
+      --surface: #12122a;
+      --surface-2: #1a1a35;
+      --card: #222245;
+      --border: rgba(255,255,255,0.08);
+      --border-hover: rgba(56,189,248,0.3);
+      --text: #e0e0ff;
+      --text-secondary: #8888aa;
+      --text-muted: #666688;
+      --cyan: #38bdf8;
+      --cyan-light: #7dd3fc;
+      --blue: #3b82f6;
+      --green: #4ade80;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --purple: #a78bfa;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; font-size: 18px; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg); color: var(--text);
+      -webkit-font-smoothing: antialiased; line-height: 1.6;
+    }
+    a { color: var(--cyan); text-decoration: none; transition: color 0.2s; }
+    a:hover { color: var(--cyan-light); }
+    code, .mono { font-family: 'JetBrains Mono', monospace; }
+    img { max-width: 100%; display: block; }
+
+    /* ===== NAV ===== */
+    .nav {
+      position: sticky; top: 0; z-index: 50;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 32px; background: rgba(10,10,26,0.85);
+      backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .nav-logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.2rem; letter-spacing: 1px; }
+    .nav-logo-icon { color: var(--cyan); font-size: 1.5rem; }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a { color: var(--text-secondary); font-size: 0.8rem; font-weight: 500; letter-spacing: 0.5px; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta {
+      padding: 8px 20px; background: var(--cyan); color: #0a0a1a !important;
+      border-radius: 6px; font-weight: 600; font-size: 0.8rem; letter-spacing: 0.5px;
+      transition: filter 0.2s;
+    }
+    .nav-cta:hover { filter: brightness(1.2); color: #0a0a1a; }
+    .nav-mobile { display: none; background: none; border: none; color: var(--text); font-size: 1.5rem; cursor: pointer; }
+
+    /* ===== HERO ===== */
+    .hero {
+      position: relative; padding: 100px 32px 80px; text-align: center;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(ellipse 60% 50% at 50% 20%, rgba(56,189,248,0.08) 0%, transparent 70%),
+                  radial-gradient(ellipse 40% 40% at 30% 60%, rgba(167,139,250,0.05) 0%, transparent 60%),
+                  radial-gradient(ellipse 40% 40% at 70% 60%, rgba(74,222,128,0.03) 0%, transparent 60%);
+      pointer-events: none;
+    }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 16px; border-radius: 20px;
+      background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.2);
+      color: var(--cyan); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.5px;
+      margin-bottom: 24px;
+    }
+    .hero-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
+    .hero h1 {
+      font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 800; line-height: 1.15;
+      background: linear-gradient(135deg, var(--cyan), var(--purple));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text; margin-bottom: 20px; position: relative;
+    }
+    .hero-sub {
+      font-size: clamp(0.9rem, 2vw, 1.15rem); color: var(--text-secondary);
+      max-width: 680px; margin: 0 auto 36px; line-height: 1.7; position: relative;
+    }
+    .hero-buttons { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; position: relative; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 14px 28px; border-radius: 8px; font-weight: 600;
+      font-size: 0.85rem; letter-spacing: 0.5px; transition: all 0.2s; border: none; cursor: pointer;
+    }
+    .btn-primary { background: var(--cyan); color: #0a0a1a; }
+    .btn-primary:hover { filter: brightness(1.15); transform: translateY(-1px); color: #0a0a1a; }
+    .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--border-hover); transform: translateY(-1px); color: var(--text); }
+    .hero-trust {
+      display: flex; gap: 32px; justify-content: center; flex-wrap: wrap;
+      margin-top: 48px; position: relative;
+    }
+    .trust-item {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 0.75rem; color: var(--text-secondary); font-weight: 500;
+    }
+    .trust-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+    /* ===== SECTIONS ===== */
+    .section { padding: 80px 32px; max-width: 1200px; margin: 0 auto; }
+    .section-alt { background: var(--surface); }
+    .section-header { text-align: center; margin-bottom: 48px; }
+    .section-header h2 { font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 800; margin-bottom: 12px; }
+    .section-header p { color: var(--text-secondary); max-width: 600px; margin: 0 auto; font-size: 0.9rem; }
+    .section-divider { width: 48px; height: 3px; background: var(--cyan); border-radius: 2px; margin: 0 auto 16px; }
+
+    /* ===== HIGHLIGHTS GRID ===== */
+    .highlights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .highlight-card {
+      padding: 24px; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius); transition: all 0.2s; text-align: center;
+    }
+    .highlight-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+    .highlight-icon { font-size: 2rem; margin-bottom: 12px; }
+    .highlight-title { font-size: 0.85rem; font-weight: 700; margin-bottom: 6px; }
+    .highlight-desc { font-size: 0.75rem; color: var(--text-secondary); line-height: 1.5; }
+
+    /* ===== FEATURES ===== */
+    .features-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+    .feature-card {
+      padding: 28px; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius); transition: all 0.2s;
+    }
+    .feature-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+    .feature-icon-box {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: rgba(56,189,248,0.1); display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem; margin-bottom: 16px;
+    }
+    .feature-title { font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
+    .feature-desc { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6; }
+    .feature-list { list-style: none; margin-top: 12px; }
+    .feature-list li {
+      font-size: 0.78rem; color: var(--text-secondary); padding: 4px 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .feature-list li::before { content: '\2713'; color: var(--green); font-weight: 700; font-size: 0.7rem; }
+
+    /* ===== HOW IT WORKS ===== */
+    .steps-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; counter-reset: step; }
+    .step-card {
+      padding: 28px; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius); text-align: center; counter-increment: step;
+    }
+    .step-card::before {
+      content: counter(step);
+      display: flex; align-items: center; justify-content: center;
+      width: 36px; height: 36px; border-radius: 50%;
+      background: var(--cyan); color: #0a0a1a; font-weight: 700; font-size: 0.85rem;
+      margin: 0 auto 16px;
+    }
+    .step-title { font-size: 0.9rem; font-weight: 700; margin-bottom: 8px; }
+    .step-desc { font-size: 0.78rem; color: var(--text-secondary); line-height: 1.5; }
+
+    /* ===== DASHBOARD PREVIEW ===== */
+    .preview-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+    .preview-card {
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+      overflow: hidden; transition: all 0.2s;
+    }
+    .preview-card:hover { border-color: var(--border-hover); }
+    .preview-img {
+      width: 100%; aspect-ratio: 16/9; background: var(--card);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 3rem; color: var(--text-secondary); opacity: 0.3;
+    }
+    .preview-caption {
+      padding: 16px; font-size: 0.8rem; font-weight: 600;
+      border-top: 1px solid var(--border);
+    }
+    .preview-caption-desc { font-size: 0.72rem; color: var(--text-secondary); margin-top: 4px; }
+
+    /* ===== INSTALL TABS ===== */
+    .install-tabs { display: flex; gap: 4px; margin-bottom: 20px; justify-content: center; }
+    .install-tab {
+      padding: 10px 22px; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 8px 8px 0 0; cursor: pointer; font-size: 0.8rem; font-weight: 600;
+      color: var(--text-secondary); transition: all 0.2s; font-family: inherit; border-bottom: none;
+    }
+    .install-tab.active { background: var(--card); color: var(--cyan); border-color: var(--border-hover); }
+    .install-content {
+      display: none; padding: 28px; background: var(--card);
+      border: 1px solid var(--border); border-radius: 0 var(--radius) var(--radius) var(--radius);
+    }
+    .install-content.active { display: block; }
+    .install-content h4 { font-size: 0.85rem; margin-bottom: 12px; color: var(--cyan); }
+    .code-block {
+      padding: 16px 20px; background: #0a0a14; border: 1px solid var(--border);
+      border-radius: var(--radius-sm); font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem; line-height: 1.7; color: var(--green); overflow-x: auto;
+      white-space: pre; margin-bottom: 16px;
+    }
+    .code-comment { color: var(--text-muted); }
+
+    /* ===== ENTERPRISE SECTION ===== */
+    .enterprise-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+    .enterprise-card {
+      padding: 28px; border-radius: var(--radius); border: 1px solid var(--border);
+      background: var(--surface-2); transition: all 0.2s;
+    }
+    .enterprise-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+    .enterprise-card-icon { font-size: 1.8rem; margin-bottom: 12px; }
+    .enterprise-card-title { font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
+    .enterprise-card-desc { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6; }
+
+    /* ===== CTA ===== */
+    .cta-section {
+      position: relative; padding: 80px 32px; text-align: center;
+      background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
+      border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .cta-section::before {
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(ellipse 50% 60% at 50% 50%, rgba(56,189,248,0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .cta-section h2 { font-size: clamp(1.4rem, 3vw, 2rem); font-weight: 800; margin-bottom: 16px; position: relative; }
+    .cta-section p { color: var(--text-secondary); max-width: 500px; margin: 0 auto 28px; font-size: 0.9rem; position: relative; }
+
+    /* ===== ARCH DIAGRAM ===== */
+    .arch-container {
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 24px; margin-top: 20px; overflow-x: auto;
+    }
+    .arch-container pre {
+      font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;
+      color: var(--text-secondary); line-height: 1.5; white-space: pre;
+    }
+
+    /* ===== FOOTER ===== */
+    .footer {
+      padding: 32px; text-align: center;
+      border-top: 1px solid var(--border); color: var(--text-secondary); font-size: 0.75rem;
+    }
+    .footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 12px; }
+
+    /* ===== TABLE ===== */
+    .config-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.78rem; }
+    .config-table th {
+      text-align: left; padding: 10px 14px; background: var(--card);
+      border: 1px solid var(--border); color: var(--text-secondary);
+      font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; font-size: 0.7rem;
+    }
+    .config-table td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
+    .config-table tr:hover td { background: rgba(56,189,248,0.03); }
+
+    /* ===== RESPONSIVE ===== */
+    @media (max-width: 1024px) {
+      .highlights { grid-template-columns: repeat(2, 1fr); }
+      .steps-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .nav-mobile { display: block; }
+      .highlights { grid-template-columns: 1fr; }
+      .features-grid { grid-template-columns: 1fr; }
+      .steps-grid { grid-template-columns: 1fr; }
+      .preview-grid { grid-template-columns: 1fr; }
+      .enterprise-grid { grid-template-columns: 1fr; }
+      .hero-buttons { flex-direction: column; align-items: center; }
+      .hero-trust { flex-direction: column; align-items: center; }
+      .section { padding: 48px 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ===== NAVIGATION ===== -->
+<nav class="nav">
+  <div class="nav-logo">
+    <span class="nav-logo-icon">&#x25C8;</span> NebulaCR
+  </div>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#enterprise">Enterprise</a>
+    <a href="#install">Install</a>
+    <a href="#architecture">Architecture</a>
+    <a href="api.html">API Docs</a>
+    <a href="https://github.com/bwalia/nebulacr" class="nav-cta">GitHub</a>
+  </div>
+  <button class="nav-mobile" onclick="document.querySelector('.nav-links').style.display=document.querySelector('.nav-links').style.display==='flex'?'none':'flex'">&#9776;</button>
+</nav>
+
+<!-- ===== HERO ===== -->
+<section class="hero">
+  <div class="hero-badge">
+    <span class="hero-badge-dot"></span>
+    Open Source &middot; OCI-Compliant &middot; Rust-Powered
+  </div>
+  <h1>Your Images.<br>Your Infrastructure.<br>Zero Compromise.</h1>
+  <p class="hero-sub">
+    NebulaCR is a cloud-native OCI container registry built in Rust. Multi-region replication,
+    enterprise AD/OIDC authentication, pull-through caching, and a real-time dashboard &mdash;
+    all in a single binary.
+  </p>
+  <div class="hero-buttons">
+    <a href="#install" class="btn btn-primary">Get Started</a>
+    <a href="https://github.com/bwalia/nebulacr" class="btn btn-secondary">View on GitHub</a>
+  </div>
+  <div class="hero-trust">
+    <span class="trust-item"><span class="trust-dot" style="background:var(--green)"></span> OCI Distribution Spec</span>
+    <span class="trust-item"><span class="trust-dot" style="background:var(--cyan)"></span> Multi-Region Replication</span>
+    <span class="trust-item"><span class="trust-dot" style="background:var(--purple)"></span> Enterprise SSO/OIDC</span>
+    <span class="trust-item"><span class="trust-dot" style="background:var(--amber)"></span> Built in Rust</span>
+  </div>
+</section>
+
+<!-- ===== HIGHLIGHTS ===== -->
+<section class="section">
+  <div class="highlights">
+    <div class="highlight-card">
+      <div class="highlight-icon">&#x1F4E6;</div>
+      <div class="highlight-title">OCI Registry</div>
+      <div class="highlight-desc">Full OCI Distribution Spec compliance. Push, pull, and manage container images with Docker, Podman, or any OCI client.</div>
+    </div>
+    <div class="highlight-card">
+      <div class="highlight-icon">&#x1F30D;</div>
+      <div class="highlight-title">Multi-Region</div>
+      <div class="highlight-desc">Async replication across regions with automatic failover, health checks, and circuit breaker protection.</div>
+    </div>
+    <div class="highlight-card">
+      <div class="highlight-icon">&#x1F512;</div>
+      <div class="highlight-title">Enterprise Auth</div>
+      <div class="highlight-desc">OIDC/AD SSO, group-to-role mapping, robot accounts, short-lived tokens, and zero static credentials.</div>
+    </div>
+    <div class="highlight-card">
+      <div class="highlight-icon">&#x26A1;</div>
+      <div class="highlight-title">Rust Performance</div>
+      <div class="highlight-desc">Single binary, minimal memory footprint, async I/O with Tokio. Handles thousands of concurrent pulls.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== FEATURES ===== -->
+<section class="section-alt" id="features">
+  <div class="section" style="padding-top:60px;padding-bottom:60px;">
+    <div class="section-header">
+      <div class="section-divider"></div>
+      <h2>Everything You Need for Container Images</h2>
+      <p>From development to production, NebulaCR covers the entire container image lifecycle.</p>
+    </div>
+    <div class="features-grid">
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F4E6;</div>
+        <div class="feature-title">OCI Distribution API</div>
+        <div class="feature-desc">
+          Full implementation of the OCI Distribution Specification. Compatible with Docker, Podman, Buildah, containerd, and any OCI-compliant client.
+        </div>
+        <ul class="feature-list">
+          <li>Manifest push/pull/delete (v2 schema)</li>
+          <li>Chunked and monolithic blob uploads</li>
+          <li>Multi-tenant with tenant/project/repo hierarchy</li>
+          <li>Tag listing and catalog API</li>
+          <li>Content-addressable storage by digest</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F30D;</div>
+        <div class="feature-title">Multi-Region Replication</div>
+        <div class="feature-desc">
+          Async replication of manifests and blobs across regions. Circuit breaker and retry logic ensure resilience during network partitions.
+        </div>
+        <ul class="feature-list">
+          <li>Async event-driven replication</li>
+          <li>Circuit breaker with configurable thresholds</li>
+          <li>Exponential backoff with jitter</li>
+          <li>Health check loop with failover</li>
+          <li>Read failover to healthy regions</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F512;</div>
+        <div class="feature-title">Enterprise Authentication</div>
+        <div class="feature-desc">
+          OIDC Authorization Code flow with PKCE for Azure AD, Okta, and Google. Group-based role mapping, robot accounts, and token rotation.
+        </div>
+        <ul class="feature-list">
+          <li>OIDC/AD SSO with group-to-role mapping</li>
+          <li>CI/CD OIDC federation (GitHub, GitLab, K8s)</li>
+          <li>Robot accounts for machine identity</li>
+          <li>Refresh tokens with revocation</li>
+          <li>Short-lived JWT tokens (5 min default)</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F50D;</div>
+        <div class="feature-title">Pull-Through Cache</div>
+        <div class="feature-desc">
+          Mirror upstream registries (Docker Hub, GHCR, Quay) with automatic caching. Reduce bandwidth costs and improve pull latency.
+        </div>
+        <ul class="feature-list">
+          <li>Configurable upstream registries</li>
+          <li>Automatic manifest and blob caching</li>
+          <li>TTL-based cache invalidation</li>
+          <li>Transparent to Docker clients</li>
+          <li>Authenticated upstream support</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F4CA;</div>
+        <div class="feature-title">Real-Time Dashboard</div>
+        <div class="feature-desc">
+          Embedded web dashboard with live metrics. Browse images, search repositories, monitor replication health, and track push/pull activity.
+        </div>
+        <ul class="feature-list">
+          <li>Image browser with wildcard search</li>
+          <li>CPU, RAM, disk usage monitoring</li>
+          <li>HA region health status</li>
+          <li>Audit log with filtering</li>
+          <li>Identity and access management</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F6E1;</div>
+        <div class="feature-title">Security &amp; Compliance</div>
+        <div class="feature-desc">
+          JWT-based auth with RS256/EdDSA signing. Rate limiting, network policies, audit logging, and Vault integration for key management.
+        </div>
+        <ul class="feature-list">
+          <li>HashiCorp Vault integration (Transit + KV)</li>
+          <li>Per-tenant rate limiting</li>
+          <li>Kubernetes NetworkPolicy templates</li>
+          <li>Full audit trail (push/pull/delete)</li>
+          <li>Webhook notifications for events</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x2638;</div>
+        <div class="feature-title">Kubernetes Native</div>
+        <div class="feature-desc">
+          Helm chart with CRDs for Tenant, Project, AccessPolicy, and TokenPolicy. Horizontal autoscaling, pod anti-affinity, and service monitors.
+        </div>
+        <ul class="feature-list">
+          <li>Helm chart with comprehensive values</li>
+          <li>Custom Resource Definitions (CRDs)</li>
+          <li>HPA for registry and auth pods</li>
+          <li>Ingress with TLS termination</li>
+          <li>ServiceMonitor for Prometheus</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F4BE;</div>
+        <div class="feature-title">Flexible Storage</div>
+        <div class="feature-desc">
+          Store images on local filesystem, Amazon S3, Google Cloud Storage, or Azure Blob Storage. Object store abstraction via the object_store crate.
+        </div>
+        <ul class="feature-list">
+          <li>Filesystem with persistent volumes</li>
+          <li>Amazon S3 and S3-compatible (MinIO)</li>
+          <li>Google Cloud Storage</li>
+          <li>Azure Blob Storage</li>
+          <li>Configurable storage backends per deployment</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===== DASHBOARD ===== -->
+<section class="section" id="dashboard">
+  <div class="section-header">
+    <div class="section-divider"></div>
+    <h2>Built-In Dashboard</h2>
+    <p>A dark-themed operations dashboard with real-time metrics, image browsing, and identity management &mdash; embedded in the registry binary.</p>
+  </div>
+  <div class="preview-grid">
+    <div class="preview-card">
+      <div class="preview-img">&#x1F4CA;</div>
+      <div class="preview-caption">
+        System Metrics
+        <div class="preview-caption-desc">CPU, RAM, disk usage with color-coded thresholds. HA region health with latency and failure counts.</div>
+      </div>
+    </div>
+    <div class="preview-card">
+      <div class="preview-img">&#x1F4E6;</div>
+      <div class="preview-caption">
+        Image Browser
+        <div class="preview-caption-desc">Search and browse all repositories with wildcard support. View tags, tag counts, and repository details.</div>
+      </div>
+    </div>
+    <div class="preview-card">
+      <div class="preview-img">&#x1F4DD;</div>
+      <div class="preview-caption">
+        Activity &amp; Audit Log
+        <div class="preview-caption-desc">Real-time event feed: pushes, pulls, deletes. Filter by event type, user, or repository.</div>
+      </div>
+    </div>
+    <div class="preview-card">
+      <div class="preview-img">&#x1F465;</div>
+      <div class="preview-caption">
+        Identity &amp; Access
+        <div class="preview-caption-desc">Users, groups, and service accounts. View SSO logins, group-role mappings, and robot account status.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== ENTERPRISE ===== -->
+<section class="section-alt" id="enterprise">
+  <div class="section" style="padding-top:60px;padding-bottom:60px;">
+    <div class="section-header">
+      <div class="section-divider"></div>
+      <h2>Enterprise-Ready Identity</h2>
+      <p>Zero static credentials. Seamless integration with your existing identity infrastructure.</p>
+    </div>
+    <div class="enterprise-grid">
+
+      <div class="enterprise-card">
+        <div class="enterprise-card-icon">&#x1F3E2;</div>
+        <div class="enterprise-card-title">Active Directory / Azure AD</div>
+        <div class="enterprise-card-desc">
+          OIDC Authorization Code flow with PKCE. Login with "Sign in with Azure AD" or any OIDC provider. Auto-provision users on first login with group sync.
+        </div>
+      </div>
+
+      <div class="enterprise-card">
+        <div class="enterprise-card-icon">&#x1F465;</div>
+        <div class="enterprise-card-title">Group-Based Access Control</div>
+        <div class="enterprise-card-desc">
+          Map AD groups to NebulaCR roles: nebulacr-admins to Admin, nebulacr-devs to Maintainer, nebulacr-viewers to Reader. Per-tenant and per-project granularity.
+        </div>
+      </div>
+
+      <div class="enterprise-card">
+        <div class="enterprise-card-icon">&#x1F916;</div>
+        <div class="enterprise-card-title">Machine Identity</div>
+        <div class="enterprise-card-desc">
+          CI/CD OIDC federation for GitHub Actions, GitLab CI, and Kubernetes service accounts. No static secrets. Short-lived, scoped tokens auto-expire in 5-15 minutes.
+        </div>
+      </div>
+
+      <div class="enterprise-card">
+        <div class="enterprise-card-icon">&#x1F504;</div>
+        <div class="enterprise-card-title">Token Rotation &amp; Revocation</div>
+        <div class="enterprise-card-desc">
+          Refresh token flow for long-lived sessions. Instant token revocation via API. Robot accounts with configurable expiry for automation pipelines.
+        </div>
+      </div>
+
+      <div class="enterprise-card" style="grid-column: span 2;">
+        <div class="enterprise-card-icon">&#x1F4CB;</div>
+        <div class="enterprise-card-title">SCIM 2.0 Provisioning &mdash; Automated User Lifecycle</div>
+        <div class="enterprise-card-desc">
+          NebulaCR implements the SCIM 2.0 protocol (RFC 7644), enabling Azure AD, Okta, and OneLogin to automatically provision and deprovision users. When someone joins your org, SCIM pre-creates their registry access instantly &mdash; no first-login delay. When they leave, access is revoked in seconds, not minutes. Group membership changes sync immediately without requiring a new login.
+        </div>
+        <table class="config-table" style="margin-top:16px;">
+          <tr><th>Scenario</th><th>Without SCIM</th><th>With SCIM</th></tr>
+          <tr><td>New hire</td><td style="color:var(--amber);">Must login first</td><td style="color:var(--green);">Pre-provisioned instantly</td></tr>
+          <tr><td>Team change</td><td style="color:var(--amber);">Next login syncs</td><td style="color:var(--green);">Immediate role update</td></tr>
+          <tr><td>Offboarding</td><td style="color:var(--red);">Token expires in 5 min</td><td style="color:var(--green);">Instant revocation</td></tr>
+          <tr><td>Audit "who has access?"</td><td style="color:var(--amber);">Only logged-in users</td><td style="color:var(--green);">All entitled users</td></tr>
+          <tr><td>500+ developers</td><td style="color:var(--amber);">Works but blind spots</td><td style="color:var(--green);">Full visibility</td></tr>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===== HOW IT WORKS ===== -->
+<section class="section" id="how-it-works">
+  <div class="section-header">
+    <div class="section-divider"></div>
+    <h2>How It Works</h2>
+    <p>From deployment to pushing your first image in four steps.</p>
+  </div>
+  <div class="steps-grid">
+    <div class="step-card">
+      <div class="step-title">Deploy Registry</div>
+      <div class="step-desc">Deploy NebulaCR via Helm chart to Kubernetes, Docker Compose, or as a native binary on bare metal. Single binary, no runtime dependencies.</div>
+    </div>
+    <div class="step-card">
+      <div class="step-title">Configure Auth</div>
+      <div class="step-desc">Connect your OIDC provider (Azure AD, Okta, Google). Map AD groups to roles. Enable CI/CD OIDC federation for GitHub Actions or GitLab.</div>
+    </div>
+    <div class="step-card">
+      <div class="step-title">Push Images</div>
+      <div class="step-desc">Login with <code>docker login</code> using SSO or robot account credentials. Push images to your multi-tenant registry with automatic replication.</div>
+    </div>
+    <div class="step-card">
+      <div class="step-title">Monitor &amp; Scale</div>
+      <div class="step-desc">Use the built-in dashboard to monitor health, browse images, and manage access. Prometheus metrics for alerting. Scale with HPA.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== INSTALLATION ===== -->
+<section class="section-alt" id="install">
+  <div class="section" style="padding-top:60px;padding-bottom:60px;">
+    <div class="section-header">
+      <div class="section-divider"></div>
+      <h2>Installation</h2>
+      <p>Three ways to get started with NebulaCR.</p>
+    </div>
+
+    <div class="install-tabs">
+      <button class="install-tab active" onclick="switchTab('helm')">Kubernetes / Helm</button>
+      <button class="install-tab" onclick="switchTab('docker')">Docker</button>
+      <button class="install-tab" onclick="switchTab('source')">Build from Source</button>
+    </div>
+
+    <div class="install-content active" id="tab-helm">
+      <h4>Deploy to Kubernetes with Helm</h4>
+<div class="code-block"><span class="code-comment"># Install NebulaCR</span>
+helm install nebulacr deploy/helm/nebulacr \
+  -n nebulacr --create-namespace \
+  -f values-production.yaml
+
+<span class="code-comment"># Verify</span>
+kubectl -n nebulacr get pods
+curl https://registry.example.com/health
+
+<span class="code-comment"># Push your first image</span>
+docker login registry.example.com
+docker push registry.example.com/myteam/myapp:latest
+
+<span class="code-comment"># Open dashboard</span>
+open https://registry.example.com/dashboard</div>
+    </div>
+
+    <div class="install-content" id="tab-docker">
+      <h4>Run with Docker</h4>
+<div class="code-block"><span class="code-comment"># Pull and run NebulaCR</span>
+docker run -d --name nebulacr \
+  -p 5000:5000 -p 5001:5001 \
+  -v nebulacr-data:/var/lib/nebulacr/data \
+  ghcr.io/bwalia/nebulacr:latest
+
+<span class="code-comment"># Push an image</span>
+docker tag myapp:latest localhost:5000/demo/default/myapp:latest
+docker push localhost:5000/demo/default/myapp:latest
+
+<span class="code-comment"># Open dashboard</span>
+open http://localhost:5000/dashboard</div>
+    </div>
+
+    <div class="install-content" id="tab-source">
+      <h4>Build from Source (Rust 1.80+)</h4>
+<div class="code-block"><span class="code-comment"># Clone and build</span>
+git clone https://github.com/bwalia/nebulacr.git
+cd nebulacr
+cargo build --release
+
+<span class="code-comment"># Generate JWT keys</span>
+openssl genrsa -out private.pem 2048
+openssl rsa -in private.pem -pubout -out public.pem
+
+<span class="code-comment"># Run the registry</span>
+./target/release/nebula-registry --config=config.yaml
+
+<span class="code-comment"># Run the auth service</span>
+./target/release/nebula-auth --config=config.yaml</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== ARCHITECTURE ===== -->
+<section class="section" id="architecture">
+  <div class="section-header">
+    <div class="section-divider"></div>
+    <h2>Architecture</h2>
+    <p>NebulaCR is composed of modular Rust crates, each handling a specific concern.</p>
+  </div>
+  <div class="arch-container">
+<pre>
+                          Docker / Podman / containerd
+                                    |
+                         OCI Distribution API (HTTPS)
+                                    |
+                    +---------------+----------------+
+                    |                                |
+              nebula-registry (:5000)          nebula-auth (:5001)
+              /    |     |     \                /    |    \
+         Manifests Blobs Tags Dashboard    OIDC  JWT  Robot
+            |       |     |      |          |     |    Accounts
+         Storage  Audit  Webhook Mirror   Vault  JWKS  CI/CD
+            |                    |                      OIDC
+      +-----+------+     +------+------+
+      | filesystem | ... | S3 / GCS   |
+      +------------+     +------------+
+
+              nebula-replication
+              /        |        \
+         Events    Circuit     Failover
+                   Breaker     Manager
+                      |
+            +----+----+----+
+            |    |    |    |
+          Region1  Region2  Region3  ...
+
+   Metrics: Prometheus at :9090/metrics
+   Dashboard: embedded at :5000/dashboard
+</pre>
+  </div>
+
+  <div style="margin-top:32px;">
+    <div class="section-header" style="margin-bottom:16px;"><h2 style="font-size:1.1rem;">API Endpoints</h2></div>
+    <table class="config-table">
+      <tr><th>Endpoint</th><th>Description</th></tr>
+      <tr><td><code>GET /v2/</code></td><td>OCI version check</td></tr>
+      <tr><td><code>GET/PUT/DELETE /v2/{t}/{p}/{n}/manifests/{ref}</code></td><td>Manifest operations (push/pull/delete)</td></tr>
+      <tr><td><code>POST/PATCH/PUT /v2/{t}/{p}/{n}/blobs/uploads/</code></td><td>Blob upload (chunked or monolithic)</td></tr>
+      <tr><td><code>GET /v2/_catalog</code></td><td>Repository catalog listing</td></tr>
+      <tr><td><code>GET/POST /auth/token</code></td><td>Docker-compatible token exchange</td></tr>
+      <tr><td><code>GET /auth/oidc/login</code></td><td>OIDC SSO login redirect</td></tr>
+      <tr><td><code>POST /auth/ci/token</code></td><td>CI/CD OIDC token exchange</td></tr>
+      <tr><td><code>GET /dashboard</code></td><td>Web dashboard</td></tr>
+      <tr><td><code>GET /api/images?q=search</code></td><td>Image browser API</td></tr>
+      <tr><td><code>GET/POST /scim/v2/Users</code></td><td>SCIM 2.0 user provisioning</td></tr>
+      <tr><td><code>GET/POST /scim/v2/Groups</code></td><td>SCIM 2.0 group management</td></tr>
+      <tr><td><code>GET /health</code></td><td>Health check</td></tr>
+      <tr><td><code>GET /metrics</code></td><td>Prometheus metrics</td></tr>
+    </table>
+  </div>
+
+  <div style="margin-top:32px;">
+    <div class="section-header" style="margin-bottom:16px;"><h2 style="font-size:1.1rem;">Project Structure</h2></div>
+<div class="code-block" style="color:var(--text-secondary);">nebulacr/
+  crates/
+    nebula-registry/       <span style="color:var(--text-muted)"># OCI registry + dashboard</span>
+    nebula-auth/           <span style="color:var(--text-muted)"># Auth service (OIDC, JWT, RBAC)</span>
+    nebula-common/         <span style="color:var(--text-muted)"># Shared models, config, storage</span>
+    nebula-replication/    <span style="color:var(--text-muted)"># Multi-region replication</span>
+    nebula-mirror/         <span style="color:var(--text-muted)"># Pull-through cache</span>
+    nebula-resilience/     <span style="color:var(--text-muted)"># Circuit breaker + retry</span>
+    nebula-controller/     <span style="color:var(--text-muted)"># Kubernetes CRD controller</span>
+  deploy/
+    helm/nebulacr/         <span style="color:var(--text-muted)"># Helm chart</span>
+    ansible/               <span style="color:var(--text-muted)"># Native deployment playbooks</span>
+  docs/landing/            <span style="color:var(--text-muted)"># This landing page</span></div>
+  </div>
+</section>
+
+<!-- ===== CTA ===== -->
+<section class="cta-section">
+  <h2>Ready to Own Your Container Registry?</h2>
+  <p>Deploy NebulaCR and take full control of your container images. Open source, enterprise-ready.</p>
+  <div style="display:flex;gap:14px;justify-content:center;flex-wrap:wrap;position:relative;">
+    <a href="#install" class="btn btn-primary">Get Started</a>
+    <a href="https://github.com/bwalia/nebulacr" class="btn btn-secondary">Star on GitHub</a>
+  </div>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer class="footer">
+  <div class="footer-links">
+    <a href="https://github.com/bwalia/nebulacr">GitHub</a>
+    <a href="https://github.com/bwalia/nebulacr#readme">Documentation</a>
+    <a href="https://github.com/bwalia/nebulacr/issues">Issues</a>
+  </div>
+  <div>&copy; 2026 NebulaCR &mdash; Cloud-Native OCI Container Registry</div>
+  <div style="margin-top:6px;">Built with Rust, Axum, and Tokio &middot; Open Source under MIT License</div>
+</footer>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.install-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.install-content').forEach(c => c.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+</script>
+
+</body>
+</html>
