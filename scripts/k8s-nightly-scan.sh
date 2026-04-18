@@ -121,14 +121,31 @@ if [ ${#reports[@]} -eq 0 ]; then
   payload=$(jq -n --arg ts "$ts" \
     '{text: ("NebulaCR nightly CVE scan — " + $ts + " (no images scanned)")}')
 else
-  payload=$(jq -s --arg ts "$ts" '
+  # Per-image block = one row line + up to TOP_N lines of critical/high
+  # CVEs (CRITICAL first, then HIGH; suppressed excluded). Cap keeps the
+  # Slack section under the 3000-char mrkdwn limit for ~5 images.
+  payload=$(jq -s --arg ts "$ts" --argjson top "${TOP_N_CVES:-3}" '
     (map(.result.summary.critical // 0) | add // 0) as $c |
     (map(.result.summary.high     // 0) | add // 0) as $h |
     (map(.result.summary.medium   // 0) | add // 0) as $m |
     (map(.result.summary.low      // 0) | add // 0) as $l |
     (map(.result.summary.unknown  // 0) | add // 0) as $u |
     (any(.result.policy_evaluation.status == "FAIL")) as $anyfail |
-    (map("• `\(.result.tenant // "?")/\(.result.project // "?")/\(.result.repository // "?"):\(.result.reference // "?")` — *\(.result.policy_evaluation.status // "-")* (C:\(.result.summary.critical // 0) H:\(.result.summary.high // 0) M:\(.result.summary.medium // 0) L:\(.result.summary.low // 0))") | join("\n")) as $table |
+    (map(
+      . as $d |
+      "• `\($d.result.tenant // "?")/\($d.result.project // "?")/\($d.result.repository // "?"):\($d.result.reference // "?")` — *\($d.result.policy_evaluation.status // "-")* (C:\($d.result.summary.critical // 0) H:\($d.result.summary.high // 0) M:\($d.result.summary.medium // 0) L:\($d.result.summary.low // 0))" as $row |
+      (
+        [ ($d.result.vulnerabilities // [])[]
+          | select((.suppressed // false) | not)
+          | select(.severity == "CRITICAL" or .severity == "HIGH")
+        ]
+        | sort_by(if .severity == "CRITICAL" then 0 else 1 end)
+        | .[0:$top]
+        | map("    `\(.severity)` \(.id) `\(.package)@\(.installed_version)` → `\(.fixed_version // "—")`")
+        | join("\n")
+      ) as $detail |
+      if $detail == "" then $row else "\($row)\n\($detail)" end
+    ) | join("\n")) as $table |
     (if $anyfail then "🚨" elif ($c + $h) > 0 then "⚠️" else "✅" end) as $emoji |
     ("\($emoji) NebulaCR nightly CVE scan — \($ts)") as $hdr |
     {
