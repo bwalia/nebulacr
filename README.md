@@ -389,6 +389,21 @@ docker build -f Dockerfile.scratch -t nebulacr:scratch .
 - [Helm Chart Reference](deploy/helm/nebulacr/README.md)
 - [Configuration Reference](config/nebulacr.example.toml)
 
+## Website
+
+Marketing / landing page. Served by `https://nebulacr.org/` (primary),
+with the S3 origin available for direct testing.
+
+| Endpoint | URL |
+|---|---|
+| Primary | https://nebulacr.org/ |
+| Test URL (object) | https://nebulacr-docs.s3.eu-west-2.amazonaws.com/index.html |
+| S3 website | http://nebulacr-docs.s3-website.eu-west-2.amazonaws.com/ |
+| Landing path | https://nebulacr-docs.s3.eu-west-2.amazonaws.com/landing/index.html |
+
+Source: [`docs/landing/`](docs/landing/) — auto-published on `main` pushes
+via [`.github/workflows/publish-landing.yml`](.github/workflows/publish-landing.yml).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and pull request guidelines.
