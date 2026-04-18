@@ -397,6 +397,7 @@ with the S3 origin available for direct testing.
 | Endpoint | URL |
 |---|---|
 | Primary | https://nebulacr.org/ |
+| GitHub Pages | https://bwalia.github.io/nebulacr/landing/ |
 | Test URL (object) | https://nebulacr-docs.s3.eu-west-2.amazonaws.com/index.html |
 | S3 website | http://nebulacr-docs.s3-website.eu-west-2.amazonaws.com/ |
 | Landing path | https://nebulacr-docs.s3.eu-west-2.amazonaws.com/landing/index.html |

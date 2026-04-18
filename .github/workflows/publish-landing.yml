@@ -1,7 +1,14 @@
-name: Publish landing page to S3
+name: Publish landing page
 
-# Uploads docs/landing/** to s3://nebulacr-docs/landing/ on any main
-# push touching the landing content. Skips if nothing actually changed.
+# Publishes docs/landing/** to two places on any main push touching
+# the landing content:
+#   1. s3://nebulacr-docs/landing/  (+ /index.html for the bucket root)
+#   2. gh-pages:/landing/  (served via GitHub Pages at
+#      https://bwalia.github.io/nebulacr/landing/)
+#
+# The two jobs run in parallel but share a concurrency group so a
+# burst of commits doesn't race on the gh-pages branch (which
+# chart-releaser also writes to from the Helm workflow).
 #
 # Required repo secrets:
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY — IAM user with
@@ -20,13 +27,20 @@ on:
         required: false
         default: "public, max-age=300"
 
+concurrency:
+  group: gh-pages-write
+  cancel-in-progress: false
+
 env:
   AWS_REGION: eu-west-2
   BUCKET: nebulacr-docs
   PREFIX: landing
 
+permissions:
+  contents: write
+
 jobs:
-  publish:
+  publish-s3:
     name: Sync landing/ to S3
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -62,3 +76,30 @@ jobs:
         run: |
           echo "Object URL: https://${BUCKET}.s3.${AWS_REGION}.amazonaws.com/${PREFIX}/index.html"
           echo "Website   : http://${BUCKET}.s3-website.${AWS_REGION}.amazonaws.com/${PREFIX}/"
+
+  publish-gh-pages:
+    name: Publish landing/ to gh-pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # `keep_files: true` preserves everything already on gh-pages
+      # (Helm chart index.yaml + tarballs produced by chart-releaser);
+      # `destination_dir: landing` scopes our writes so we don't clobber
+      # the chart repo at the root.
+      - name: Deploy to gh-pages:/landing
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./docs/landing
+          destination_dir: landing
+          keep_files: true
+          user_name: "github-actions[bot]"
+          user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+          commit_message: "publish landing/ from ${{ github.sha }}"
+
+      - name: Report endpoint
+        run: |
+          echo "GitHub Pages: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/landing/"
