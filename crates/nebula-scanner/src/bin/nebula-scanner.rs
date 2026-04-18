@@ -154,8 +154,7 @@ fn load_scanner_config() -> Result<ScannerConfig> {
 
 fn build_object_store() -> Result<Arc<dyn ObjectStore>> {
     let backend = env::var("NEBULACR_STORAGE__BACKEND").unwrap_or_else(|_| "filesystem".into());
-    let root = env::var("NEBULACR_STORAGE__ROOT")
-        .context("NEBULACR_STORAGE__ROOT is required")?;
+    let root = env::var("NEBULACR_STORAGE__ROOT").context("NEBULACR_STORAGE__ROOT is required")?;
 
     let store: Arc<dyn ObjectStore> = match backend.as_str() {
         "filesystem" => {
@@ -187,7 +186,11 @@ fn build_object_store() -> Result<Arc<dyn ObjectStore>> {
         }
         "gcs" => {
             info!(bucket = %root, "using GCS storage");
-            Arc::new(GoogleCloudStorageBuilder::new().with_bucket_name(&root).build()?)
+            Arc::new(
+                GoogleCloudStorageBuilder::new()
+                    .with_bucket_name(&root)
+                    .build()?,
+            )
         }
         "azure" => {
             let mut b = MicrosoftAzureBuilder::new().with_container_name(&root);

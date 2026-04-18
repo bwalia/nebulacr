@@ -169,4 +169,3 @@ impl Queue for PostgresQueue {
         }
     }
 }
-

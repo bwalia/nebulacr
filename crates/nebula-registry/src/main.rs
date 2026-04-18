@@ -54,7 +54,9 @@ use nebula_replication::region::{
 };
 use nebula_replication::replicator::{ReplicationHandle, Replicator};
 use nebula_resilience::{CircuitBreakerConfig, ResilientObjectStore, RetryPolicy};
-use nebula_scanner::{ScannerRuntime, config::ScannerConfig, model::ScanJob, queue::Queue as ScanQueue};
+use nebula_scanner::{
+    ScannerRuntime, config::ScannerConfig, model::ScanJob, queue::Queue as ScanQueue,
+};
 
 // ── Application State ────────────────────────────────────────────────────────
 
