@@ -121,7 +121,7 @@
     .section-divider { width: 48px; height: 3px; background: var(--cyan); border-radius: 2px; margin: 0 auto 16px; }
 
     /* ===== HIGHLIGHTS GRID ===== */
-    .highlights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .highlights { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
     .highlight-card {
       padding: 24px; background: var(--surface-2); border: 1px solid var(--border);
       border-radius: var(--radius); transition: all 0.2s; text-align: center;
@@ -291,6 +291,7 @@
     <a href="#features">Features</a>
     <a href="#dashboard">Dashboard</a>
     <a href="#enterprise">Enterprise</a>
+    <a href="#scanning">CVE Scanning</a>
     <a href="#install">Install</a>
     <a href="#architecture">Architecture</a>
     <a href="api.html">API Docs</a>
@@ -345,6 +346,11 @@
       <div class="highlight-icon">&#x26A1;</div>
       <div class="highlight-title">Rust Performance</div>
       <div class="highlight-desc">Single binary, minimal memory footprint, async I/O with Tokio. Handles thousands of concurrent pulls.</div>
+    </div>
+    <div class="highlight-card">
+      <div class="highlight-icon">&#x1F50E;</div>
+      <div class="highlight-title">CVE Scanning</div>
+      <div class="highlight-desc">Built-in scanner for every push: SBOM extraction, OSV/GHSA/NVD matching, AI-assisted remediation, nightly PDF reports.</div>
     </div>
   </div>
 </section>
@@ -416,6 +422,36 @@
           <li>TTL-based cache invalidation</li>
           <li>Transparent to Docker clients</li>
           <li>Authenticated upstream support</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F50E;</div>
+        <div class="feature-title">Image Vulnerability Scanning</div>
+        <div class="feature-desc">
+          Every push is scanned in-process by the embedded <code>nebula-scanner</code>. SBOMs are built natively in Rust &mdash; no Trivy/Grype shell-out &mdash; then matched against OSV, GHSA, and NVD with ecosystem-aware version comparators.
+        </div>
+        <ul class="feature-list">
+          <li>SBOM parsers: dpkg, apk, rpm, npm, pypi, cargo, go, ELF</li>
+          <li>OSV bootstrap + local NebulaVulnDb (OSV/GHSA/NVD ingest)</li>
+          <li>Version matchers for apk, deb, rpm, semver, pep440, Go</li>
+          <li>VEX 1.4 ingestion (not_affected / fixed / under_investigation)</li>
+          <li>Pass/fail policy gate with per-severity thresholds</li>
+        </ul>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon-box">&#x1F916;</div>
+        <div class="feature-title">AI-Assisted Remediation</div>
+        <div class="feature-desc">
+          On-demand AI commentary on every CVE via Ollama (local LLM, no third-party calls). Generates Dockerfile fix suggestions and posts PR review comments straight into your build pipeline.
+        </div>
+        <ul class="feature-list">
+          <li>Per-CVE root-cause + impact summary</li>
+          <li>Dockerfile rewrite suggestions (<code>/v2/scan/{id}/dockerfile-fix</code>)</li>
+          <li>One-click PR review comment posting</li>
+          <li>CycloneDX SBOM + JSON report export to S3</li>
+          <li>WebSocket progress stream for live UIs</li>
         </ul>
       </div>
 
@@ -607,6 +643,69 @@
     <div class="step-card">
       <div class="step-title">Monitor &amp; Scale</div>
       <div class="step-desc">Use the built-in dashboard to monitor health, browse images, and manage access. Prometheus metrics for alerting. Scale with HPA.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== CVE SCAN PIPELINE ===== -->
+<section class="section-alt" id="scanning">
+  <div class="section" style="padding-top:60px;padding-bottom:60px;">
+    <div class="section-header">
+      <div class="section-divider"></div>
+      <h2>CVE Scanning &mdash; How It Works</h2>
+      <p>Built into the registry. Triggered on every push. No external scanner pod, no Trivy daemon, no shell-out.</p>
+    </div>
+
+    <div class="steps-grid">
+      <div class="step-card">
+        <div class="step-title">Push Triggers Scan</div>
+        <div class="step-desc">A successful manifest push enqueues a scan keyed by digest. The scanner runs in-process inside <code>nebula-registry</code>, or in a dedicated <code>nebula-scanner</code> worker.</div>
+      </div>
+      <div class="step-card">
+        <div class="step-title">SBOM Extraction</div>
+        <div class="step-desc">Layers are pulled from object storage and walked for OS packages (dpkg/apk/rpm) and language deps (npm/pypi/cargo/go). Output is a CycloneDX SBOM.</div>
+      </div>
+      <div class="step-card">
+        <div class="step-title">Vuln Match + Policy</div>
+        <div class="step-desc">Packages are matched against OSV, GHSA, and NVD with ecosystem-aware comparators. Suppressions and VEX statements filter noise; a policy decides PASS / FAIL.</div>
+      </div>
+      <div class="step-card">
+        <div class="step-title">Report + Notify</div>
+        <div class="step-desc">Results land in Redis (1h TTL), the dashboard, and optionally Slack. AI commentary, Dockerfile fix suggestions, and PR comments are one API call away.</div>
+      </div>
+    </div>
+
+    <div style="margin-top:32px;">
+      <div class="section-header" style="margin-bottom:16px;"><h2 style="font-size:1.1rem;">Scanner API Endpoints</h2></div>
+      <table class="config-table">
+        <tr><th>Endpoint</th><th>Description</th></tr>
+        <tr><td><code>GET /v2/scan/live/{digest}</code></td><td>Poll-until-complete scan result</td></tr>
+        <tr><td><code>POST /v2/scan</code></td><td>Trigger a scan for a (repo, tag)</td></tr>
+        <tr><td><code>GET /v2/scan/{id}/report</code></td><td>Rendered scan report</td></tr>
+        <tr><td><code>GET /v2/scan/{id}/sbom</code></td><td>CycloneDX SBOM</td></tr>
+        <tr><td><code>GET /v2/scan/{id}/dockerfile-fix</code></td><td>AI-suggested Dockerfile remediation</td></tr>
+        <tr><td><code>POST /v2/scan/{id}/pr-comment</code></td><td>Post results as a GitHub PR review comment</td></tr>
+        <tr><td><code>GET /v2/ws/scan/{digest}</code></td><td>WebSocket progress stream</td></tr>
+        <tr><td><code>GET /v2/cve/search</code></td><td>Cross-image CVE search</td></tr>
+        <tr><td><code>POST /v2/vex</code></td><td>Ingest CycloneDX VEX statements</td></tr>
+        <tr><td><code>POST /admin/vulndb/ingest</code></td><td>Trigger an OSV/GHSA/NVD ingest run</td></tr>
+      </table>
+      <p style="margin-top:12px;font-size:0.78rem;color:var(--text-secondary);">
+        All <code>/v2/scan/**</code> and <code>/admin/**</code> routes accept <code>Authorization: Bearer nck_&lt;secret&gt;</code> API keys with per-permission scoping.
+      </p>
+    </div>
+
+    <div style="margin-top:32px;">
+      <div class="section-header" style="margin-bottom:16px;"><h2 style="font-size:1.1rem;">Nightly Scan Automation</h2></div>
+      <table class="config-table">
+        <tr><th>Workflow</th><th>Trigger</th><th>Scope</th></tr>
+        <tr><td><code>nightly-cve-scan.yml</code></td><td>Manual dispatch</td><td>Compose stack scan against a fixed image list (smoke test)</td></tr>
+        <tr><td><code>nightly-cve-scan-all.yml</code></td><td>Cron 03:17 UTC + dispatch</td><td>Enumerates <code>/v2/_catalog</code> and scans every (repo, tag) in the registry</td></tr>
+        <tr><td><code>deploy-nightly-cve-scan.yml</code></td><td>Push to <code>deploy/k8s/nightly-cve-scan/**</code></td><td>Deploys the in-cluster k3s <code>CronJob</code> &mdash; the production schedule</td></tr>
+      </table>
+      <p style="margin-top:12px;font-size:0.78rem;color:var(--text-secondary);">
+        Each run produces JSON per (repo, tag), a rolled-up PDF via <code>scripts/nightly-report-pdf.py</code>, and a Slack upload via <code>files.getUploadURLExternal</code> (with a webhook text fallback).
+      </p>
     </div>
   </div>
 </section>
