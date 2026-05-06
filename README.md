@@ -21,6 +21,7 @@ A cloud-native Docker/OCI container registry built in Rust with multi-tenancy, z
 - **Rate limiting** per IP and per tenant
 - **Multi-architecture** -- linux/amd64 and linux/arm64
 - **Webhook notifications** for registry events
+- **Image vulnerability scanning** -- SBOM extraction, OSV + GHSA + NVD feeds, AI-assisted CVE analysis, policy gate, Slack PDF reports
 
 ## Architecture
 
@@ -240,6 +241,85 @@ helm install nebulacr oci://ghcr.io/bwalia/charts/nebulacr \
 
 See [docs/observability.md](docs/observability.md) for Grafana dashboards and scrape configs.
 
+## Image Vulnerability Scanning
+
+NebulaCR ships with a built-in CVE scanner (`nebula-scanner` crate) that runs
+on every push and exposes results over HTTP, WebSocket, and a dashboard panel.
+
+### What gets scanned
+
+| Layer | Parsers |
+|---|---|
+| OS packages | `dpkg` (Debian/Ubuntu), `apk` (Alpine), `rpm` (RHEL/Fedora/SUSE) |
+| Language deps | `npm`, `pypi`, `cargo`, `go` modules |
+| Loose binaries | ELF metadata fallback for un-packaged binaries |
+
+The output is a CycloneDX SBOM plus a list of matched vulnerabilities.
+
+### Vulnerability data sources
+
+- **OSV** -- bootstrap source, queried directly for low-volume deploys.
+- **NebulaVulnDb** -- local Postgres mirror ingested from OSV, GitHub
+  Security Advisories (GHSA), and NVD; ecosystem-aware version matchers
+  (`apk`, `deb`, `rpm`, `pep440`, `semver`, Go pseudo-versions).
+- **VEX** -- ingest CycloneDX VEX statements at `POST /v2/vex` to mark
+  CVEs as `not_affected` / `fixed` / `under_investigation`.
+
+### How it works
+
+```text
+manifest push → queue → puller → SBOM extract → vulndb match
+              → suppression / VEX → policy gate → Redis (1h TTL)
+              → optional AI analysis (Ollama) → notify (Slack / webhook)
+```
+
+1. Each successful manifest push enqueues a scan keyed by digest.
+2. The worker pulls layers from object storage and walks each tarball
+   for package metadata (no shell-out to Trivy/Grype).
+3. Matched CVEs are filtered through suppressions and VEX statements.
+4. A policy is evaluated (`PASS` / `FAIL` + violations) and the result
+   is stashed in Redis with a 1-hour TTL, keyed by digest.
+5. On demand, results can be re-rendered with AI commentary
+   (Ollama), exported to S3, or posted as a PR review comment.
+
+### Scanner endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v2/scan/live/{digest}` | Poll-until-complete scan result |
+| `POST /v2/scan` | Trigger a scan for a `(repo, tag)` |
+| `GET /v2/scan/{id}` / `/report` / `/sbom` | Result, rendered report, CycloneDX SBOM |
+| `GET /v2/scan/{id}/dockerfile-fix` | AI-suggested Dockerfile remediation |
+| `POST /v2/scan/{id}/pr-comment` | Post results as a GitHub PR review comment |
+| `GET /v2/ws/scan/{digest}` | WebSocket progress stream |
+| `GET /v2/cve/search` | Cross-image CVE search |
+| `POST /v2/cve/suppress` | Manage suppressions (with audit) |
+| `POST /v2/policy/evaluate` | Standalone policy evaluation |
+| `POST /v2/vex` | Ingest VEX statements |
+| `POST /admin/vulndb/ingest` | Trigger an OSV/GHSA/NVD ingest run |
+| `POST /v2/export/s3/{id}` | Export a scan to an S3 prefix |
+
+All `/v2/scan/**` and `/admin/**` routes accept `Authorization: Bearer
+nck_<secret>` API keys with per-permission scoping; legacy unauthenticated
+calls fall through as a permissive `system` principal during migration.
+
+### Nightly scan workflows
+
+Three workflows live in `.github/workflows/`. All publish a Slack PDF on
+completion (when `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID` are set; falls
+back to a webhook text post via `SLACK_WEBHOOK_URL`).
+
+| Workflow | Trigger | Scope |
+|---|---|---|
+| [`nightly-cve-scan.yml`](.github/workflows/nightly-cve-scan.yml) | Manual dispatch | Compose stack + a fixed image list -- ad-hoc smoke test |
+| [`nightly-cve-scan-all.yml`](.github/workflows/nightly-cve-scan-all.yml) | Cron `17 3 * * *` + dispatch | Enumerates `/v2/_catalog` and scans every `(repo, tag)` in the registry |
+| [`deploy-nightly-cve-scan.yml`](.github/workflows/deploy-nightly-cve-scan.yml) | Push to `deploy/k8s/nightly-cve-scan/**` | Deploys the in-cluster k3s `CronJob` runner -- the production schedule |
+
+The supporting scripts -- `scripts/nightly-scan-all.sh`,
+`scripts/nightly-report-pdf.py`, `scripts/slack-upload-pdf.py` -- are the
+same code path the in-cluster `CronJob` runs, so failures reproduce
+locally with `bash scripts/nightly-scan-all.sh`.
+
 ## Production Install
 
 ### With OIDC and S3 Storage
@@ -351,7 +431,10 @@ nebulacr/
 │   ├── nebula-controller/    # Kubernetes CRD controller
 │   ├── nebula-mirror/        # Pull-through cache engine
 │   ├── nebula-resilience/    # Retry, circuit breaker, failover
-│   └── nebula-replication/   # Multi-region replication
+│   ├── nebula-replication/   # Multi-region replication
+│   ├── nebula-scanner/       # CVE scanner (SBOM, vulndb match, policy, AI)
+│   ├── nebula-db/            # Postgres-backed vulndb + suppression store
+│   └── nebula-ai/            # Ollama client for CVE analysis + Dockerfile fixes
 ├── deploy/helm/nebulacr/     # Helm chart
 ├── config/                   # Example configuration
 ├── docs/                     # Documentation
