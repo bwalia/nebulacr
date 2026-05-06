@@ -81,6 +81,14 @@ pub struct ScannerConfig {
     /// run in a separate `nebula-scanner` deployment. Default false.
     #[serde(default)]
     pub enqueue_only: bool,
+    /// Skip the SBOM/vuln pipeline when the Redis cache already has a
+    /// `Completed` result for this manifest digest, and re-emit the cached
+    /// findings under the new job's identity. This means an image cached
+    /// under multiple repo paths (e.g. direct push + pull-through cache)
+    /// is scanned once per unique digest. The dedup window is bounded by
+    /// `result_ttl_secs`. Default true.
+    #[serde(default = "default_true")]
+    pub scan_dedup_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

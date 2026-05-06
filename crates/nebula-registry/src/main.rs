@@ -977,6 +977,13 @@ async fn put_manifest(
     // enqueue call is spawned so an INSERT-backed queue (PostgresQueue)
     // never blocks the push path; scans are best-effort and can be
     // re-triggered via POST /v2/scan.
+    //
+    // Note on dedup: digest dedup is handled in the scanner worker, not
+    // here. The worker re-emits cached findings under each push's identity
+    // so every (tenant, project, repo, reference) gets its own row in
+    // the `scans` audit table — preserving "every push got scanned"
+    // semantics — while the heavy SBOM/vuln pipeline only runs once per
+    // unique manifest digest.
     if let Some(ref q) = state.scanner_queue {
         let job = ScanJob {
             id: Uuid::new_v4(),

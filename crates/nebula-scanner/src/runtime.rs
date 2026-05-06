@@ -101,6 +101,7 @@ impl ScannerRuntime {
                     pg: pg.clone(),
                     default_policy: default_policy.clone(),
                     notifier: notifier.clone(),
+                    dedup_enabled: config.scan_dedup_enabled,
                 });
                 let handle = tokio::spawn(async move {
                     info!(worker = n, "spawning scan worker");

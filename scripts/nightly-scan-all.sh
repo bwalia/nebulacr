@@ -24,8 +24,11 @@ POLL_INTERVAL_SECS=${POLL_INTERVAL_SECS:-5}
 CATALOG_PAGE_SIZE=${CATALOG_PAGE_SIZE:-10000}
 FAIL_ON_CRITICAL=${FAIL_ON_CRITICAL:-false}
 
-mkdir -p scan-reports
+mkdir -p scan-reports scan-reports/.digests
 : > scan-reports/summary.txt
+# Reset the per-run digest cache so a previous run's symlinks don't shadow
+# this run's first-seen report files.
+rm -f scan-reports/.digests/*
 
 # jq is used for response parsing; install on the fly if the runner image
 # doesn't ship it (skopeo/stable is Fedora-based and sometimes lacks jq).
@@ -81,6 +84,28 @@ scan_one() {
   fi
   echo "digest: ${digest}"
 
+  # Digest dedup: if this digest has already been scanned for some other
+  # (repo, tag) in this run, reuse that report instead of polling the API
+  # again. The marker file holds the safe filename of the first occurrence.
+  local digest_marker="scan-reports/.digests/${digest//[^A-Za-z0-9]/_}"
+  local report="scan-reports/${safe}.json"
+  if [ -f "$digest_marker" ]; then
+    local first_safe
+    first_safe=$(cat "$digest_marker")
+    cp "scan-reports/${first_safe}.json" "$report"
+    {
+      local sev
+      sev=$(jq -r '
+        def s(k): .result.summary[k] // 0;
+        "status=\(.status // "?")  verdict=\(.result.policy_evaluation.status // "-")  " +
+        "critical=\(s("critical"))  high=\(s("high"))  medium=\(s("medium"))  " +
+        "low=\(s("low"))  unknown=\(s("unknown"))"
+      ' "$report")
+      echo "── ${repo}:${tag}  (${digest:0:19}…)  ${sev}  [deduped from ${first_safe}]"
+    } >> scan-reports/summary.txt
+    return 0
+  fi
+
   local body status deadline
   deadline=$(( $(date +%s) + POLL_TIMEOUT_SECS ))
   while :; do
@@ -98,8 +123,14 @@ scan_one() {
     sleep "${POLL_INTERVAL_SECS}"
   done
 
-  local report="scan-reports/${safe}.json"
   echo "$body" | jq '.' > "$report"
+  # Only mark this digest as "scanned this run" when it completed cleanly.
+  # If the poll timed out or the scanner reported failed, a different
+  # (repo, tag) for the same digest might still succeed on retry — so we
+  # leave the marker unset and let the next occurrence re-scan.
+  if [ "${status}" = "completed" ]; then
+    printf '%s' "$safe" > "$digest_marker"
+  fi
 
   {
     local sev

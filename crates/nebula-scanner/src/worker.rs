@@ -27,6 +27,11 @@ pub struct Worker {
     pub pg: PgPool,
     pub default_policy: Policy,
     pub notifier: Option<Arc<crate::notify::Notifier>>,
+    /// When true, before running the SBOM/vuln pipeline the worker checks the
+    /// Redis cache for a `Completed` scan of this digest and, on hit, emits a
+    /// new result with the current job's identity instead of re-scanning. The
+    /// dedup window is naturally bounded by the Redis `result_ttl_secs`.
+    pub dedup_enabled: bool,
 }
 
 impl Worker {
@@ -66,6 +71,25 @@ impl Worker {
                 tenant = %job.tenant, project = %job.project, repo = %job.repository,
                 "scan skipped: scan_enabled=false"
             );
+            return Ok(());
+        }
+
+        // Digest dedup: the manifest digest is the canonical "image identity",
+        // so two repo paths (e.g. Docker Hub direct + pull-through cache) that
+        // resolve to the same digest only need to be scanned once. If the
+        // Redis cache already holds a `Completed` result for this digest we
+        // fabricate a new ScanResult with the current job's identity rather
+        // than re-running the whole SBOM/vuln pipeline. The Redis TTL
+        // (`result_ttl_secs`) bounds the dedup window naturally.
+        if self.dedup_enabled
+            && let Some(deduped) = self.try_dedup_hit(&job).await
+        {
+            info!(
+                digest = %job.digest,
+                tenant = %job.tenant, project = %job.project, repo = %job.repository,
+                "scan deduped: reusing cached result for digest"
+            );
+            self.persist_deduped(&job, &deduped).await?;
             return Ok(());
         }
 
@@ -123,6 +147,50 @@ impl Worker {
             if let Some(n) = &self.notifier {
                 n.on_scan_complete(&final_result).await;
             }
+        }
+        Ok(())
+    }
+
+    /// Look up a recent Completed scan for this digest. Returns the cached
+    /// result on hit, `None` on miss / non-completed / store error.
+    async fn try_dedup_hit(&self, job: &ScanJob) -> Option<ScanResult> {
+        match self.store.get(&job.digest).await {
+            Ok(Some(r)) if matches!(r.status, ScanStatus::Completed) => Some(r),
+            Ok(_) => None,
+            Err(e) => {
+                warn!(error = %e, "dedup lookup failed; falling through to full scan");
+                None
+            }
+        }
+    }
+
+    /// Re-emit `cached`'s findings under the new job's identity: writes a
+    /// fresh ScanResult to Redis (keyed by digest, so it overwrites with the
+    /// new repo/ref) and a new `scans` row for the audit trail.
+    async fn persist_deduped(&self, job: &ScanJob, cached: &ScanResult) -> Result<()> {
+        let now = Utc::now();
+        let result = ScanResult {
+            id: job.id,
+            digest: job.digest.clone(),
+            tenant: job.tenant.clone(),
+            project: job.project.clone(),
+            repository: job.repository.clone(),
+            reference: job.reference.clone(),
+            status: ScanStatus::Completed,
+            error: None,
+            started_at: now,
+            completed_at: Some(now),
+            summary: cached.summary.clone(),
+            vulnerabilities: cached.vulnerabilities.clone(),
+            policy_evaluation: cached.policy_evaluation.clone(),
+            packages: cached.packages.clone(),
+        };
+        let _ = self.store.put(&result).await;
+        record_status(&self.pg, job, ScanStatus::InProgress, None).await?;
+        update_counts(&self.pg, job, &result.summary).await?;
+        record_status(&self.pg, job, ScanStatus::Completed, None).await?;
+        if let Some(n) = &self.notifier {
+            n.on_scan_complete(&result).await;
         }
         Ok(())
     }
