@@ -110,9 +110,16 @@ jobs:
             if curl -fsS "https://$REGISTRY_HOST/health" >/dev/null 2>&1; then
               echo "=== Registry health OK (via ingress) ==="
               curl -fsS "https://$REGISTRY_HOST/health" && echo
-              curl -fsS "https://$REGISTRY_HOST/v2/" -H "Accept: application/json" -o /dev/null -w "v2 status: %{http_code}\n"
-              echo "=== Smoke test PASSED ==="
-              exit 0
+              # /v2/ returns 401 when auth is enabled — that's the expected
+              # Bearer-challenge response, so don't use -f here. Treat 200 or
+              # 401 as healthy; anything else (5xx, connection error) fails.
+              V2_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+                -H "Accept: application/json" "https://$REGISTRY_HOST/v2/" || echo "000")
+              echo "v2 status: $V2_STATUS"
+              case "$V2_STATUS" in
+                200|401) echo "=== Smoke test PASSED ===" ; exit 0 ;;
+                *)       echo "::error::Unexpected /v2/ status: $V2_STATUS" ; exit 1 ;;
+              esac
             fi
             echo "Attempt $i: not ready yet"
             sleep 10

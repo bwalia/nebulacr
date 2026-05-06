@@ -12,6 +12,9 @@
 #   DOCKER_HUB_USERNAME / DOCKER_HUB_PASSWORD
 #   NEBULACR_USERNAME / NEBULACR_PASSWORD / NEBULACR_REGISTRY / NEBULACR_MIRROR
 #     from environment variables of the same name.
+#   MIRROR_SSH_KEY
+#     from $MIRROR_SSH_KEY_FILE (default ~/.ssh/id_rsa) — private key used by
+#     the deploy-mirror-native workflow to reach the mirror host.
 #
 # Missing sources are skipped with a short note (never fatal).
 # Values are never echoed; only names + byte lengths are logged.
@@ -26,6 +29,7 @@ REPO="${REPO:-bwalia/nebulacr}"
 AWS_PROFILE="${AWS_PROFILE:-kubepilot}"
 KUBECONFIG_FILE="${KUBECONFIG_FILE:-$HOME/.kube/config}"
 SLACK_FILE="${SLACK_FILE:-/tmp/slack}"
+MIRROR_SSH_KEY_FILE="${MIRROR_SSH_KEY_FILE:-$HOME/.ssh/id_rsa}"
 DRY_RUN="${DRY_RUN:-0}"
 
 push() {
@@ -72,6 +76,13 @@ if [ -f "$SLACK_FILE" ]; then
   push SLACK_WEBHOOK_URL "$(tr -d '\n' < "$SLACK_FILE")" "$SLACK_FILE"
 else
   echo "  skip  SLACK_WEBHOOK_URL  ($SLACK_FILE missing)"
+fi
+
+# ── Mirror SSH key ─────────────────────────────────────────────────────────
+if [ -f "$MIRROR_SSH_KEY_FILE" ]; then
+  push MIRROR_SSH_KEY "$(cat "$MIRROR_SSH_KEY_FILE")" "$MIRROR_SSH_KEY_FILE"
+else
+  echo "  skip  MIRROR_SSH_KEY  ($MIRROR_SSH_KEY_FILE missing)"
 fi
 
 # ── Env-var passthrough ────────────────────────────────────────────────────
