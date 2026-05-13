@@ -16,6 +16,7 @@ members = [
     "crates/nebula-import",
     "crates/nebula-ephemeral",
     "crates/nebula-attest",
+    "crates/nebula-artifact-types",
 ]
 resolver = "3"
 
@@ -112,6 +113,7 @@ nebula-peer = { path = "crates/nebula-peer" }
 nebula-import = { path = "crates/nebula-import" }
 nebula-ephemeral = { path = "crates/nebula-ephemeral" }
 nebula-attest = { path = "crates/nebula-attest" }
+nebula-artifact-types = { path = "crates/nebula-artifact-types" }
 
 # Scanner deps
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
