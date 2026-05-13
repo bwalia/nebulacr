@@ -2430,6 +2430,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-import"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "nebula-common",
+ "nebula-db",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nebula-lazy"
 version = "0.1.0"
 dependencies = [
