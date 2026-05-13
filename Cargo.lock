@@ -2430,6 +2430,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-lazy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "flate2",
+ "hex",
+ "nebula-common",
+ "nebula-db",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tar",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nebula-mirror"
 version = "0.1.0"
 dependencies = [
