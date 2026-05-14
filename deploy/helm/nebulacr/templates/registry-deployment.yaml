@@ -231,6 +231,24 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- if .Values.gc.online.enabled }}
+            - name: NEBULACR_GC__ONLINE
+              value: "true"
+            {{- if .Values.gc.online.postgresUrl }}
+            - name: NEBULACR_GC__POSTGRES_URL
+              value: {{ .Values.gc.online.postgresUrl | quote }}
+            {{- end }}
+            - name: NEBULACR_GC__REAPER_ENABLED
+              value: {{ .Values.gc.online.reaper.enabled | quote }}
+            - name: NEBULACR_GC__REAPER_GRACE_SECS
+              value: {{ .Values.gc.online.reaper.graceSecs | quote }}
+            - name: NEBULACR_GC__REAPER_BATCH
+              value: {{ .Values.gc.online.reaper.batch | quote }}
+            - name: NEBULACR_GC__REAPER_IDLE_SLEEP_SECS
+              value: {{ .Values.gc.online.reaper.idleSleepSecs | quote }}
+            - name: NEBULACR_GC__REAPER_QPS
+              value: {{ .Values.gc.online.reaper.qps | quote }}
+            {{- end }}
             {{- with .Values.registry.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
