@@ -3595,6 +3595,53 @@ async fn main() -> anyhow::Result<()> {
         match gc_pool.clone() {
             Some(pool) => {
                 info!("usage recorder enabled (postgres-backed)");
+
+                // Spawn drainer (staging → durable). Idempotent + crash-safe.
+                let drainer_control = nebula_cost::DrainerControl::new();
+                let drainer_cfg = nebula_cost::DrainerConfig {
+                    interval: std::time::Duration::from_secs(
+                        std::env::var("NEBULACR_USAGE__DRAINER_INTERVAL_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(60),
+                    ),
+                    batch_size: std::env::var("NEBULACR_USAGE__DRAINER_BATCH")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(5000),
+                };
+                let drainer = nebula_cost::Drainer::new(
+                    pool.clone(),
+                    drainer_cfg,
+                    drainer_control.clone(),
+                );
+                tokio::spawn(async move {
+                    let _ = drainer.run().await;
+                });
+                info!("usage drainer spawned");
+
+                // Spawn rollup loop (hourly + daily aggregations).
+                let rollup_control = nebula_cost::RollupControl::new();
+                let rollup_cfg = nebula_cost::RollupConfig {
+                    interval: std::time::Duration::from_secs(
+                        std::env::var("NEBULACR_USAGE__ROLLUP_INTERVAL_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(300),
+                    ),
+                };
+                let rollup =
+                    nebula_cost::Rollup::new(pool.clone(), rollup_cfg, rollup_control.clone());
+                tokio::spawn(async move {
+                    let _ = rollup.run().await;
+                });
+                info!("usage rollup spawned");
+
+                // Hold the controls so the drainer/rollup don't shut down
+                // when their last reference goes away. Stored on AppState
+                // so future admin endpoints can flip them.
+                let _ = (drainer_control, rollup_control);
+
                 Arc::new(nebula_cost::PgUsageRecorder::new(pool))
             }
             None => {
