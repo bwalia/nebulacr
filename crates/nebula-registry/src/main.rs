@@ -908,11 +908,12 @@ async fn get_manifest(
 }
 
 /// PUT /v2/{tenant}/{project}/{name}/manifests/{reference}
-#[instrument(name = "put_manifest", skip(state, claims, body), fields(tenant = %params.tenant, project = %params.project, name = %params.name, reference = %params.reference))]
+#[instrument(name = "put_manifest", skip(state, claims, req_headers, body), fields(tenant = %params.tenant, project = %params.project, name = %params.name, reference = %params.reference))]
 async fn put_manifest(
     State(state): State<AppState>,
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
+    req_headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
     let op_start = Instant::now();
@@ -952,6 +953,7 @@ async fn put_manifest(
         .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
     // If reference is a tag (not a digest), create a tag link
+    let mut response_headers_extra: Vec<(String, String)> = Vec::new();
     if !params.reference.starts_with("sha256:") {
         let tag_p = tag_link_path(
             &params.tenant,
@@ -965,6 +967,53 @@ async fn put_manifest(
             .put(&tag_store_path, Bytes::from(digest.clone()).into())
             .await
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+        // 013 TTL header — record an `expires_at` on the tag row
+        // when X-NebulaCR-TTL is set. Mirrors the design's project-
+        // default-TTL story: header wins; fallback comes from the
+        // ephemeral_repos table (slice 2 will read it). Failures
+        // never fail the push — TTL is a soft contract.
+        let ttl_header = req_headers
+            .get("x-nebulacr-ttl")
+            .and_then(|v| v.to_str().ok());
+        if let (Some(raw), Some(pool)) = (ttl_header, state.gc_pool.as_ref()) {
+            let now = chrono::Utc::now();
+            match nebula_ephemeral::parse_ttl_header(now, raw) {
+                Ok(spec) => {
+                    let expires_at = spec.expires_at;
+                    let r = sqlx::query(
+                        "INSERT INTO tags
+                             (tenant, project, repository, tag, digest,
+                              pushed_by, expires_at, ephemeral)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)
+                         ON CONFLICT (tenant, project, repository, tag)
+                         DO UPDATE SET digest = EXCLUDED.digest,
+                                       pushed_at = NOW(),
+                                       expires_at = EXCLUDED.expires_at",
+                    )
+                    .bind(&params.tenant)
+                    .bind(&params.project)
+                    .bind(&params.name)
+                    .bind(&params.reference)
+                    .bind(&digest)
+                    .bind(&claims.sub)
+                    .bind(expires_at)
+                    .execute(pool)
+                    .await;
+                    if let Err(e) = r {
+                        warn!(error = %e, tag = %params.reference, "ttl tag upsert failed");
+                    } else {
+                        response_headers_extra.push((
+                            "X-NebulaCR-TTL-Expires-At".into(),
+                            expires_at.to_rfc3339(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, raw = %raw, "ignoring invalid X-NebulaCR-TTL");
+                }
+            }
+        }
     }
 
     // Online-GC refcount bookkeeping (009). When the refcounter is the
@@ -1073,6 +1122,14 @@ async fn put_manifest(
         "Docker-Distribution-API-Version",
         HeaderValue::from_static("registry/2.0"),
     );
+    for (name, value) in &response_headers_extra {
+        if let (Ok(hn), Ok(hv)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(hn, hv);
+        }
+    }
 
     let duration = op_start.elapsed();
     histogram!("registry_request_duration_seconds", "operation" => "manifest.push")
@@ -2452,6 +2509,7 @@ async fn put_manifest_2seg(
     state: State<AppState>,
     claims: AuthenticatedClaims,
     Path(p): Path<ManifestRef2>,
+    req_headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
     let params = ManifestRef {
@@ -2460,7 +2518,7 @@ async fn put_manifest_2seg(
         name: p.name,
         reference: p.reference,
     };
-    put_manifest(state, claims, Path(params), body).await
+    put_manifest(state, claims, Path(params), req_headers, body).await
 }
 
 async fn delete_manifest_2seg(

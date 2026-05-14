@@ -2641,6 +2641,7 @@ dependencies = [
  "nebula-common",
  "nebula-cost",
  "nebula-db",
+ "nebula-ephemeral",
  "nebula-gc",
  "nebula-mirror",
  "nebula-replication",
