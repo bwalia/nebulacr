@@ -2643,6 +2643,7 @@ dependencies = [
  "nebula-db",
  "nebula-ephemeral",
  "nebula-gc",
+ "nebula-lazy",
  "nebula-mirror",
  "nebula-rebuild",
  "nebula-replication",

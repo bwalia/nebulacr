@@ -2093,6 +2093,87 @@ async fn gc_reconcile(
         .into_response())
 }
 
+// ── Referrers API (010 integration) ──────────────────────────────────────────
+
+/// GET /v2/{tenant}/{project}/{name}/referrers/{digest}
+///
+/// OCI 1.1 referrers API — returns artifacts that point at `digest`
+/// via their `subject` field (signatures, attestations, TOC artifacts,
+/// etc.). Optional `?artifactType=...` filters server-side. The
+/// response is an OCI image index whose `manifests` array carries one
+/// descriptor per referrer.
+///
+/// Reads from the shared `referrers` table populated by 010 (lazy
+/// indexer), 015 (attestations), and any future producer of typed
+/// OCI 1.1 referrer artifacts.
+#[derive(Debug, serde::Deserialize)]
+struct ReferrersQuery {
+    #[serde(default, rename = "artifactType")]
+    artifact_type: Option<String>,
+}
+
+#[instrument(name = "list_referrers", skip(state, claims), fields(tenant = %params.tenant, project = %params.project, name = %params.name, digest = %params.digest))]
+async fn list_referrers(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Path(params): Path<BlobRef>,
+    Query(q): Query<ReferrersQuery>,
+) -> Result<Response, RegistryError> {
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
+
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("referrers backend not configured".into()))?;
+
+    use nebula_lazy::ReferrerStore;
+    let store = nebula_lazy::PgReferrerStore::new(pool);
+
+    let rows = match q.artifact_type.as_deref() {
+        Some(t) => store.list_by_type(&params.digest, t).await,
+        None => store.list(&params.digest).await,
+    }
+    .map_err(|e| RegistryError::Internal(format!("referrers query failed: {e}")))?;
+
+    // Build OCI image index envelope.
+    let manifests: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "mediaType": r.media_type,
+                "digest": r.artifact_digest,
+                "size": r.size,
+                "artifactType": r.artifact_type,
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": manifests,
+    });
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.oci.image.index.v1+json"),
+    );
+    if let Some(ref t) = q.artifact_type {
+        if let Ok(hv) = HeaderValue::from_str(t) {
+            headers.insert("OCI-Filters-Applied", hv);
+        }
+    }
+
+    Ok((StatusCode::OK, headers, axum::Json(body)).into_response())
+}
+
 // ── Helper Functions ─────────────────────────────────────────────────────────
 
 /// Resolve a manifest reference: if it is a tag, read the tag link to get the digest,
@@ -3484,6 +3565,11 @@ async fn main() -> anyhow::Result<()> {
             get(image_status_2seg),
         )
         .route("/v2/{project}/{name}/tags/list", get(list_tags_2seg))
+        // Referrers (OCI 1.1) — 010 integration
+        .route(
+            "/v2/{tenant}/{project}/{name}/referrers/{digest}",
+            get(list_referrers),
+        )
         // Catalog
         .route("/v2/_catalog", get(catalog))
         // Online GC control plane (009 slice 2-3)
