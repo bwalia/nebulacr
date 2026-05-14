@@ -2214,6 +2214,129 @@ async fn ttl_resume(
     }
 }
 
+// ── Usage read API (017 polish) ──────────────────────────────────────────────
+
+fn usage_admin_authorize(claims: &TokenClaims) -> Result<(), RegistryError> {
+    if claims.role != Role::Admin {
+        return Err(RegistryError::Forbidden {
+            reason: "usage endpoints require Admin role".into(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_since(raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    let (n, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit())?);
+    let n: i64 = n.parse().ok()?;
+    if n < 0 {
+        return None;
+    }
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => return None,
+    };
+    Some(secs)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TenantSeriesQuery {
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    granularity: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TenantSeriesPath {
+    tenant: String,
+}
+
+#[instrument(name = "usage_tenant", skip(state, claims))]
+async fn usage_tenant(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Path(p): Path<TenantSeriesPath>,
+    Query(q): Query<TenantSeriesQuery>,
+) -> Result<Response, RegistryError> {
+    usage_admin_authorize(&claims)?;
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("usage backend not configured".into()))?;
+    let since_secs = q
+        .since
+        .as_deref()
+        .and_then(parse_since)
+        .unwrap_or(24 * 3600);
+    let granularity = q
+        .granularity
+        .as_deref()
+        .and_then(nebula_cost::Granularity::parse)
+        .unwrap_or(nebula_cost::Granularity::Hour);
+
+    let buckets = nebula_cost::UsageReader::new(pool)
+        .tenant_series(&p.tenant, since_secs, granularity)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("usage query failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "tenant": p.tenant,
+            "since_secs": since_secs,
+            "granularity": granularity.as_str(),
+            "buckets": buckets,
+        })),
+    )
+        .into_response())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TopPulledQuery {
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[instrument(name = "usage_top_pulled", skip(state, claims))]
+async fn usage_top_pulled(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Query(q): Query<TopPulledQuery>,
+) -> Result<Response, RegistryError> {
+    usage_admin_authorize(&claims)?;
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("usage backend not configured".into()))?;
+    let since_secs = q
+        .since
+        .as_deref()
+        .and_then(parse_since)
+        .unwrap_or(7 * 86_400);
+    let limit = q.limit.unwrap_or(20).clamp(1, 500);
+
+    let rows = nebula_cost::UsageReader::new(pool)
+        .top_pulled(since_secs, limit)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("top_pulled query failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "since_secs": since_secs,
+            "limit": limit,
+            "rows": rows,
+        })),
+    )
+        .into_response())
+}
+
 // ── Referrers API (010 integration) ──────────────────────────────────────────
 
 /// GET /v2/{tenant}/{project}/{name}/referrers/{digest}
@@ -3978,7 +4101,10 @@ async fn main() -> anyhow::Result<()> {
         // TTL reaper control plane (013 slice 2)
         .route("/v2/_ttl/status", get(ttl_status))
         .route("/v2/_ttl/pause", post(ttl_pause))
-        .route("/v2/_ttl/resume", post(ttl_resume));
+        .route("/v2/_ttl/resume", post(ttl_resume))
+        // Usage read API (017 polish)
+        .route("/v2/_usage/tenant/{tenant}", get(usage_tenant))
+        .route("/v2/_usage/top-pulled", get(usage_top_pulled));
 
     // Internal replication routes — served on both the main port (for cross-cluster
     // access via proxy) and the dedicated internal port (for intra-cluster use).
