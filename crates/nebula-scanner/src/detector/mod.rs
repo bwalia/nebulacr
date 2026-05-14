@@ -114,7 +114,9 @@ pub trait Detector: Send + Sync {
     async fn scan(&self, bytes: bytes::Bytes) -> Result<Vec<Finding>, DetectorError>;
 }
 
+pub mod license;
 pub mod store;
+pub use license::{LicenseClass, LicenseDetector};
 pub use store::{FindingsStore, PgFindingsStore};
 
 #[cfg(test)]
