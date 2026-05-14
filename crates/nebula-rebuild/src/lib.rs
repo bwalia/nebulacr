@@ -9,7 +9,9 @@ pub mod lineage;
 pub mod rate_limit;
 
 pub use emitter::{
-    EmitError, GitHubDispatchEmitter, RebuildEmitter, RebuildEvent, TriggerCause,
+    compute_webhook_signature, EmitError, GenericWebhookEmitter, GitHubDispatchEmitter,
+    GitLabPipelineEmitter, RebuildEmitter, RebuildEvent, TektonEventListenerEmitter,
+    TriggerCause,
 };
 pub use lineage::{detect_lineage, LineageConfidence, LineageHint};
 pub use rate_limit::{current_bucket, RateLimit, RateLimitError};
