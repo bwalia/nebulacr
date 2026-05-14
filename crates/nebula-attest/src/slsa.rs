@@ -68,8 +68,11 @@ mod tests {
 
     #[test]
     fn no_builder_is_l1() {
-        let (lvl, _) =
-            infer_slsa_level("https://slsa.dev/provenance/v1", &serde_json::json!({}), &[]);
+        let (lvl, _) = infer_slsa_level(
+            "https://slsa.dev/provenance/v1",
+            &serde_json::json!({}),
+            &[],
+        );
         assert_eq!(lvl, SlsaLevel::L1);
     }
 

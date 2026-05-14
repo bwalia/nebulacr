@@ -42,9 +42,5 @@ pub trait RegistrySource: Send + Sync {
         repo: &Repository,
         tag: &str,
     ) -> Result<(Bytes, String), ImportError>;
-    async fn fetch_blob(
-        &self,
-        repo: &Repository,
-        digest: &str,
-    ) -> Result<Bytes, ImportError>;
+    async fn fetch_blob(&self, repo: &Repository, digest: &str) -> Result<Bytes, ImportError>;
 }

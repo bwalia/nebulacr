@@ -30,9 +30,5 @@ pub trait PeerMesh: Send + Sync {
     /// Stream a blob from a peer. Implementations MUST verify the
     /// returned bytes hash to the requested digest before returning;
     /// hash mismatch is `MeshError::DigestMismatch`.
-    async fn fetch_from(
-        &self,
-        peer: &PeerEndpoint,
-        digest: &str,
-    ) -> Result<Bytes, MeshError>;
+    async fn fetch_from(&self, peer: &PeerEndpoint, digest: &str) -> Result<Bytes, MeshError>;
 }

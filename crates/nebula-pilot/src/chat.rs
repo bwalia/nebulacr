@@ -275,7 +275,9 @@ mod tests {
             max_tool_rounds: 3,
             ..Default::default()
         };
-        let err = run_turn(llm, reg, ctx, &mut history, "x", &cfg).await.unwrap_err();
+        let err = run_turn(llm, reg, ctx, &mut history, "x", &cfg)
+            .await
+            .unwrap_err();
         matches!(err, ChatError::MaxRounds(3));
     }
 

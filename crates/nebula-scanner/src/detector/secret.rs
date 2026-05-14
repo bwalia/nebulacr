@@ -11,9 +11,7 @@
 //! Slice scope: built-in rule corpus only. Operator-defined rule
 //! files (gitleaks YAML import) is a follow-up.
 
-use super::{
-    Detector, DetectorError, Finding, FindingKind, FindingSeverity, FixSuggestion,
-};
+use super::{Detector, DetectorError, Finding, FindingKind, FindingSeverity, FixSuggestion};
 use async_trait::async_trait;
 use bytes::Bytes;
 use flate2::read::GzDecoder;
@@ -53,10 +51,7 @@ fn rules() -> &'static [Rule] {
                 id: "gcp-service-account-key",
                 title: "GCP service-account private key (JSON)",
                 severity: FindingSeverity::Critical,
-                pattern: Regex::new(
-                    r#""type"\s*:\s*"service_account""#,
-                )
-                .unwrap(),
+                pattern: Regex::new(r#""type"\s*:\s*"service_account""#).unwrap(),
                 allowed_paths: Regex::new(r"(?i)(testdata|test-fixtures|fixtures/|examples?/)")
                     .unwrap(),
             },
@@ -233,11 +228,9 @@ fn scan_layer(bytes: &[u8]) -> Result<Vec<Finding>, DetectorError> {
 
 fn is_binary_ext(path: &str) -> bool {
     const BINARY_EXTS: &[&str] = &[
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp",
-        ".pdf", ".zip", ".gz", ".bz2", ".xz", ".tar", ".7z", ".br", ".zst",
-        ".so", ".dylib", ".dll", ".a", ".o", ".class", ".jar",
-        ".woff", ".woff2", ".ttf", ".otf", ".eot",
-        ".mp3", ".mp4", ".webm", ".mov", ".wav", ".ogg",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".pdf", ".zip", ".gz", ".bz2",
+        ".xz", ".tar", ".7z", ".br", ".zst", ".so", ".dylib", ".dll", ".a", ".o", ".class", ".jar",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".webm", ".mov", ".wav", ".ogg",
         ".pyc", ".pyo", ".wasm",
     ];
     let lower = path.to_ascii_lowercase();
@@ -247,8 +240,8 @@ fn is_binary_ext(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use tar::{Builder, Header};
 
     fn make_layer(files: &[(&str, &[u8])]) -> Bytes {
@@ -297,7 +290,8 @@ mod tests {
 
     #[tokio::test]
     async fn detects_ssh_private_key() {
-        let body = b"-----BEGIN OPENSSH PRIVATE KEY-----\nblob\n-----END OPENSSH PRIVATE KEY-----\n";
+        let body =
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\nblob\n-----END OPENSSH PRIVATE KEY-----\n";
         let layer = make_layer(&[("home/user/.ssh/id_rsa", body)]);
         let findings = SecretDetector::new().scan(layer).await.unwrap();
         assert_eq!(findings.len(), 1);

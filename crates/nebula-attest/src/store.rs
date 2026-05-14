@@ -87,19 +87,17 @@ impl AttestationStore for PgAttestationStore {
         .await?;
         Ok(rows
             .into_iter()
-            .map(
-                |(id, sd, ed, pt, bid, bk, lvl, ver, ua)| Attestation {
-                    id,
-                    subject_digest: sd,
-                    envelope_digest: ed,
-                    predicate_type: pt,
-                    builder_id: bid,
-                    builder_kind: bk,
-                    slsa_level: lvl,
-                    verified: ver,
-                    uploaded_at: ua,
-                },
-            )
+            .map(|(id, sd, ed, pt, bid, bk, lvl, ver, ua)| Attestation {
+                id,
+                subject_digest: sd,
+                envelope_digest: ed,
+                predicate_type: pt,
+                builder_id: bid,
+                builder_kind: bk,
+                slsa_level: lvl,
+                verified: ver,
+                uploaded_at: ua,
+            })
             .collect())
     }
 }

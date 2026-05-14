@@ -193,8 +193,14 @@ impl RebuildEmitter for GitLabPipelineEmitter {
             ("ref", self.ref_.as_str()),
             ("variables[NEBULACR_TRIGGER]", trigger_str),
             ("variables[NEBULACR_UPSTREAM]", event.upstream_ref.as_str()),
-            ("variables[NEBULACR_DOWNSTREAM]", event.downstream_ref.as_str()),
-            ("variables[NEBULACR_SEVERITY_MAX]", event.severity_max.as_str()),
+            (
+                "variables[NEBULACR_DOWNSTREAM]",
+                event.downstream_ref.as_str(),
+            ),
+            (
+                "variables[NEBULACR_SEVERITY_MAX]",
+                event.severity_max.as_str(),
+            ),
         ];
         let resp = self.client.post(&url).form(&params).send().await?;
         let status = resp.status();
@@ -242,7 +248,10 @@ pub fn compute_webhook_signature(secret: &str, body: &[u8]) -> Result<String, Em
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
         .map_err(|e| EmitError::Config(format!("hmac key: {e}")))?;
     mac.update(body);
-    Ok(format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+    Ok(format!(
+        "sha256={}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
 }
 
 #[async_trait]
@@ -295,11 +304,7 @@ impl TektonEventListenerEmitter {
             client: reqwest::Client::new(),
         }
     }
-    pub fn with_auth(
-        mut self,
-        header_name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn with_auth(mut self, header_name: impl Into<String>, value: impl Into<String>) -> Self {
         self.auth_header = Some((header_name.into(), value.into()));
         self
     }

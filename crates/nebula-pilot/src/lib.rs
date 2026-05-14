@@ -16,10 +16,10 @@ pub mod registry;
 pub mod tool;
 pub mod tools;
 
-pub use chat::{run_turn, ChatConfig, ChatError, ChatTurn};
+pub use chat::{ChatConfig, ChatError, ChatTurn, run_turn};
 pub use llm::{
-    anthropic::AnthropicClient, ollama::OllamaClient, openai::OpenAiClient, ChatMessage,
-    ChatRole, LlmClient, LlmError, LlmProvider, LlmStep, LlmToolCall, ToolDescriptor,
+    ChatMessage, ChatRole, LlmClient, LlmError, LlmProvider, LlmStep, LlmToolCall, ToolDescriptor,
+    anthropic::AnthropicClient, ollama::OllamaClient, openai::OpenAiClient,
 };
 pub use registry::ToolRegistry;
 pub use tool::{

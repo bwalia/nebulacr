@@ -236,11 +236,17 @@ mod tests {
         }
 
         async fn list_repositories(&self) -> Result<Vec<Repository>, ImportError> {
-            Ok(vec![Repository { name: "myorg/api".into() }])
+            Ok(vec![Repository {
+                name: "myorg/api".into(),
+            }])
         }
 
         async fn list_tags(&self, _: &Repository) -> Result<Vec<Tag>, ImportError> {
-            Ok(vec![Tag { name: "v1".into(), digest: String::new(), size: 0 }])
+            Ok(vec![Tag {
+                name: "v1".into(),
+                digest: String::new(),
+                size: 0,
+            }])
         }
 
         async fn fetch_manifest(
@@ -248,14 +254,13 @@ mod tests {
             _: &Repository,
             _: &str,
         ) -> Result<(Bytes, String), ImportError> {
-            Ok((self.manifest.clone(), "application/vnd.oci.image.manifest.v1+json".into()))
+            Ok((
+                self.manifest.clone(),
+                "application/vnd.oci.image.manifest.v1+json".into(),
+            ))
         }
 
-        async fn fetch_blob(
-            &self,
-            _: &Repository,
-            digest: &str,
-        ) -> Result<Bytes, ImportError> {
+        async fn fetch_blob(&self, _: &Repository, digest: &str) -> Result<Bytes, ImportError> {
             if digest == self.config_digest {
                 Ok(self.config_bytes.clone())
             } else if digest == self.layer_digest {
@@ -268,8 +273,10 @@ mod tests {
 
     #[tokio::test]
     async fn runner_copies_tag_with_blobs() {
-        let config_digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-        let layer_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        let config_digest =
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let layer_digest =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
         let manifest = serde_json::json!({
             "schemaVersion": 2,
             "config": { "digest": config_digest, "size": 16, "mediaType": "x" },

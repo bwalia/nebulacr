@@ -76,12 +76,11 @@ impl FindingsStore for PgFindingsStore {
     }
 
     async fn list_by_digest(&self, digest: &str) -> Result<Vec<Finding>, StoreError> {
-        let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
-            "SELECT raw FROM findings WHERE digest = $1 ORDER BY detected_at DESC",
-        )
-        .bind(digest)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(serde_json::Value,)> =
+            sqlx::query_as("SELECT raw FROM findings WHERE digest = $1 ORDER BY detected_at DESC")
+                .bind(digest)
+                .fetch_all(&self.pool)
+                .await?;
         let mut out = Vec::with_capacity(rows.len());
         for (raw,) in rows {
             out.push(serde_json::from_value::<Finding>(raw)?);

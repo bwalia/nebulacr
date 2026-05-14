@@ -80,8 +80,7 @@ pub fn verify_envelope(
     let pae = dsse_pae(&env.payload_type, &payload);
 
     for sig_obj in &env.signatures {
-        let sig_bytes =
-            base64::engine::general_purpose::STANDARD.decode(sig_obj.sig.as_bytes())?;
+        let sig_bytes = base64::engine::general_purpose::STANDARD.decode(sig_obj.sig.as_bytes())?;
         for v in verifiers {
             if !v.matches_keyid(&sig_obj.keyid) {
                 continue;
@@ -105,9 +104,9 @@ pub struct Ed25519Verifier {
 impl Ed25519Verifier {
     /// Construct from a 32-byte public key.
     pub fn from_bytes(keyid: impl Into<String>, key: &[u8]) -> Result<Self, VerifyError> {
-        let arr: [u8; 32] = key
-            .try_into()
-            .map_err(|_| VerifyError::Config(format!("ed25519 key must be 32 bytes, got {}", key.len())))?;
+        let arr: [u8; 32] = key.try_into().map_err(|_| {
+            VerifyError::Config(format!("ed25519 key must be 32 bytes, got {}", key.len()))
+        })?;
         let public = ed25519_dalek::VerifyingKey::from_bytes(&arr)
             .map_err(|e| VerifyError::Ed25519(e.to_string()))?;
         Ok(Self {
@@ -124,9 +123,9 @@ impl Verifier for Ed25519Verifier {
         keyid.is_empty() || keyid == self.keyid
     }
     fn verify_signature(&self, pae: &[u8], sig: &[u8]) -> Result<(), VerifyError> {
-        let arr: [u8; 64] = sig
-            .try_into()
-            .map_err(|_| VerifyError::Ed25519(format!("ed25519 sig must be 64 bytes, got {}", sig.len())))?;
+        let arr: [u8; 64] = sig.try_into().map_err(|_| {
+            VerifyError::Ed25519(format!("ed25519 sig must be 64 bytes, got {}", sig.len()))
+        })?;
         let signature = ed25519_dalek::Signature::from_bytes(&arr);
         use ed25519_dalek::Verifier as _;
         self.public
@@ -169,7 +168,6 @@ impl Verifier for RsaVerifier {
 mod tests {
     use super::*;
     use crate::dsse::DsseSignature;
-    use base64::Engine as _;
 
     #[test]
     fn pae_round_trip_matches_spec() {
@@ -203,8 +201,7 @@ mod tests {
             }],
         };
         let verifier = Ed25519Verifier::from_bytes("k1", public.as_bytes()).unwrap();
-        let verdict =
-            verify_envelope(&env, &[Box::new(verifier) as Box<dyn Verifier>]).unwrap();
+        let verdict = verify_envelope(&env, &[Box::new(verifier) as Box<dyn Verifier>]).unwrap();
         assert_eq!(verdict, VerifyVerdict::Verified);
     }
 
@@ -226,8 +223,7 @@ mod tests {
             }],
         };
         let v = Ed25519Verifier::from_bytes("any", signer_b_pub.as_bytes()).unwrap();
-        let verdict =
-            verify_envelope(&env, &[Box::new(v) as Box<dyn Verifier>]).unwrap();
+        let verdict = verify_envelope(&env, &[Box::new(v) as Box<dyn Verifier>]).unwrap();
         assert_eq!(verdict, VerifyVerdict::Unverified);
     }
 
@@ -250,8 +246,7 @@ mod tests {
             }],
         };
         let v = Ed25519Verifier::from_bytes("primary-key", public.as_bytes()).unwrap();
-        let verdict =
-            verify_envelope(&env, &[Box::new(v) as Box<dyn Verifier>]).unwrap();
+        let verdict = verify_envelope(&env, &[Box::new(v) as Box<dyn Verifier>]).unwrap();
         assert_eq!(verdict, VerifyVerdict::Unverified);
     }
 

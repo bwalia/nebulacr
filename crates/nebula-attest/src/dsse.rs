@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub struct DsseEnvelope {
     #[serde(rename = "payloadType")]
     pub payload_type: String,
-    pub payload: String,                 // base64 of the in-toto statement
+    pub payload: String, // base64 of the in-toto statement
     pub signatures: Vec<DsseSignature>,
 }
 
@@ -21,7 +21,7 @@ pub struct DsseEnvelope {
 pub struct DsseSignature {
     #[serde(default)]
     pub keyid: String,
-    pub sig: String,                     // base64 sig
+    pub sig: String, // base64 sig
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +72,6 @@ pub fn first_subject_digest(stmt: &InTotoStatement) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     fn make_envelope(predicate_type: &str, subject_sha256: &str) -> Vec<u8> {
         let stmt = serde_json::json!({
@@ -84,8 +83,8 @@ mod tests {
             "predicateType": predicate_type,
             "predicate": {}
         });
-        let payload = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&stmt).unwrap());
+        let payload =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&stmt).unwrap());
         let env = serde_json::json!({
             "payloadType": "application/vnd.in-toto+json",
             "payload": payload,
@@ -100,7 +99,10 @@ mod tests {
         let (env, stmt) = decode_envelope(&raw).unwrap();
         assert_eq!(env.signatures.len(), 1);
         assert_eq!(stmt.predicate_type, "https://slsa.dev/provenance/v1");
-        assert_eq!(first_subject_digest(&stmt).as_deref(), Some("sha256:deadbeef"));
+        assert_eq!(
+            first_subject_digest(&stmt).as_deref(),
+            Some("sha256:deadbeef")
+        );
     }
 
     #[test]

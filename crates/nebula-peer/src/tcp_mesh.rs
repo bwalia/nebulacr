@@ -33,19 +33,32 @@ const FETCH_LINE_BUF: usize = 64 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Request {
-    Lookup { digest: String },
-    Fetch { digest: String },
-    Announce { libp2p_id: String, digests: Vec<String> },
+    Lookup {
+        digest: String,
+    },
+    Fetch {
+        digest: String,
+    },
+    Announce {
+        libp2p_id: String,
+        digests: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Response {
     Ok,
-    Lookup { has: bool },
+    Lookup {
+        has: bool,
+    },
     /// `len` bytes follow on the same TCP stream after the JSON line.
-    Fetch { len: u64 },
-    Error { message: String },
+    Fetch {
+        len: u64,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// A node's view of the mesh. Holds the local cache, the configured
@@ -167,7 +180,10 @@ async fn handle_inbound(
     Ok(())
 }
 
-async fn write_json_line<W: AsyncWriteExt + Unpin>(w: &mut W, r: &Response) -> Result<(), std::io::Error> {
+async fn write_json_line<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    r: &Response,
+) -> Result<(), std::io::Error> {
     let mut bytes = serde_json::to_vec(r).unwrap();
     bytes.push(b'\n');
     w.write_all(&bytes).await
@@ -218,11 +234,7 @@ impl PeerMesh for GossipTcpMesh {
         Ok(found)
     }
 
-    async fn fetch_from(
-        &self,
-        peer: &PeerEndpoint,
-        digest: &str,
-    ) -> Result<Bytes, MeshError> {
+    async fn fetch_from(&self, peer: &PeerEndpoint, digest: &str) -> Result<Bytes, MeshError> {
         // Open one connection, send Fetch, parse Response::Fetch
         // header + drain `len` bytes.
         let stream = TcpStream::connect(&peer.addr)

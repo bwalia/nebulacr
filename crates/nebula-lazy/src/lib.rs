@@ -10,10 +10,10 @@ pub mod jobs;
 pub mod referrers;
 pub mod worker;
 
-pub use indexer::{IndexFormat, TocIndexer, TocOutput, LayerSource, LazyError};
+pub use indexer::{IndexFormat, LayerSource, LazyError, TocIndexer, TocOutput};
 pub use jobs::{JobStatus, LazyJob, LazyJobStore, PgLazyJobStore};
-pub use referrers::{Referrer, ReferrerStore, PgReferrerStore};
+pub use referrers::{PgReferrerStore, Referrer, ReferrerStore};
 pub use worker::{
-    InMemoryLayerFetcher, LayerFetcher, ObjectStoreLayerFetcher, StubEstargzIndexer,
-    Worker, WorkerConfig, WorkerControl, WorkerError,
+    InMemoryLayerFetcher, LayerFetcher, ObjectStoreLayerFetcher, StubEstargzIndexer, Worker,
+    WorkerConfig, WorkerControl, WorkerError,
 };

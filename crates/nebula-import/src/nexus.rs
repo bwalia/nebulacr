@@ -67,10 +67,13 @@ impl RegistrySource for NexusSource {
         let url = format!("{}/v2/_catalog?n=2000", self.base);
         let req = self.auth(self.client.get(&url));
         let body: CatalogResp = req.send().await?.error_for_status()?.json().await?;
-        let names = body.repositories.into_iter().filter(|n| match &self.docker_repo {
-            Some(prefix) => n.starts_with(prefix),
-            None => true,
-        });
+        let names = body
+            .repositories
+            .into_iter()
+            .filter(|n| match &self.docker_repo {
+                Some(prefix) => n.starts_with(prefix),
+                None => true,
+            });
         Ok(names.map(|name| Repository { name }).collect())
     }
 
@@ -86,11 +89,7 @@ impl RegistrySource for NexusSource {
         self.distribution.fetch_manifest(repo, tag).await
     }
 
-    async fn fetch_blob(
-        &self,
-        repo: &Repository,
-        digest: &str,
-    ) -> Result<Bytes, ImportError> {
+    async fn fetch_blob(&self, repo: &Repository, digest: &str) -> Result<Bytes, ImportError> {
         self.distribution.fetch_blob(repo, digest).await
     }
 }

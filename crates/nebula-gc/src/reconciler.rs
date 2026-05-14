@@ -110,7 +110,10 @@ impl Reconciler {
         .fetch_all(&self.pool)
         .await?;
 
-        debug!(rows = rows.len(), "online-gc reconcile candidates collected");
+        debug!(
+            rows = rows.len(),
+            "online-gc reconcile candidates collected"
+        );
 
         for (tenant, digest, observed, expected) in rows {
             stats.blobs_examined += 1;
@@ -184,12 +187,7 @@ impl Reconciler {
         Ok(())
     }
 
-    async fn fix_missing(
-        &self,
-        tenant: &str,
-        digest: &str,
-        expected: i64,
-    ) -> Result<(), GcError> {
+    async fn fix_missing(&self, tenant: &str, digest: &str, expected: i64) -> Result<(), GcError> {
         sqlx::query(
             "INSERT INTO blob_refcounts (tenant, blob_digest, refcount, last_seen_at, bytes)
              VALUES ($1, $2, $3, NOW(), 0)
@@ -245,11 +243,7 @@ impl Reconciler {
     /// Mark older drift rows as corrected once they've been resolved.
     /// Used by operators after they fix data manually; not called
     /// automatically.
-    pub async fn mark_drift_corrected(
-        &self,
-        tenant: &str,
-        digest: &str,
-    ) -> Result<u64, GcError> {
+    pub async fn mark_drift_corrected(&self, tenant: &str, digest: &str) -> Result<u64, GcError> {
         let res = sqlx::query(
             "UPDATE gc_drift SET corrected_at = NOW()
              WHERE tenant = $1 AND blob_digest = $2 AND corrected_at IS NULL",

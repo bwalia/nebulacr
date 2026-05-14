@@ -115,11 +115,7 @@ impl RegistrySource for HarborSource {
         self.distribution.fetch_manifest(repo, tag).await
     }
 
-    async fn fetch_blob(
-        &self,
-        repo: &Repository,
-        digest: &str,
-    ) -> Result<Bytes, ImportError> {
+    async fn fetch_blob(&self, repo: &Repository, digest: &str) -> Result<Bytes, ImportError> {
         self.distribution.fetch_blob(repo, digest).await
     }
 }

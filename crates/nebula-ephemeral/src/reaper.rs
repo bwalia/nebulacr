@@ -13,11 +13,11 @@
 //! without double-deleting. Cooperative pause/resume mirrors the
 //! 009 reaper.
 
-use object_store::path::Path as StorePath;
 use object_store::ObjectStore;
+use object_store::path::Path as StorePath;
 use sqlx::{Pool, Postgres};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 

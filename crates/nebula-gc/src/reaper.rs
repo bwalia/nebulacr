@@ -11,11 +11,11 @@
 //! [`ReaperControl`] flag at the top of each cycle.
 
 use crate::refcount::GcError;
-use object_store::path::Path as StorePath;
 use object_store::ObjectStore;
+use object_store::path::Path as StorePath;
 use sqlx::{Pool, Postgres};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -193,8 +193,7 @@ impl ContinuousReaper {
         debug!(count = candidates.len(), "online-gc reaper batch acquired");
 
         let mut result = CycleResult::default();
-        let interval =
-            Duration::from_secs_f64(1.0 / self.config.sweep_qps.max(1) as f64);
+        let interval = Duration::from_secs_f64(1.0 / self.config.sweep_qps.max(1) as f64);
         let mut next_tick = Instant::now();
 
         for (tenant, blob_digest, bytes) in candidates {
@@ -358,7 +357,10 @@ mod tests {
     #[test]
     fn config_defaults_are_safe() {
         let c = ReaperConfig::default();
-        assert!(c.grace.as_secs() >= 3600, "grace must be long enough to survive uploads");
+        assert!(
+            c.grace.as_secs() >= 3600,
+            "grace must be long enough to survive uploads"
+        );
         assert!(c.batch_size > 0);
         assert!(c.sweep_qps > 0);
     }

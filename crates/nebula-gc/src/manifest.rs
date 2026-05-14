@@ -72,7 +72,9 @@ pub fn extract_blob_digests(bytes: &[u8]) -> Result<Vec<BlobDescriptor>, Manifes
     let mut out: Vec<BlobDescriptor> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let push = |d: RawDescriptor, sink: &mut Vec<BlobDescriptor>, seen: &mut std::collections::HashSet<String>| {
+    let push = |d: RawDescriptor,
+                sink: &mut Vec<BlobDescriptor>,
+                seen: &mut std::collections::HashSet<String>| {
         if d.digest.is_empty() {
             return;
         }
@@ -121,9 +123,21 @@ mod tests {
         let got = extract_blob_digests(body).unwrap();
         let digests: Vec<&str> = got.iter().map(|d| d.digest.as_str()).collect();
         assert_eq!(digests.len(), 3);
-        assert!(digests.contains(&"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"));
-        assert!(digests.contains(&"sha256:1111111111111111111111111111111111111111111111111111111111111111"));
-        assert!(digests.contains(&"sha256:2222222222222222222222222222222222222222222222222222222222222222"));
+        assert!(
+            digests.contains(
+                &"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            )
+        );
+        assert!(
+            digests.contains(
+                &"sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            )
+        );
+        assert!(
+            digests.contains(
+                &"sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            )
+        );
     }
 
     #[test]
@@ -165,7 +179,10 @@ mod tests {
         let got = extract_blob_digests(body).unwrap();
         let digests: Vec<&str> = got.iter().map(|d| d.digest.as_str()).collect();
         assert_eq!(digests.len(), 1);
-        assert_eq!(digests[0], "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        assert_eq!(
+            digests[0],
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
     }
 
     #[test]

@@ -1,8 +1,6 @@
 //! Trivial ping tool — used by tests + a smoke-test for tool dispatch.
 
-use crate::tool::{
-    Destructiveness, Tool, ToolCtx, ToolError, ToolOutput, ToolPermission,
-};
+use crate::tool::{Destructiveness, Tool, ToolCtx, ToolError, ToolOutput, ToolPermission};
 use async_trait::async_trait;
 
 pub struct PingTool;

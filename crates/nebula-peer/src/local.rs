@@ -58,11 +58,7 @@ impl PeerMesh for LocalMesh {
         Ok(found)
     }
 
-    async fn fetch_from(
-        &self,
-        peer: &PeerEndpoint,
-        digest: &str,
-    ) -> Result<Bytes, MeshError> {
+    async fn fetch_from(&self, peer: &PeerEndpoint, digest: &str) -> Result<Bytes, MeshError> {
         for p in self.peers.read().unwrap().iter() {
             if p.endpoint == *peer {
                 let bytes = p

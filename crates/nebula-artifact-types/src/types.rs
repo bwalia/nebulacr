@@ -53,8 +53,5 @@ pub trait ArtifactType: Send + Sync {
     /// fetched via the supplied closure-style trait. Slice 1 supplies
     /// only the manifest bytes — slice 2 widens the signature to allow
     /// fetching referenced blobs.
-    async fn validate(
-        &self,
-        manifest_bytes: &[u8],
-    ) -> Result<ArtifactMetadata, ArtifactError>;
+    async fn validate(&self, manifest_bytes: &[u8]) -> Result<ArtifactMetadata, ArtifactError>;
 }

@@ -19,9 +19,7 @@
 //! (slice 3); slice 2 just emits findings and lets the existing
 //! suppression machinery silence noisy ones.
 
-use super::{
-    Detector, DetectorError, Finding, FindingKind, FindingSeverity, FixSuggestion,
-};
+use super::{Detector, DetectorError, Finding, FindingKind, FindingSeverity, FixSuggestion};
 use async_trait::async_trait;
 use bytes::Bytes;
 use flate2::read::GzDecoder;
@@ -30,7 +28,12 @@ use tar::Archive;
 
 /// File-name prefixes the detector treats as license candidates.
 const LICENSE_FILENAMES: &[&str] = &[
-    "license", "licence", "copying", "copyright", "notice", "legal",
+    "license",
+    "licence",
+    "copying",
+    "copyright",
+    "notice",
+    "legal",
 ];
 
 /// Maximum size of a single license file we'll parse. Larger files
@@ -110,7 +113,10 @@ fn scan_layer_blocking(bytes: &[u8]) -> Result<Vec<Finding>, DetectorError> {
             Some(s) => s.to_lowercase(),
             None => continue,
         };
-        if !LICENSE_FILENAMES.iter().any(|prefix| filename.starts_with(prefix)) {
+        if !LICENSE_FILENAMES
+            .iter()
+            .any(|prefix| filename.starts_with(prefix))
+        {
             continue;
         }
         let size = entry.header().size().unwrap_or(0);
@@ -145,10 +151,7 @@ fn scan_layer_blocking(bytes: &[u8]) -> Result<Vec<Finding>, DetectorError> {
                     kind: FindingKind::License,
                     severity: FindingSeverity::Info,
                     finding_id: "UNKNOWN-LICENSE".to_string(),
-                    title: format!(
-                        "license-like file at {} but no SPDX match",
-                        path_str
-                    ),
+                    title: format!("license-like file at {} but no SPDX match", path_str),
                     package: None,
                     path: Some(path_str),
                     line: None,
@@ -186,8 +189,8 @@ fn severity_for_class(c: LicenseClass) -> FindingSeverity {
 fn license_class(spdx: &str) -> LicenseClass {
     match spdx {
         // Permissive
-        "Apache-2.0" | "MIT" | "BSD-2-Clause" | "BSD-3-Clause" | "ISC"
-        | "Unlicense" | "CC0-1.0" => LicenseClass::Permissive,
+        "Apache-2.0" | "MIT" | "BSD-2-Clause" | "BSD-3-Clause" | "ISC" | "Unlicense"
+        | "CC0-1.0" => LicenseClass::Permissive,
         // Weak copyleft
         "MPL-2.0" | "EPL-2.0" | "CDDL-1.0" | "LGPL-2.1-only" | "LGPL-2.1-or-later"
         | "LGPL-3.0-only" | "LGPL-3.0-or-later" => LicenseClass::WeakCopyleft,
@@ -220,14 +223,10 @@ fn classify_license(body: &str) -> Option<&'static str> {
         }
         return Some("GPL-2.0-or-later");
     }
-    if normalized.contains("apache license, version 2.0")
-        || normalized.contains("apache-2.0")
-    {
+    if normalized.contains("apache license, version 2.0") || normalized.contains("apache-2.0") {
         return Some("Apache-2.0");
     }
-    if normalized.contains("mozilla public license, v. 2.0")
-        || normalized.contains("mpl-2.0")
-    {
+    if normalized.contains("mozilla public license, v. 2.0") || normalized.contains("mpl-2.0") {
         return Some("MPL-2.0");
     }
     if normalized.contains("eclipse public license - v 2.0")
@@ -274,7 +273,10 @@ mod tests {
 
     fn assert_classified(body: &str, expected: &str) {
         let got = classify_license(body).unwrap_or_else(|| {
-            panic!("expected {expected}, got None for body starting {:?}", &body[..40.min(body.len())])
+            panic!(
+                "expected {expected}, got None for body starting {:?}",
+                &body[..40.min(body.len())]
+            )
         });
         assert_eq!(got, expected);
     }
@@ -343,18 +345,26 @@ mod tests {
         assert_eq!(license_class("MIT"), LicenseClass::Permissive);
         assert_eq!(license_class("Apache-2.0"), LicenseClass::Permissive);
         assert_eq!(license_class("MPL-2.0"), LicenseClass::WeakCopyleft);
-        assert_eq!(license_class("LGPL-3.0-or-later"), LicenseClass::WeakCopyleft);
-        assert_eq!(license_class("GPL-3.0-or-later"), LicenseClass::StrongCopyleft);
-        assert_eq!(license_class("AGPL-3.0-or-later"), LicenseClass::StrongCopyleft);
+        assert_eq!(
+            license_class("LGPL-3.0-or-later"),
+            LicenseClass::WeakCopyleft
+        );
+        assert_eq!(
+            license_class("GPL-3.0-or-later"),
+            LicenseClass::StrongCopyleft
+        );
+        assert_eq!(
+            license_class("AGPL-3.0-or-later"),
+            LicenseClass::StrongCopyleft
+        );
         assert_eq!(license_class("Custom-1.0"), LicenseClass::Unknown);
     }
 
     #[tokio::test]
     async fn scans_layer_with_apache_license() {
         // Build a minimal gzipped tarball with a single LICENSE file.
-        use flate2::write::GzEncoder;
         use flate2::Compression;
-        use std::io::Write;
+        use flate2::write::GzEncoder;
         use tar::{Builder, Header};
 
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
@@ -384,8 +394,8 @@ mod tests {
 
     #[tokio::test]
     async fn scans_layer_with_unknown_license_yields_info_finding() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use tar::{Builder, Header};
 
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());

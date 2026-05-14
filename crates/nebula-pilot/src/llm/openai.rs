@@ -121,7 +121,10 @@ impl LlmClient for OpenAiClient {
             body["tools"] = serde_json::Value::Array(tools_arr);
         }
 
-        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         let resp = self
             .client
             .post(&url)
@@ -138,8 +141,10 @@ impl LlmClient for OpenAiClient {
                 body,
             });
         }
-        let parsed: OpenAiResponse =
-            resp.json().await.map_err(|e| LlmError::Parse(e.to_string()))?;
+        let parsed: OpenAiResponse = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Parse(e.to_string()))?;
         let choice = parsed
             .choices
             .into_iter()
@@ -152,9 +157,8 @@ impl LlmClient for OpenAiClient {
                 .tool_calls
                 .into_iter()
                 .map(|c| {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&c.function.arguments)
-                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                    let input: serde_json::Value = serde_json::from_str(&c.function.arguments)
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
                     LlmToolCall {
                         id: c.id,
                         name: c.function.name,
@@ -204,6 +208,9 @@ mod tests {
         });
         let parsed: OpenAiResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.choices[0].message.tool_calls.len(), 1);
-        assert_eq!(parsed.choices[0].message.tool_calls[0].function.name, "ping");
+        assert_eq!(
+            parsed.choices[0].message.tool_calls[0].function.name,
+            "ping"
+        );
     }
 }

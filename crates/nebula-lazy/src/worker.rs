@@ -15,8 +15,8 @@ use bytes::Bytes;
 use chrono::Utc;
 use sqlx::{Pool, Postgres};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -162,10 +162,7 @@ impl Worker {
     }
 
     pub async fn run(&self) {
-        info!(
-            indexers = self.indexers.len(),
-            "lazy-pull worker starting"
-        );
+        info!(indexers = self.indexers.len(), "lazy-pull worker starting");
         while !self.control.is_stopped() {
             match self.claim_and_run_one().await {
                 Ok(true) => {
@@ -219,8 +216,9 @@ impl Worker {
             return Ok(false);
         };
 
-        let format_enum = IndexFormat::parse(&format)
-            .ok_or_else(|| WorkerError::Indexer(LazyError::Parse(format!("bad format {format}"))))?;
+        let format_enum = IndexFormat::parse(&format).ok_or_else(|| {
+            WorkerError::Indexer(LazyError::Parse(format!("bad format {format}")))
+        })?;
 
         let Some(indexer) = self.indexers.get(&format_enum).cloned() else {
             self.mark_failed(job_id, &format!("no indexer for format {format}"))

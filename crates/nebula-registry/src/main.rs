@@ -1010,10 +1010,8 @@ async fn put_manifest(
                     if let Err(e) = r {
                         warn!(error = %e, tag = %params.reference, "ttl tag upsert failed");
                     } else {
-                        response_headers_extra.push((
-                            "X-NebulaCR-TTL-Expires-At".into(),
-                            expires_at.to_rfc3339(),
-                        ));
+                        response_headers_extra
+                            .push(("X-NebulaCR-TTL-Expires-At".into(), expires_at.to_rfc3339()));
                     }
                 }
                 Err(e) => {
@@ -1058,9 +1056,7 @@ async fn put_manifest(
     // Failures are logged but do NOT fail the push (slice 1 is
     // advisory; strict-mode rejection lands in slice 2 with project
     // policy plumbing).
-    if let (Some(reg), Some(pool)) =
-        (state.artifact_registry.clone(), state.gc_pool.clone())
-    {
+    if let (Some(reg), Some(pool)) = (state.artifact_registry.clone(), state.gc_pool.clone()) {
         let media_type = detect_manifest_media_type(&body);
         let body_clone = body.clone();
         let digest_clone = digest.clone();
@@ -1089,9 +1085,7 @@ async fn put_manifest(
     // 018 lineage capture — fetch the image config blob async and
     // record any base-image hint into image_lineage. Fire-and-forget;
     // failures are logged but never fail the push.
-    if let (Some(config_digest), Some(pool)) =
-        (parsed_config_digest, state.gc_pool.clone())
-    {
+    if let (Some(config_digest), Some(pool)) = (parsed_config_digest, state.gc_pool.clone()) {
         let store = state.store.clone();
         let tenant = params.tenant.clone();
         let project = params.project.clone();
@@ -1877,8 +1871,8 @@ async fn complete_blob_upload(
             .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(false)
         {
-            let format = std::env::var("NEBULACR_LAZY__FORMAT")
-                .unwrap_or_else(|_| "estargz".into());
+            let format =
+                std::env::var("NEBULACR_LAZY__FORMAT").unwrap_or_else(|_| "estargz".into());
             let layer_digest = expected_digest.clone();
             let tenant = params.tenant.clone();
             let project = params.project.clone();
@@ -2099,9 +2093,15 @@ async fn gc_pause(
     match &state.gc_reaper_control {
         Some(c) => {
             c.pause();
-            Ok((StatusCode::OK, axum::Json(serde_json::json!({"paused": true}))).into_response())
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": true})),
+            )
+                .into_response())
         }
-        None => Err(RegistryError::Internal("online-gc reaper not running".into())),
+        None => Err(RegistryError::Internal(
+            "online-gc reaper not running".into(),
+        )),
     }
 }
 
@@ -2115,9 +2115,15 @@ async fn gc_resume(
     match &state.gc_reaper_control {
         Some(c) => {
             c.resume();
-            Ok((StatusCode::OK, axum::Json(serde_json::json!({"paused": false}))).into_response())
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": false})),
+            )
+                .into_response())
         }
-        None => Err(RegistryError::Internal("online-gc reaper not running".into())),
+        None => Err(RegistryError::Internal(
+            "online-gc reaper not running".into(),
+        )),
     }
 }
 
@@ -2205,7 +2211,11 @@ async fn ttl_pause(
     match &state.ttl_reaper_control {
         Some(c) => {
             c.pause();
-            Ok((StatusCode::OK, axum::Json(serde_json::json!({"paused": true}))).into_response())
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": true})),
+            )
+                .into_response())
         }
         None => Err(RegistryError::Internal("ttl reaper not running".into())),
     }
@@ -2220,7 +2230,11 @@ async fn ttl_resume(
     match &state.ttl_reaper_control {
         Some(c) => {
             c.resume();
-            Ok((StatusCode::OK, axum::Json(serde_json::json!({"paused": false}))).into_response())
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": false})),
+            )
+                .into_response())
         }
         None => Err(RegistryError::Internal("ttl reaper not running".into())),
     }
@@ -2475,16 +2489,17 @@ async fn upload_attestation(
         .ok_or_else(|| RegistryError::Internal("attestation backend not configured".into()))?;
 
     // 1. Parse DSSE.
-    let (env, stmt) = nebula_attest::decode_envelope(&body)
-        .map_err(|e| RegistryError::ManifestInvalid {
+    let (env, stmt) =
+        nebula_attest::decode_envelope(&body).map_err(|e| RegistryError::ManifestInvalid {
             reason: format!("invalid DSSE: {e}"),
         })?;
 
     // 2. Resolve subject digest. Caller may pin via ?subject=...; else
     //    we use the first sha256 entry inside the in-toto statement.
-    let subject_digest = q.subject.clone().or_else(|| {
-        nebula_attest::dsse::first_subject_digest(&stmt)
-    });
+    let subject_digest = q
+        .subject
+        .clone()
+        .or_else(|| nebula_attest::dsse::first_subject_digest(&stmt));
     let subject_digest = subject_digest.ok_or_else(|| RegistryError::ManifestInvalid {
         reason: "DSSE statement has no sha256 subject digest".into(),
     })?;
@@ -3775,7 +3790,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         } else {
-            warn!("NEBULACR_GC__ONLINE=true but neither scanner nor NEBULACR_GC__POSTGRES_URL provided; using no-op refcounter");
+            warn!(
+                "NEBULACR_GC__ONLINE=true but neither scanner nor NEBULACR_GC__POSTGRES_URL provided; using no-op refcounter"
+            );
             None
         };
         match pool_opt {
@@ -3962,11 +3979,8 @@ async fn main() -> anyhow::Result<()> {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(5000),
                 };
-                let drainer = nebula_cost::Drainer::new(
-                    pool.clone(),
-                    drainer_cfg,
-                    drainer_control.clone(),
-                );
+                let drainer =
+                    nebula_cost::Drainer::new(pool.clone(), drainer_cfg, drainer_control.clone());
                 tokio::spawn(async move {
                     let _ = drainer.run().await;
                 });

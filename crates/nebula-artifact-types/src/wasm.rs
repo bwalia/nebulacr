@@ -47,8 +47,7 @@ impl ArtifactType for WasmType {
         let m: OciManifest = serde_json::from_slice(manifest_bytes)
             .map_err(|e| ArtifactError::Serde(e.to_string()))?;
 
-        let is_component =
-            m.config.media_type == WASM_COMPONENT_CONFIG_MEDIA;
+        let is_component = m.config.media_type == WASM_COMPONENT_CONFIG_MEDIA;
         if m.config.media_type != WASM_CONFIG_MEDIA && !is_component {
             return Err(ArtifactError::UnsupportedMediaType);
         }

@@ -7,4 +7,4 @@ pub mod reaper;
 pub mod ttl;
 
 pub use reaper::{TtlReaper, TtlReaperConfig, TtlReaperControl, TtlReaperError, TtlReaperStats};
-pub use ttl::{parse_ttl_header, TtlError, TtlSpec};
+pub use ttl::{TtlError, TtlSpec, parse_ttl_header};

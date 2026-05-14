@@ -14,7 +14,7 @@ use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
 
 pub struct AcrSource {
-    pub base: String,        // e.g. "https://myacr.azurecr.io"
+    pub base: String, // e.g. "https://myacr.azurecr.io"
     pub bearer: Option<String>,
     distribution: DistributionSource,
     client: reqwest::Client,
@@ -61,7 +61,11 @@ impl RegistrySource for AcrSource {
             return self.distribution.list_repositories().await;
         }
         let body: AcrCatalog = resp.error_for_status()?.json().await?;
-        Ok(body.repositories.into_iter().map(|name| Repository { name }).collect())
+        Ok(body
+            .repositories
+            .into_iter()
+            .map(|name| Repository { name })
+            .collect())
     }
 
     async fn list_tags(&self, repo: &Repository) -> Result<Vec<Tag>, ImportError> {
@@ -76,11 +80,7 @@ impl RegistrySource for AcrSource {
         self.distribution.fetch_manifest(repo, tag).await
     }
 
-    async fn fetch_blob(
-        &self,
-        repo: &Repository,
-        digest: &str,
-    ) -> Result<Bytes, ImportError> {
+    async fn fetch_blob(&self, repo: &Repository, digest: &str) -> Result<Bytes, ImportError> {
         self.distribution.fetch_blob(repo, digest).await
     }
 }

@@ -20,5 +20,5 @@ pub use distribution::DistributionSource;
 pub use harbor::HarborSource;
 pub use jobs::{ImportJobRow, ImportJobStore, ImportPhase, PgImportJobStore};
 pub use nexus::NexusSource;
-pub use runner::{ImportRunner, ImportRunReport, ImportRunnerConfig};
+pub use runner::{ImportRunReport, ImportRunner, ImportRunnerConfig};
 pub use source::{ImportError, RegistrySource, Repository, Tag};

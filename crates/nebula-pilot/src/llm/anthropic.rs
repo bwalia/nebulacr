@@ -133,8 +133,10 @@ impl LlmClient for AnthropicClient {
                 body,
             });
         }
-        let parsed: AnthropicResponse =
-            resp.json().await.map_err(|e| LlmError::Parse(e.to_string()))?;
+        let parsed: AnthropicResponse = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Parse(e.to_string()))?;
 
         // Tool-use blocks override text-only output: if any tool_use
         // appears, we return ToolCalls and let the loop dispatch.

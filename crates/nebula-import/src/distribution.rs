@@ -51,7 +51,11 @@ impl RegistrySource for DistributionSource {
         let url = format!("{}/v2/_catalog?n=1000", self.base);
         let req = self.auth(self.client.get(&url));
         let body: CatalogResp = req.send().await?.error_for_status()?.json().await?;
-        Ok(body.repositories.into_iter().map(|name| Repository { name }).collect())
+        Ok(body
+            .repositories
+            .into_iter()
+            .map(|name| Repository { name })
+            .collect())
     }
 
     async fn list_tags(&self, repo: &Repository) -> Result<Vec<Tag>, ImportError> {
@@ -62,7 +66,11 @@ impl RegistrySource for DistributionSource {
             .tags
             .unwrap_or_default()
             .into_iter()
-            .map(|name| Tag { name, digest: String::new(), size: 0 })
+            .map(|name| Tag {
+                name,
+                digest: String::new(),
+                size: 0,
+            })
             .collect())
     }
 
@@ -90,11 +98,7 @@ impl RegistrySource for DistributionSource {
         Ok((bytes, media_type))
     }
 
-    async fn fetch_blob(
-        &self,
-        repo: &Repository,
-        digest: &str,
-    ) -> Result<Bytes, ImportError> {
+    async fn fetch_blob(&self, repo: &Repository, digest: &str) -> Result<Bytes, ImportError> {
         let url = format!("{}/v2/{}/blobs/{}", self.base, repo.name, digest);
         let req = self.auth(self.client.get(&url));
         let resp = req.send().await?.error_for_status()?;

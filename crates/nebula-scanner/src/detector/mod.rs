@@ -72,7 +72,7 @@ pub struct PackageRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixSuggestion {
-    pub kind: String,                 // 'upgrade-package' | 'rotate-secret' | 'patch-license' | ...
+    pub kind: String, // 'upgrade-package' | 'rotate-secret' | 'patch-license' | ...
     pub detail: String,
 }
 
@@ -80,7 +80,7 @@ pub struct FixSuggestion {
 pub struct Finding {
     pub kind: FindingKind,
     pub severity: FindingSeverity,
-    pub finding_id: String,           // CVE id | SPDX id | rule id | signature
+    pub finding_id: String, // CVE id | SPDX id | rule id | signature
     pub title: String,
     pub package: Option<PackageRef>,
     pub path: Option<String>,

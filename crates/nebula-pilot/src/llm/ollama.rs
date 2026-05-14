@@ -126,8 +126,10 @@ impl LlmClient for OllamaClient {
                 body,
             });
         }
-        let parsed: OllamaResponse =
-            resp.json().await.map_err(|e| LlmError::Parse(e.to_string()))?;
+        let parsed: OllamaResponse = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Parse(e.to_string()))?;
 
         if !parsed.message.tool_calls.is_empty() {
             let calls: Vec<LlmToolCall> = parsed

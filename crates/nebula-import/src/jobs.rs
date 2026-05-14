@@ -51,11 +51,8 @@ pub enum JobError {
 
 #[async_trait]
 pub trait ImportJobStore: Send + Sync {
-    async fn create(
-        &self,
-        tenant: &str,
-        spec: serde_json::Value,
-    ) -> Result<ImportJobRow, JobError>;
+    async fn create(&self, tenant: &str, spec: serde_json::Value)
+    -> Result<ImportJobRow, JobError>;
     async fn get(&self, id: Uuid) -> Result<Option<ImportJobRow>, JobError>;
     async fn set_phase(&self, id: Uuid, phase: ImportPhase) -> Result<(), JobError>;
 }

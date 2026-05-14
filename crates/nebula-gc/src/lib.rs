@@ -27,10 +27,8 @@ pub mod reconciler;
 pub mod refcount;
 
 pub use manifest::{
-    extract_blob_digests, extract_config_digest, BlobDescriptor, ManifestParseError,
+    BlobDescriptor, ManifestParseError, extract_blob_digests, extract_config_digest,
 };
-pub use reaper::{
-    ContinuousReaper, CycleResult, ReaperConfig, ReaperControl, ReaperStats,
-};
+pub use reaper::{ContinuousReaper, CycleResult, ReaperConfig, ReaperControl, ReaperStats};
 pub use reconciler::{ReconcileConfig, ReconcileStats, Reconciler};
 pub use refcount::{BlobRefCounter, GcError, NoopBlobRefCounter, PgBlobRefCounter};
