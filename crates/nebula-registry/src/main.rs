@@ -92,6 +92,9 @@ struct AppState {
     /// Control handle for the continuous reaper. `None` when GC is
     /// disabled or the reaper task isn't running.
     gc_reaper_control: Option<Arc<nebula_gc::ReaperControl>>,
+    /// Postgres pool used by GC's reconciler endpoint. `None` when GC
+    /// is disabled.
+    gc_pool: Option<sqlx::PgPool>,
     /// Registry audit log for tracking who pushed/pulled what.
     audit_log: Arc<audit::RegistryAuditLog>,
     /// Process start time for uptime tracking.
@@ -1832,6 +1835,53 @@ async fn gc_resume(
     }
 }
 
+/// POST /v2/_gc/reconcile — run the reconciler. Body
+/// `{"apply": bool, "max": int?}`.
+#[derive(Debug, serde::Deserialize, Default)]
+struct GcReconcileBody {
+    #[serde(default)]
+    apply: bool,
+    #[serde(default)]
+    max: Option<i64>,
+}
+
+#[instrument(name = "gc_reconcile", skip(state, claims))]
+async fn gc_reconcile(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    body: Option<axum::Json<GcReconcileBody>>,
+) -> Result<Response, RegistryError> {
+    gc_admin_authorize(&claims)?;
+    let body = body.map(|axum::Json(b)| b).unwrap_or_default();
+
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("online-gc not enabled".into()))?;
+
+    let cfg = nebula_gc::ReconcileConfig {
+        apply_fix: body.apply,
+        max_blobs: body.max,
+    };
+    let stats = nebula_gc::Reconciler::new(pool)
+        .reconcile(cfg)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("reconcile failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "examined":  stats.blobs_examined,
+            "orphan":    stats.orphan_count,
+            "missing":   stats.missing_count,
+            "underflow": stats.underflow_count,
+            "corrected": stats.corrected,
+            "applied":   body.apply,
+        })),
+    )
+        .into_response())
+}
+
 // ── Helper Functions ─────────────────────────────────────────────────────────
 
 /// Resolve a manifest reference: if it is a tag, read the tag link to get the digest,
@@ -2998,9 +3048,10 @@ async fn main() -> anyhow::Result<()> {
     let gc_online_enabled = std::env::var("NEBULACR_GC__ONLINE")
         .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
         .unwrap_or(false);
-    let (gc_refcounter, gc_reaper_control): (
+    let (gc_refcounter, gc_reaper_control, gc_pool): (
         Arc<dyn nebula_gc::BlobRefCounter>,
         Option<Arc<nebula_gc::ReaperControl>>,
+        Option<sqlx::PgPool>,
     ) = if gc_online_enabled {
         let pool_opt = if let Some(rt) = scanner_runtime.as_ref() {
             Some(rt.pg.clone())
@@ -3072,13 +3123,13 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let rc: Arc<dyn nebula_gc::BlobRefCounter> =
-                    Arc::new(nebula_gc::PgBlobRefCounter::new(pool));
-                (rc, control)
+                    Arc::new(nebula_gc::PgBlobRefCounter::new(pool.clone()));
+                (rc, control, Some(pool))
             }
-            None => (Arc::new(nebula_gc::NoopBlobRefCounter), None),
+            None => (Arc::new(nebula_gc::NoopBlobRefCounter), None, None),
         }
     } else {
-        (Arc::new(nebula_gc::NoopBlobRefCounter), None)
+        (Arc::new(nebula_gc::NoopBlobRefCounter), None, None)
     };
 
     let state = AppState {
@@ -3095,6 +3146,7 @@ async fn main() -> anyhow::Result<()> {
         scanner_queue,
         gc_refcounter,
         gc_reaper_control,
+        gc_pool,
         audit_log: audit_log.clone(),
         start_time,
     };
@@ -3196,10 +3248,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/v2/{project}/{name}/tags/list", get(list_tags_2seg))
         // Catalog
         .route("/v2/_catalog", get(catalog))
-        // Online GC control plane (009 slice 2)
+        // Online GC control plane (009 slice 2-3)
         .route("/v2/_gc/status", get(gc_status))
         .route("/v2/_gc/pause", post(gc_pause))
-        .route("/v2/_gc/resume", post(gc_resume));
+        .route("/v2/_gc/resume", post(gc_resume))
+        .route("/v2/_gc/reconcile", post(gc_reconcile));
 
     // Internal replication routes — served on both the main port (for cross-cluster
     // access via proxy) and the dedicated internal port (for intra-cluster use).

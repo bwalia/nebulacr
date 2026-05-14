@@ -2651,6 +2651,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "sqlx",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
