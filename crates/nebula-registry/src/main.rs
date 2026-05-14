@@ -95,6 +95,9 @@ struct AppState {
     /// Postgres pool used by GC's reconciler endpoint. `None` when GC
     /// is disabled.
     gc_pool: Option<sqlx::PgPool>,
+    /// TTL reaper handle (013 slice 2). `None` when ephemeral / TTL is
+    /// disabled. Lets admin endpoints flip pause/resume.
+    ttl_reaper_control: Option<Arc<nebula_ephemeral::TtlReaperControl>>,
     /// Usage / cost telemetry recorder. Always present; defaults to a
     /// no-op when `[usage]` / `NEBULACR_USAGE__ENABLED` is disabled.
     /// Called from blob/manifest hot paths to seed the rollup pipeline.
@@ -2131,6 +2134,64 @@ async fn gc_reconcile(
         .into_response())
 }
 
+// ── TTL reaper admin routes (013 slice 2) ────────────────────────────────────
+
+fn ttl_admin_authorize(claims: &TokenClaims) -> Result<(), RegistryError> {
+    if claims.role != Role::Admin {
+        return Err(RegistryError::Forbidden {
+            reason: "ttl admin endpoints require Admin role".into(),
+        });
+    }
+    Ok(())
+}
+
+#[instrument(name = "ttl_status", skip(state, claims))]
+async fn ttl_status(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    ttl_admin_authorize(&claims)?;
+    let body = match &state.ttl_reaper_control {
+        Some(c) => serde_json::json!({
+            "enabled": true,
+            "paused":  c.is_paused(),
+            "stopped": c.is_stopped(),
+        }),
+        None => serde_json::json!({ "enabled": false }),
+    };
+    Ok((StatusCode::OK, axum::Json(body)).into_response())
+}
+
+#[instrument(name = "ttl_pause", skip(state, claims))]
+async fn ttl_pause(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    ttl_admin_authorize(&claims)?;
+    match &state.ttl_reaper_control {
+        Some(c) => {
+            c.pause();
+            Ok((StatusCode::OK, axum::Json(serde_json::json!({"paused": true}))).into_response())
+        }
+        None => Err(RegistryError::Internal("ttl reaper not running".into())),
+    }
+}
+
+#[instrument(name = "ttl_resume", skip(state, claims))]
+async fn ttl_resume(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    ttl_admin_authorize(&claims)?;
+    match &state.ttl_reaper_control {
+        Some(c) => {
+            c.resume();
+            Ok((StatusCode::OK, axum::Json(serde_json::json!({"paused": false}))).into_response())
+        }
+        None => Err(RegistryError::Internal("ttl reaper not running".into())),
+    }
+}
+
 // ── Referrers API (010 integration) ──────────────────────────────────────────
 
 /// GET /v2/{tenant}/{project}/{name}/referrers/{digest}
@@ -3463,6 +3524,48 @@ async fn main() -> anyhow::Result<()> {
         (Arc::new(nebula_gc::NoopBlobRefCounter), None, None)
     };
 
+    // ── TTL reaper (013 slice 2) ─────────────────────────────────────
+    // Drains expired tag rows. Requires the GC pool + the registry's
+    // storage handle. Kill-switched by NEBULACR_TTL__REAPER_ENABLED;
+    // off by default so existing deployments stay no-op.
+    let ttl_reaper_control: Option<Arc<nebula_ephemeral::TtlReaperControl>> = {
+        let enabled = std::env::var("NEBULACR_TTL__REAPER_ENABLED")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false);
+        match (enabled, gc_pool.clone()) {
+            (true, Some(pool)) => {
+                let control = nebula_ephemeral::TtlReaperControl::new();
+                let cfg = nebula_ephemeral::TtlReaperConfig {
+                    batch_size: std::env::var("NEBULACR_TTL__REAPER_BATCH")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(100),
+                    idle_sleep: std::time::Duration::from_secs(
+                        std::env::var("NEBULACR_TTL__REAPER_IDLE_SLEEP_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(60),
+                    ),
+                };
+                let reaper =
+                    nebula_ephemeral::TtlReaper::new(pool, store.clone(), cfg, control.clone());
+                tokio::spawn(async move {
+                    let _ = reaper.run().await;
+                });
+                info!("ttl reaper spawned");
+                Some(control)
+            }
+            (true, None) => {
+                warn!(
+                    "NEBULACR_TTL__REAPER_ENABLED=true but no Postgres pool; \
+                     enable scanner or GC to provide one"
+                );
+                None
+            }
+            _ => None,
+        }
+    };
+
     // ── Usage recorder (017 slice 1) ─────────────────────────────────
     // Enabled by `NEBULACR_USAGE__ENABLED=true`. Reuses the GC pool
     // when present (both want the same Postgres). Defaults to a no-op
@@ -3521,6 +3624,7 @@ async fn main() -> anyhow::Result<()> {
         gc_refcounter,
         gc_reaper_control,
         gc_pool,
+        ttl_reaper_control,
         usage_recorder,
         artifact_registry,
         audit_log: audit_log.clone(),
@@ -3633,7 +3737,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/v2/_gc/status", get(gc_status))
         .route("/v2/_gc/pause", post(gc_pause))
         .route("/v2/_gc/resume", post(gc_resume))
-        .route("/v2/_gc/reconcile", post(gc_reconcile));
+        .route("/v2/_gc/reconcile", post(gc_reconcile))
+        // TTL reaper control plane (013 slice 2)
+        .route("/v2/_ttl/status", get(ttl_status))
+        .route("/v2/_ttl/pause", post(ttl_pause))
+        .route("/v2/_ttl/resume", post(ttl_resume));
 
     // Internal replication routes — served on both the main port (for cross-cluster
     // access via proxy) and the dedicated internal port (for intra-cluster use).

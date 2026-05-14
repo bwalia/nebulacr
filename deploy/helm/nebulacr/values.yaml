@@ -464,6 +464,16 @@ scanner:
     nodeSelector: {}
     extraEnv: []
 
+## -- Ephemeral repos / TTL tags (013) --
+## When ttl.reaper.enabled=true, a continuous reaper drains
+## expired tag rows from the `tags` table. The underlying manifest
+## blobs are removed by online GC (009) once their refcount hits 0.
+ttl:
+  reaper:
+    enabled: false
+    batch: 100
+    idleSleepSecs: 60
+
 ## -- Usage / cost telemetry (017) --
 ## When enabled, every blob/manifest op writes a row to
 ## usage_events_staging. The drainer + rollup loop ship in slice 2;

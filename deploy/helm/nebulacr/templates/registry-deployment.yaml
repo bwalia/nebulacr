@@ -235,6 +235,14 @@ spec:
             - name: NEBULACR_USAGE__ENABLED
               value: "true"
             {{- end }}
+            {{- if .Values.ttl.reaper.enabled }}
+            - name: NEBULACR_TTL__REAPER_ENABLED
+              value: "true"
+            - name: NEBULACR_TTL__REAPER_BATCH
+              value: {{ .Values.ttl.reaper.batch | quote }}
+            - name: NEBULACR_TTL__REAPER_IDLE_SLEEP_SECS
+              value: {{ .Values.ttl.reaper.idleSleepSecs | quote }}
+            {{- end }}
             {{- if .Values.gc.online.enabled }}
             - name: NEBULACR_GC__ONLINE
               value: "true"

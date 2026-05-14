@@ -2475,6 +2475,7 @@ dependencies = [
  "chrono",
  "nebula-common",
  "nebula-db",
+ "object_store",
  "serde",
  "serde_json",
  "sqlx",
