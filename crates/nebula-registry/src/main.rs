@@ -3902,10 +3902,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false);
     let artifact_registry: Option<Arc<nebula_artifact_types::ArtifactRegistry>> =
         if artifact_types_enabled {
-            info!("typed artifact validators enabled (helm)");
+            info!("typed artifact validators enabled (helm/wasm/model/tfmodule)");
             Some(Arc::new(
                 nebula_artifact_types::ArtifactRegistry::new()
-                    .register(nebula_artifact_types::HelmType),
+                    .register(nebula_artifact_types::HelmType)
+                    .register(nebula_artifact_types::WasmType)
+                    .register(nebula_artifact_types::ModelType)
+                    .register(nebula_artifact_types::TerraformModuleType),
             ))
         } else {
             None

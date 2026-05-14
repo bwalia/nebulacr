@@ -5,11 +5,17 @@
 //! validators land in slices 2-3.
 
 pub mod helm;
+pub mod model;
 pub mod registry;
 pub mod store;
+pub mod tfmodule;
 pub mod types;
+pub mod wasm;
 
 pub use helm::HelmType;
+pub use model::ModelType;
 pub use registry::ArtifactRegistry;
 pub use store::{ArtifactMetaRow, ArtifactStore, PgArtifactStore};
+pub use tfmodule::TerraformModuleType;
 pub use types::{ArtifactError, ArtifactMetadata, ArtifactType, ArtifactTypeId};
+pub use wasm::WasmType;
