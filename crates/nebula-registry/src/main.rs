@@ -2515,6 +2515,35 @@ async fn upload_attestation(
         .await
         .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
+    // 4b. Try to verify the DSSE signature against any configured
+    //     ed25519 keys. Format: comma-separated `keyid:b64key` pairs
+    //     in NEBULACR_ATTEST__ED25519_KEYS. Empty / unconfigured ⇒
+    //     verified=false (slice-2 advisory mode).
+    let verified = {
+        use base64::Engine as _;
+        let raw = std::env::var("NEBULACR_ATTEST__ED25519_KEYS").unwrap_or_default();
+        let mut verifiers: Vec<Box<dyn nebula_attest::Verifier>> = Vec::new();
+        for spec in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some((keyid, b64)) = spec.split_once(':') {
+                match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                    Ok(bytes) => match nebula_attest::Ed25519Verifier::from_bytes(keyid, &bytes) {
+                        Ok(v) => verifiers.push(Box::new(v)),
+                        Err(e) => warn!(keyid, error = %e, "attest: bad ed25519 key"),
+                    },
+                    Err(e) => warn!(keyid, error = %e, "attest: bad b64 ed25519 key"),
+                }
+            }
+        }
+        if verifiers.is_empty() {
+            false
+        } else {
+            matches!(
+                nebula_attest::verify_envelope(&env, &verifiers),
+                Ok(nebula_attest::VerifyVerdict::Verified)
+            )
+        }
+    };
+
     // 5. Persist the row + register a referrer.
     let attestation = nebula_attest::store::Attestation {
         id: Uuid::new_v4(),
@@ -2524,7 +2553,7 @@ async fn upload_attestation(
         builder_id,
         builder_kind: None,
         slsa_level: Some(level.as_int()),
-        verified: false,
+        verified,
         uploaded_at: chrono::Utc::now(),
     };
     use nebula_attest::AttestationStore as _;
