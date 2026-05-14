@@ -85,6 +85,27 @@ struct AppState {
     /// in-process (`TokioQueue`) or durable (`PostgresQueue`) depending on
     /// `NEBULACR_SCANNER__QUEUE_BACKEND`.
     scanner_queue: Option<Arc<dyn ScanQueue>>,
+    /// Online-GC refcount writer. Always present; defaults to a
+    /// no-op when `[gc.online]` / `NEBULACR_GC__ONLINE` is disabled.
+    /// Bumped on manifest push, decremented on manifest delete.
+    gc_refcounter: Arc<dyn nebula_gc::BlobRefCounter>,
+    /// Control handle for the continuous reaper. `None` when GC is
+    /// disabled or the reaper task isn't running.
+    gc_reaper_control: Option<Arc<nebula_gc::ReaperControl>>,
+    /// Postgres pool used by GC's reconciler endpoint. `None` when GC
+    /// is disabled.
+    gc_pool: Option<sqlx::PgPool>,
+    /// TTL reaper handle (013 slice 2). `None` when ephemeral / TTL is
+    /// disabled. Lets admin endpoints flip pause/resume.
+    ttl_reaper_control: Option<Arc<nebula_ephemeral::TtlReaperControl>>,
+    /// Usage / cost telemetry recorder. Always present; defaults to a
+    /// no-op when `[usage]` / `NEBULACR_USAGE__ENABLED` is disabled.
+    /// Called from blob/manifest hot paths to seed the rollup pipeline.
+    usage_recorder: Arc<dyn nebula_cost::UsageRecorder>,
+    /// Typed-artifact validator registry. `None` when 016 is disabled
+    /// (the default); when populated, every put_manifest dispatches to
+    /// the matching ArtifactType impl and persists metadata.
+    artifact_registry: Option<Arc<nebula_artifact_types::ArtifactRegistry>>,
     /// Registry audit log for tracking who pushed/pulled what.
     audit_log: Arc<audit::RegistryAuditLog>,
     /// Process start time for uptime tracking.
@@ -878,15 +899,28 @@ async fn get_manifest(
         })
         .await;
 
+    record_usage(
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        nebula_cost::UsageOp::ManifestGet,
+        data.len() as i64,
+        nebula_cost::UsageSrc::Origin,
+        200,
+        Some(claims.sub.clone()),
+    );
+
     Ok((StatusCode::OK, headers, data).into_response())
 }
 
 /// PUT /v2/{tenant}/{project}/{name}/manifests/{reference}
-#[instrument(name = "put_manifest", skip(state, claims, body), fields(tenant = %params.tenant, project = %params.project, name = %params.name, reference = %params.reference))]
+#[instrument(name = "put_manifest", skip(state, claims, req_headers, body), fields(tenant = %params.tenant, project = %params.project, name = %params.name, reference = %params.reference))]
 async fn put_manifest(
     State(state): State<AppState>,
     AuthenticatedClaims(claims): AuthenticatedClaims,
     Path(params): Path<ManifestRef>,
+    req_headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
     let op_start = Instant::now();
@@ -926,6 +960,7 @@ async fn put_manifest(
         .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
     // If reference is a tag (not a digest), create a tag link
+    let mut response_headers_extra: Vec<(String, String)> = Vec::new();
     if !params.reference.starts_with("sha256:") {
         let tag_p = tag_link_path(
             &params.tenant,
@@ -939,6 +974,164 @@ async fn put_manifest(
             .put(&tag_store_path, Bytes::from(digest.clone()).into())
             .await
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+        // 013 TTL header — record an `expires_at` on the tag row
+        // when X-NebulaCR-TTL is set. Mirrors the design's project-
+        // default-TTL story: header wins; fallback comes from the
+        // ephemeral_repos table (slice 2 will read it). Failures
+        // never fail the push — TTL is a soft contract.
+        let ttl_header = req_headers
+            .get("x-nebulacr-ttl")
+            .and_then(|v| v.to_str().ok());
+        if let (Some(raw), Some(pool)) = (ttl_header, state.gc_pool.as_ref()) {
+            let now = chrono::Utc::now();
+            match nebula_ephemeral::parse_ttl_header(now, raw) {
+                Ok(spec) => {
+                    let expires_at = spec.expires_at;
+                    let r = sqlx::query(
+                        "INSERT INTO tags
+                             (tenant, project, repository, tag, digest,
+                              pushed_by, expires_at, ephemeral)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)
+                         ON CONFLICT (tenant, project, repository, tag)
+                         DO UPDATE SET digest = EXCLUDED.digest,
+                                       pushed_at = NOW(),
+                                       expires_at = EXCLUDED.expires_at",
+                    )
+                    .bind(&params.tenant)
+                    .bind(&params.project)
+                    .bind(&params.name)
+                    .bind(&params.reference)
+                    .bind(&digest)
+                    .bind(&claims.sub)
+                    .bind(expires_at)
+                    .execute(pool)
+                    .await;
+                    if let Err(e) = r {
+                        warn!(error = %e, tag = %params.reference, "ttl tag upsert failed");
+                    } else {
+                        response_headers_extra
+                            .push(("X-NebulaCR-TTL-Expires-At".into(), expires_at.to_rfc3339()));
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, raw = %raw, "ignoring invalid X-NebulaCR-TTL");
+                }
+            }
+        }
+    }
+
+    // Online-GC refcount bookkeeping (009). When the refcounter is the
+    // no-op impl the cost is a vtable call and an empty Vec build —
+    // negligible. When it is the Postgres impl this is one round-trip
+    // worth of UPSERTs; failures are logged but do NOT fail the push,
+    // because the reconciler (slice 3) corrects drift.
+    let parsed_config_digest = nebula_gc::extract_config_digest(&body);
+    match nebula_gc::extract_blob_digests(&body) {
+        Ok(blobs) => {
+            if let Err(e) = state
+                .gc_refcounter
+                .add_refs(
+                    &params.tenant,
+                    &params.project,
+                    &params.name,
+                    &digest,
+                    &blobs,
+                )
+                .await
+            {
+                warn!(error = %e, digest = %digest, "gc refcount add_refs failed");
+            }
+        }
+        Err(e) => {
+            // The manifest was already JSON-validated above; this branch
+            // is only hit if extraction encounters an unexpected shape.
+            debug!(error = %e, digest = %digest, "gc refcount skipped: manifest parse");
+        }
+    }
+
+    // 016 typed-artifact validation — when the registry recognises
+    // the manifest's media type as Helm/WASM/model/etc., run the
+    // matching validator and persist metadata into artifact_meta.
+    // Failures are logged but do NOT fail the push (slice 1 is
+    // advisory; strict-mode rejection lands in slice 2 with project
+    // policy plumbing).
+    if let (Some(reg), Some(pool)) = (state.artifact_registry.clone(), state.gc_pool.clone()) {
+        let media_type = detect_manifest_media_type(&body);
+        let body_clone = body.clone();
+        let digest_clone = digest.clone();
+        tokio::spawn(async move {
+            match reg.validate(&media_type, &body_clone).await {
+                Ok(Some(meta)) => {
+                    let store = nebula_artifact_types::PgArtifactStore::new(pool);
+                    use nebula_artifact_types::ArtifactStore as _;
+                    if let Err(e) = store.upsert(&digest_clone, &meta, None).await {
+                        warn!(error = %e, digest = %digest_clone, "artifact_meta upsert failed");
+                    }
+                }
+                Ok(None) => {
+                    debug!(digest = %digest_clone, "no artifact validator matched");
+                }
+                Err(e) => {
+                    debug!(error = %e, digest = %digest_clone, "artifact validator rejected");
+                    // Slice 1: advisory only. Slice 2 will persist the
+                    // failure with validation_msg and (if strict
+                    // mode is on) reject the push.
+                }
+            }
+        });
+    }
+
+    // 018 lineage capture — fetch the image config blob async and
+    // record any base-image hint into image_lineage. Fire-and-forget;
+    // failures are logged but never fail the push.
+    if let (Some(config_digest), Some(pool)) = (parsed_config_digest, state.gc_pool.clone()) {
+        let store = state.store.clone();
+        let tenant = params.tenant.clone();
+        let project = params.project.clone();
+        let repo = params.name.clone();
+        let child_digest = digest.clone();
+        tokio::spawn(async move {
+            let cfg_path = blob_path(&tenant, &project, &repo, &config_digest);
+            let cfg_store = StorePath::from(cfg_path);
+            let cfg_bytes = match store.get(&cfg_store).await {
+                Ok(g) => match g.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        debug!(error = %e, "lineage: image config read failed");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    // Some manifests reference configs in other repos
+                    // (e.g. multi-arch indexes) — that's expected; skip.
+                    debug!(error = %e, "lineage: image config not local");
+                    return;
+                }
+            };
+            let Some(hint) = nebula_rebuild::detect_lineage(&cfg_bytes) else {
+                return;
+            };
+            let r = sqlx::query(
+                "INSERT INTO image_lineage
+                     (child_digest, parent_digest, confidence)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (child_digest, parent_digest) DO NOTHING",
+            )
+            .bind(&child_digest)
+            .bind(&hint.base_ref)
+            .bind(hint.confidence.as_str())
+            .execute(&pool)
+            .await;
+            match r {
+                Ok(_) => debug!(
+                    base = %hint.base_ref,
+                    confidence = %hint.confidence.as_str(),
+                    "lineage recorded"
+                ),
+                Err(e) => warn!(error = %e, "image_lineage insert failed"),
+            }
+        });
     }
 
     // Emit replication event if configured
@@ -1019,6 +1212,14 @@ async fn put_manifest(
         "Docker-Distribution-API-Version",
         HeaderValue::from_static("registry/2.0"),
     );
+    for (name, value) in &response_headers_extra {
+        if let (Ok(hn), Ok(hv)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(hn, hv);
+        }
+    }
 
     let duration = op_start.elapsed();
     histogram!("registry_request_duration_seconds", "operation" => "manifest.push")
@@ -1039,6 +1240,18 @@ async fn put_manifest(
             duration_ms: duration.as_millis() as u64,
         })
         .await;
+
+    record_usage(
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        nebula_cost::UsageOp::ManifestPut,
+        body.len() as i64,
+        nebula_cost::UsageSrc::Origin,
+        201,
+        Some(claims.sub.clone()),
+    );
 
     Ok((StatusCode::CREATED, headers).into_response())
 }
@@ -1074,6 +1287,14 @@ async fn delete_manifest(
         &params.reference,
     )
     .await?;
+    // Pull the manifest digest out of the resolved storage path so the
+    // GC refcount decrement (below) sees the same digest the writer
+    // recorded under `add_refs`. Layout from `manifest_path()` is
+    // `<tenant>/<project>/<repo>/manifests/<sha256:hex>`.
+    let manifest_digest = path
+        .rsplit_once('/')
+        .map(|(_, last)| last.to_string())
+        .unwrap_or_else(|| params.reference.clone());
     let store_path = StorePath::from(path);
 
     state
@@ -1094,6 +1315,16 @@ async fn delete_manifest(
         );
         let tag_store_path = StorePath::from(tag_p);
         let _ = state.store.delete(&tag_store_path).await;
+    }
+
+    // Online-GC refcount decrement (009). Failures don't fail the
+    // delete — drift is corrected by the reconciler in slice 3.
+    if let Err(e) = state
+        .gc_refcounter
+        .remove_refs(&params.tenant, &manifest_digest)
+        .await
+    {
+        warn!(error = %e, digest = %manifest_digest, "gc refcount remove_refs failed");
     }
 
     // Emit replication event if configured
@@ -1145,6 +1376,18 @@ async fn delete_manifest(
             duration_ms: duration.as_millis() as u64,
         })
         .await;
+
+    record_usage(
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        nebula_cost::UsageOp::Delete,
+        0,
+        nebula_cost::UsageSrc::Origin,
+        202,
+        Some(claims.sub.clone()),
+    );
 
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -1336,6 +1579,18 @@ async fn get_blob(
             duration_ms: duration.as_millis() as u64,
         })
         .await;
+
+    record_usage(
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        nebula_cost::UsageOp::Pull,
+        data.len() as i64,
+        nebula_cost::UsageSrc::Origin,
+        200,
+        Some(claims.sub.clone()),
+    );
 
     Ok((StatusCode::OK, headers, data).into_response())
 }
@@ -1595,6 +1850,49 @@ async fn complete_blob_upload(
         })
         .await;
 
+    record_usage(
+        &state,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        nebula_cost::UsageOp::Push,
+        final_data_len as i64,
+        nebula_cost::UsageSrc::Origin,
+        201,
+        Some(claims.sub.clone()),
+    );
+
+    // 010 lazy-pull: enqueue an indexer job for this blob. The
+    // worker (when present) will rewrite/extract a TOC and register
+    // it as a referrer of the layer. Fire-and-forget; missing GC
+    // pool or disabled feature both fall through silently.
+    let lazy_enabled = std::env::var("NEBULACR_LAZY__ENABLED")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    if let Some(pool) = state.gc_pool.clone().filter(|_| lazy_enabled) {
+        let format = std::env::var("NEBULACR_LAZY__FORMAT").unwrap_or_else(|_| "estargz".into());
+        let layer_digest = expected_digest.clone();
+        let tenant = params.tenant.clone();
+        let project = params.project.clone();
+        let repo = params.name.clone();
+        tokio::spawn(async move {
+            use nebula_lazy::LazyJobStore as _;
+            let store = nebula_lazy::PgLazyJobStore::new(pool);
+            if let Err(e) = store
+                .enqueue(
+                    &layer_digest,
+                    &format,
+                    Some(&tenant),
+                    Some(&project),
+                    Some(&repo),
+                )
+                .await
+            {
+                debug!(error = %e, %layer_digest, "lazy enqueue failed");
+            }
+        });
+    }
+
     Ok((StatusCode::CREATED, headers).into_response())
 }
 
@@ -1716,6 +2014,591 @@ async fn catalog(
     let catalog_resp = nebula_common::models::Catalog { repositories };
 
     Ok((StatusCode::OK, axum::Json(catalog_resp)).into_response())
+}
+
+// ── Usage telemetry helper (017 integration) ───────────────────────────────
+//
+// Fire-and-forget — the recorder writes to the unlogged staging table so
+// failures shouldn't fail the request, but the spawned task also keeps the
+// hot path entirely off the Postgres latency.
+#[allow(clippy::too_many_arguments)]
+fn record_usage(
+    state: &AppState,
+    tenant: &str,
+    project: &str,
+    repository: &str,
+    op: nebula_cost::UsageOp,
+    bytes: i64,
+    src: nebula_cost::UsageSrc,
+    status: i32,
+    sub: Option<String>,
+) {
+    let recorder = state.usage_recorder.clone();
+    let event = nebula_cost::UsageEvent {
+        at: chrono::Utc::now(),
+        tenant: tenant.to_string(),
+        project: project.to_string(),
+        repository: repository.to_string(),
+        op,
+        bytes,
+        src,
+        status,
+        sub,
+    };
+    tokio::spawn(async move {
+        if let Err(e) = recorder.record(&event).await {
+            debug!(error = %e, "usage recorder failed");
+        }
+    });
+}
+
+// ── Online-GC routes (009 slice 2) ───────────────────────────────────────────
+
+fn gc_admin_authorize(claims: &TokenClaims) -> Result<(), RegistryError> {
+    if claims.role != Role::Admin {
+        return Err(RegistryError::Forbidden {
+            reason: "online-gc admin endpoints require Admin role".into(),
+        });
+    }
+    Ok(())
+}
+
+/// GET /v2/_gc/status — current reaper state.
+#[instrument(name = "gc_status", skip(state, claims))]
+async fn gc_status(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    gc_admin_authorize(&claims)?;
+    let body = match &state.gc_reaper_control {
+        Some(c) => serde_json::json!({
+            "enabled": true,
+            "paused": c.is_paused(),
+            "stopped": c.is_stopped(),
+        }),
+        None => serde_json::json!({ "enabled": false }),
+    };
+    Ok((StatusCode::OK, axum::Json(body)).into_response())
+}
+
+/// POST /v2/_gc/pause — pause the continuous reaper. Idempotent.
+#[instrument(name = "gc_pause", skip(state, claims))]
+async fn gc_pause(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    gc_admin_authorize(&claims)?;
+    match &state.gc_reaper_control {
+        Some(c) => {
+            c.pause();
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": true})),
+            )
+                .into_response())
+        }
+        None => Err(RegistryError::Internal(
+            "online-gc reaper not running".into(),
+        )),
+    }
+}
+
+/// POST /v2/_gc/resume — resume the continuous reaper. Idempotent.
+#[instrument(name = "gc_resume", skip(state, claims))]
+async fn gc_resume(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    gc_admin_authorize(&claims)?;
+    match &state.gc_reaper_control {
+        Some(c) => {
+            c.resume();
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": false})),
+            )
+                .into_response())
+        }
+        None => Err(RegistryError::Internal(
+            "online-gc reaper not running".into(),
+        )),
+    }
+}
+
+/// POST /v2/_gc/reconcile — run the reconciler. Body
+/// `{"apply": bool, "max": int?}`.
+#[derive(Debug, serde::Deserialize, Default)]
+struct GcReconcileBody {
+    #[serde(default)]
+    apply: bool,
+    #[serde(default)]
+    max: Option<i64>,
+}
+
+#[instrument(name = "gc_reconcile", skip(state, claims))]
+async fn gc_reconcile(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    body: Option<axum::Json<GcReconcileBody>>,
+) -> Result<Response, RegistryError> {
+    gc_admin_authorize(&claims)?;
+    let body = body.map(|axum::Json(b)| b).unwrap_or_default();
+
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("online-gc not enabled".into()))?;
+
+    let cfg = nebula_gc::ReconcileConfig {
+        apply_fix: body.apply,
+        max_blobs: body.max,
+    };
+    let stats = nebula_gc::Reconciler::new(pool)
+        .reconcile(cfg)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("reconcile failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "examined":  stats.blobs_examined,
+            "orphan":    stats.orphan_count,
+            "missing":   stats.missing_count,
+            "underflow": stats.underflow_count,
+            "corrected": stats.corrected,
+            "applied":   body.apply,
+        })),
+    )
+        .into_response())
+}
+
+// ── TTL reaper admin routes (013 slice 2) ────────────────────────────────────
+
+fn ttl_admin_authorize(claims: &TokenClaims) -> Result<(), RegistryError> {
+    if claims.role != Role::Admin {
+        return Err(RegistryError::Forbidden {
+            reason: "ttl admin endpoints require Admin role".into(),
+        });
+    }
+    Ok(())
+}
+
+#[instrument(name = "ttl_status", skip(state, claims))]
+async fn ttl_status(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    ttl_admin_authorize(&claims)?;
+    let body = match &state.ttl_reaper_control {
+        Some(c) => serde_json::json!({
+            "enabled": true,
+            "paused":  c.is_paused(),
+            "stopped": c.is_stopped(),
+        }),
+        None => serde_json::json!({ "enabled": false }),
+    };
+    Ok((StatusCode::OK, axum::Json(body)).into_response())
+}
+
+#[instrument(name = "ttl_pause", skip(state, claims))]
+async fn ttl_pause(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    ttl_admin_authorize(&claims)?;
+    match &state.ttl_reaper_control {
+        Some(c) => {
+            c.pause();
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": true})),
+            )
+                .into_response())
+        }
+        None => Err(RegistryError::Internal("ttl reaper not running".into())),
+    }
+}
+
+#[instrument(name = "ttl_resume", skip(state, claims))]
+async fn ttl_resume(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+) -> Result<Response, RegistryError> {
+    ttl_admin_authorize(&claims)?;
+    match &state.ttl_reaper_control {
+        Some(c) => {
+            c.resume();
+            Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"paused": false})),
+            )
+                .into_response())
+        }
+        None => Err(RegistryError::Internal("ttl reaper not running".into())),
+    }
+}
+
+// ── Usage read API (017 polish) ──────────────────────────────────────────────
+
+fn usage_admin_authorize(claims: &TokenClaims) -> Result<(), RegistryError> {
+    if claims.role != Role::Admin {
+        return Err(RegistryError::Forbidden {
+            reason: "usage endpoints require Admin role".into(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_since(raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    let (n, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit())?);
+    let n: i64 = n.parse().ok()?;
+    if n < 0 {
+        return None;
+    }
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => return None,
+    };
+    Some(secs)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TenantSeriesQuery {
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    granularity: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TenantSeriesPath {
+    tenant: String,
+}
+
+#[instrument(name = "usage_tenant", skip(state, claims))]
+async fn usage_tenant(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Path(p): Path<TenantSeriesPath>,
+    Query(q): Query<TenantSeriesQuery>,
+) -> Result<Response, RegistryError> {
+    usage_admin_authorize(&claims)?;
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("usage backend not configured".into()))?;
+    let since_secs = q
+        .since
+        .as_deref()
+        .and_then(parse_since)
+        .unwrap_or(24 * 3600);
+    let granularity = q
+        .granularity
+        .as_deref()
+        .and_then(nebula_cost::Granularity::parse)
+        .unwrap_or(nebula_cost::Granularity::Hour);
+
+    let buckets = nebula_cost::UsageReader::new(pool)
+        .tenant_series(&p.tenant, since_secs, granularity)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("usage query failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "tenant": p.tenant,
+            "since_secs": since_secs,
+            "granularity": granularity.as_str(),
+            "buckets": buckets,
+        })),
+    )
+        .into_response())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TopPulledQuery {
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[instrument(name = "usage_top_pulled", skip(state, claims))]
+async fn usage_top_pulled(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Query(q): Query<TopPulledQuery>,
+) -> Result<Response, RegistryError> {
+    usage_admin_authorize(&claims)?;
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("usage backend not configured".into()))?;
+    let since_secs = q
+        .since
+        .as_deref()
+        .and_then(parse_since)
+        .unwrap_or(7 * 86_400);
+    let limit = q.limit.unwrap_or(20).clamp(1, 500);
+
+    let rows = nebula_cost::UsageReader::new(pool)
+        .top_pulled(since_secs, limit)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("top_pulled query failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "since_secs": since_secs,
+            "limit": limit,
+            "rows": rows,
+        })),
+    )
+        .into_response())
+}
+
+// ── Referrers API (010 integration) ──────────────────────────────────────────
+
+/// GET /v2/{tenant}/{project}/{name}/referrers/{digest}
+///
+/// OCI 1.1 referrers API — returns artifacts that point at `digest`
+/// via their `subject` field (signatures, attestations, TOC artifacts,
+/// etc.). Optional `?artifactType=...` filters server-side. The
+/// response is an OCI image index whose `manifests` array carries one
+/// descriptor per referrer.
+///
+/// Reads from the shared `referrers` table populated by 010 (lazy
+/// indexer), 015 (attestations), and any future producer of typed
+/// OCI 1.1 referrer artifacts.
+#[derive(Debug, serde::Deserialize)]
+struct ReferrersQuery {
+    #[serde(default, rename = "artifactType")]
+    artifact_type: Option<String>,
+}
+
+#[instrument(name = "list_referrers", skip(state, claims), fields(tenant = %params.tenant, project = %params.project, name = %params.name, digest = %params.digest))]
+async fn list_referrers(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Path(params): Path<BlobRef>,
+    Query(q): Query<ReferrersQuery>,
+) -> Result<Response, RegistryError> {
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Pull,
+    )?;
+
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("referrers backend not configured".into()))?;
+
+    use nebula_lazy::ReferrerStore;
+    let store = nebula_lazy::PgReferrerStore::new(pool);
+
+    let rows = match q.artifact_type.as_deref() {
+        Some(t) => store.list_by_type(&params.digest, t).await,
+        None => store.list(&params.digest).await,
+    }
+    .map_err(|e| RegistryError::Internal(format!("referrers query failed: {e}")))?;
+
+    // Build OCI image index envelope.
+    let manifests: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "mediaType": r.media_type,
+                "digest": r.artifact_digest,
+                "size": r.size,
+                "artifactType": r.artifact_type,
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": manifests,
+    });
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.oci.image.index.v1+json"),
+    );
+    if let Some(hv) = q
+        .artifact_type
+        .as_deref()
+        .and_then(|t| HeaderValue::from_str(t).ok())
+    {
+        headers.insert("OCI-Filters-Applied", hv);
+    }
+
+    Ok((StatusCode::OK, headers, axum::Json(body)).into_response())
+}
+
+// ── Attestation upload (015 slice 2) ─────────────────────────────────────────
+//
+// POST /v2/{tenant}/{project}/{name}/attestations
+//
+// Accepts a DSSE bundle (raw bytes). The body is parsed as a DSSE
+// envelope; the inner in-toto statement gives us the subject digest
+// (which must reference an existing manifest in this repo) plus the
+// predicate type. SLSA-level inference uses the configured
+// trusted-builder allowlist. We persist a row to `attestations`,
+// register the bundle as an OCI 1.1 referrer of the subject, and
+// store the raw bundle bytes so consumers can re-fetch them.
+//
+// `verified=false` for slice 2 — DSSE signature verification arrives
+// with 001 (image signing). Admission policy gating in slice 3.
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct AttestationQuery {
+    /// Optional: pin to a specific subject digest. When omitted the
+    /// bundle's first subject digest is used.
+    #[serde(default)]
+    subject: Option<String>,
+}
+
+#[instrument(name = "upload_attestation", skip(state, claims, body), fields(tenant = %params.tenant, project = %params.project, name = %params.name))]
+async fn upload_attestation(
+    State(state): State<AppState>,
+    AuthenticatedClaims(claims): AuthenticatedClaims,
+    Path(params): Path<RepoPath>,
+    Query(q): Query<AttestationQuery>,
+    body: Bytes,
+) -> Result<Response, RegistryError> {
+    authorize(
+        &claims,
+        &params.tenant,
+        &params.project,
+        &params.name,
+        Action::Push,
+    )?;
+
+    let pool = state
+        .gc_pool
+        .clone()
+        .ok_or_else(|| RegistryError::Internal("attestation backend not configured".into()))?;
+
+    // 1. Parse DSSE.
+    let (env, stmt) =
+        nebula_attest::decode_envelope(&body).map_err(|e| RegistryError::ManifestInvalid {
+            reason: format!("invalid DSSE: {e}"),
+        })?;
+
+    // 2. Resolve subject digest. Caller may pin via ?subject=...; else
+    //    we use the first sha256 entry inside the in-toto statement.
+    let subject_digest = q
+        .subject
+        .clone()
+        .or_else(|| nebula_attest::dsse::first_subject_digest(&stmt));
+    let subject_digest = subject_digest.ok_or_else(|| RegistryError::ManifestInvalid {
+        reason: "DSSE statement has no sha256 subject digest".into(),
+    })?;
+
+    // 3. Infer SLSA level from the allowlist.
+    let trusted_csv = std::env::var("NEBULACR_ATTEST__TRUSTED_BUILDERS").unwrap_or_default();
+    let trusted: Vec<&str> = trusted_csv
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (level, builder_id) =
+        nebula_attest::slsa::infer_slsa_level(&stmt.predicate_type, &stmt.predicate, &trusted);
+
+    // 4. Persist the bundle in object storage so consumers can fetch
+    //    it back via standard blob endpoints. The envelope's digest
+    //    (sha256 of the raw bytes) is the storage key.
+    let envelope_digest = nebula_common::storage::sha256_digest(&body);
+    let env_path = nebula_common::storage::blob_path(
+        &params.tenant,
+        &params.project,
+        &params.name,
+        &envelope_digest,
+    );
+    state
+        .store
+        .put(&StorePath::from(env_path), body.clone().into())
+        .await
+        .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+    // 4b. Try to verify the DSSE signature against any configured
+    //     ed25519 keys. Format: comma-separated `keyid:b64key` pairs
+    //     in NEBULACR_ATTEST__ED25519_KEYS. Empty / unconfigured ⇒
+    //     verified=false (slice-2 advisory mode).
+    let verified = {
+        use base64::Engine as _;
+        let raw = std::env::var("NEBULACR_ATTEST__ED25519_KEYS").unwrap_or_default();
+        let mut verifiers: Vec<Box<dyn nebula_attest::Verifier>> = Vec::new();
+        for spec in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some((keyid, b64)) = spec.split_once(':') {
+                match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                    Ok(bytes) => match nebula_attest::Ed25519Verifier::from_bytes(keyid, &bytes) {
+                        Ok(v) => verifiers.push(Box::new(v)),
+                        Err(e) => warn!(keyid, error = %e, "attest: bad ed25519 key"),
+                    },
+                    Err(e) => warn!(keyid, error = %e, "attest: bad b64 ed25519 key"),
+                }
+            }
+        }
+        if verifiers.is_empty() {
+            false
+        } else {
+            matches!(
+                nebula_attest::verify_envelope(&env, &verifiers),
+                Ok(nebula_attest::VerifyVerdict::Verified)
+            )
+        }
+    };
+
+    // 5. Persist the row + register a referrer.
+    let attestation = nebula_attest::store::Attestation {
+        id: Uuid::new_v4(),
+        subject_digest: subject_digest.clone(),
+        envelope_digest: envelope_digest.clone(),
+        predicate_type: stmt.predicate_type.clone(),
+        builder_id,
+        builder_kind: None,
+        slsa_level: Some(level.as_int()),
+        verified,
+        uploaded_at: chrono::Utc::now(),
+    };
+    use nebula_attest::AttestationStore as _;
+    let store = nebula_attest::PgAttestationStore::new(pool.clone());
+    let raw = serde_json::to_value(&env).map_err(|e| RegistryError::Internal(e.to_string()))?;
+    store
+        .put(&attestation, &raw)
+        .await
+        .map_err(|e| RegistryError::Internal(format!("attestation store: {e}")))?;
+
+    use nebula_lazy::ReferrerStore as _;
+    let r = nebula_lazy::Referrer {
+        subject_digest: subject_digest.clone(),
+        artifact_digest: envelope_digest.clone(),
+        artifact_type: stmt.predicate_type.clone(),
+        media_type: env.payload_type.clone(),
+        size: body.len() as i64,
+    };
+    if let Err(e) = nebula_lazy::PgReferrerStore::new(pool).register(&r).await {
+        warn!(error = %e, "attestation referrer register failed");
+    }
+
+    let resp = serde_json::json!({
+        "id":              attestation.id,
+        "subject_digest":  subject_digest,
+        "envelope_digest": envelope_digest,
+        "predicate_type":  stmt.predicate_type,
+        "slsa_level":      level.as_int(),
+    });
+    Ok((StatusCode::CREATED, axum::Json(resp)).into_response())
 }
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
@@ -2189,6 +3072,7 @@ async fn put_manifest_2seg(
     state: State<AppState>,
     claims: AuthenticatedClaims,
     Path(p): Path<ManifestRef2>,
+    req_headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RegistryError> {
     let params = ManifestRef {
@@ -2197,7 +3081,7 @@ async fn put_manifest_2seg(
         name: p.name,
         reference: p.reference,
     };
-    put_manifest(state, claims, Path(params), body).await
+    put_manifest(state, claims, Path(params), req_headers, body).await
 }
 
 async fn delete_manifest_2seg(
@@ -2420,6 +3304,9 @@ async fn build_scanner_runtime(
         enqueue_only: env::var("NEBULACR_SCANNER__ENQUEUE_ONLY")
             .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(false),
+        scan_dedup_enabled: env::var("NEBULACR_SCANNER__SCAN_DEDUP_ENABLED")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(true),
     };
 
     let rt = ScannerRuntime::build(cfg, store).await?;
@@ -2872,6 +3759,267 @@ async fn main() -> anyhow::Result<()> {
     let scanner_queue = scanner_runtime.as_ref().map(|rt| rt.queue.clone());
     let scanner_router = scanner_runtime.as_ref().map(|rt| rt.router.clone());
 
+    // ── Online-GC refcounter (009 slice 1) ───────────────────────────
+    // Enabled by `NEBULACR_GC__ONLINE=true`. When enabled, we reuse
+    // the scanner's Postgres pool (it owns the migrations); when the
+    // scanner is disabled we connect a dedicated pool. When disabled
+    // entirely the no-op refcounter keeps the manifest path unchanged
+    // and existing deployments are unaffected.
+    let gc_online_enabled = std::env::var("NEBULACR_GC__ONLINE")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let (gc_refcounter, gc_reaper_control, gc_pool): (
+        Arc<dyn nebula_gc::BlobRefCounter>,
+        Option<Arc<nebula_gc::ReaperControl>>,
+        Option<sqlx::PgPool>,
+    ) = if gc_online_enabled {
+        let pool_opt = if let Some(rt) = scanner_runtime.as_ref() {
+            Some(rt.pg.clone())
+        } else if let Ok(url) = std::env::var("NEBULACR_GC__POSTGRES_URL") {
+            match nebula_db::connect(&url, 4).await {
+                Ok(p) => match nebula_db::migrate(&p).await {
+                    Ok(()) => Some(p),
+                    Err(e) => {
+                        warn!(error = %e, "gc postgres migrate failed; falling back to no-op refcounter");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "gc postgres connect failed; falling back to no-op refcounter");
+                    None
+                }
+            }
+        } else {
+            warn!(
+                "NEBULACR_GC__ONLINE=true but neither scanner nor NEBULACR_GC__POSTGRES_URL provided; using no-op refcounter"
+            );
+            None
+        };
+        match pool_opt {
+            Some(pool) => {
+                info!("online GC refcounter enabled (postgres-backed)");
+
+                // Spawn the continuous reaper unless explicitly disabled.
+                let reaper_enabled = std::env::var("NEBULACR_GC__REAPER_ENABLED")
+                    .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+                    .unwrap_or(true);
+
+                let control = if reaper_enabled {
+                    let control = nebula_gc::ReaperControl::new();
+                    let cfg = nebula_gc::ReaperConfig {
+                        grace: std::time::Duration::from_secs(
+                            std::env::var("NEBULACR_GC__REAPER_GRACE_SECS")
+                                .ok()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(24 * 3600),
+                        ),
+                        batch_size: std::env::var("NEBULACR_GC__REAPER_BATCH")
+                            .ok()
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .unwrap_or(200),
+                        idle_sleep: std::time::Duration::from_secs(
+                            std::env::var("NEBULACR_GC__REAPER_IDLE_SLEEP_SECS")
+                                .ok()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(30),
+                        ),
+                        sweep_qps: std::env::var("NEBULACR_GC__REAPER_QPS")
+                            .ok()
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(100),
+                    };
+                    let reaper = nebula_gc::ContinuousReaper::new(
+                        pool.clone(),
+                        store.clone(),
+                        cfg,
+                        control.clone(),
+                    );
+                    tokio::spawn(async move {
+                        let _ = reaper.run().await;
+                    });
+                    info!("online GC continuous reaper spawned");
+                    Some(control)
+                } else {
+                    info!("online GC reaper disabled by config");
+                    None
+                };
+
+                let rc: Arc<dyn nebula_gc::BlobRefCounter> =
+                    Arc::new(nebula_gc::PgBlobRefCounter::new(pool.clone()));
+                (rc, control, Some(pool))
+            }
+            None => (Arc::new(nebula_gc::NoopBlobRefCounter), None, None),
+        }
+    } else {
+        (Arc::new(nebula_gc::NoopBlobRefCounter), None, None)
+    };
+
+    // ── Lazy-pull indexer worker (010 slice 2) ───────────────────────
+    // Enabled by NEBULACR_LAZY__ENABLED. Spawns a worker that drains
+    // the lazy_jobs queue and dispatches to a TocIndexer impl. Slice 2
+    // ships a stub eStargz indexer that records metadata + referrers
+    // without rewriting layer bytes — proves the queue plumbing end
+    // to end so slice 3 can plug the real indexer in transparently.
+    let lazy_worker_enabled = std::env::var("NEBULACR_LAZY__ENABLED")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    if let Some(pool) = gc_pool.clone().filter(|_| lazy_worker_enabled) {
+        // 010 polish — real ObjectStore fetcher. Jobs now carry
+        // (tenant, project, repo) so the worker can build the
+        // standard `<t>/<p>/<r>/blobs/sha256/<hex>` storage key.
+        let fetcher: Arc<dyn nebula_lazy::LayerFetcher> =
+            Arc::new(nebula_lazy::ObjectStoreLayerFetcher {
+                store: store.clone(),
+            });
+        let indexers: Vec<Arc<dyn nebula_lazy::TocIndexer>> =
+            vec![Arc::new(nebula_lazy::StubEstargzIndexer)];
+        let worker_control = nebula_lazy::WorkerControl::new();
+        let worker = nebula_lazy::Worker::new(
+            pool.clone(),
+            fetcher,
+            indexers,
+            nebula_lazy::WorkerConfig::default(),
+            worker_control.clone(),
+        );
+        tokio::spawn(async move {
+            worker.run().await;
+        });
+        info!("lazy-pull worker spawned (stub indexer)");
+        let _ = worker_control;
+    }
+
+    // ── TTL reaper (013 slice 2) ─────────────────────────────────────
+    // Drains expired tag rows. Requires the GC pool + the registry's
+    // storage handle. Kill-switched by NEBULACR_TTL__REAPER_ENABLED;
+    // off by default so existing deployments stay no-op.
+    let ttl_reaper_control: Option<Arc<nebula_ephemeral::TtlReaperControl>> = {
+        let enabled = std::env::var("NEBULACR_TTL__REAPER_ENABLED")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false);
+        match (enabled, gc_pool.clone()) {
+            (true, Some(pool)) => {
+                let control = nebula_ephemeral::TtlReaperControl::new();
+                let cfg = nebula_ephemeral::TtlReaperConfig {
+                    batch_size: std::env::var("NEBULACR_TTL__REAPER_BATCH")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(100),
+                    idle_sleep: std::time::Duration::from_secs(
+                        std::env::var("NEBULACR_TTL__REAPER_IDLE_SLEEP_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(60),
+                    ),
+                };
+                let reaper =
+                    nebula_ephemeral::TtlReaper::new(pool, store.clone(), cfg, control.clone());
+                tokio::spawn(async move {
+                    let _ = reaper.run().await;
+                });
+                info!("ttl reaper spawned");
+                Some(control)
+            }
+            (true, None) => {
+                warn!(
+                    "NEBULACR_TTL__REAPER_ENABLED=true but no Postgres pool; \
+                     enable scanner or GC to provide one"
+                );
+                None
+            }
+            _ => None,
+        }
+    };
+
+    // ── Usage recorder (017 slice 1) ─────────────────────────────────
+    // Enabled by `NEBULACR_USAGE__ENABLED=true`. Reuses the GC pool
+    // when present (both want the same Postgres). Defaults to a no-op
+    // so existing deployments are unaffected.
+    let usage_enabled = std::env::var("NEBULACR_USAGE__ENABLED")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    // ── Typed artifact validators (016) ──────────────────────────────
+    // Enabled by `NEBULACR_ARTIFACT_TYPES__ENABLED=true`. Slice 1 ships
+    // the Helm validator; further types (WASM/model/Terraform) plug
+    // in here in subsequent slices. Default off → no-op manifest path.
+    let artifact_types_enabled = std::env::var("NEBULACR_ARTIFACT_TYPES__ENABLED")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let artifact_registry: Option<Arc<nebula_artifact_types::ArtifactRegistry>> =
+        if artifact_types_enabled {
+            info!("typed artifact validators enabled (helm/wasm/model/tfmodule)");
+            Some(Arc::new(
+                nebula_artifact_types::ArtifactRegistry::new()
+                    .register(nebula_artifact_types::HelmType)
+                    .register(nebula_artifact_types::WasmType)
+                    .register(nebula_artifact_types::ModelType)
+                    .register(nebula_artifact_types::TerraformModuleType),
+            ))
+        } else {
+            None
+        };
+
+    let usage_recorder: Arc<dyn nebula_cost::UsageRecorder> = if usage_enabled {
+        match gc_pool.clone() {
+            Some(pool) => {
+                info!("usage recorder enabled (postgres-backed)");
+
+                // Spawn drainer (staging → durable). Idempotent + crash-safe.
+                let drainer_control = nebula_cost::DrainerControl::new();
+                let drainer_cfg = nebula_cost::DrainerConfig {
+                    interval: std::time::Duration::from_secs(
+                        std::env::var("NEBULACR_USAGE__DRAINER_INTERVAL_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(60),
+                    ),
+                    batch_size: std::env::var("NEBULACR_USAGE__DRAINER_BATCH")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(5000),
+                };
+                let drainer =
+                    nebula_cost::Drainer::new(pool.clone(), drainer_cfg, drainer_control.clone());
+                tokio::spawn(async move {
+                    let _ = drainer.run().await;
+                });
+                info!("usage drainer spawned");
+
+                // Spawn rollup loop (hourly + daily aggregations).
+                let rollup_control = nebula_cost::RollupControl::new();
+                let rollup_cfg = nebula_cost::RollupConfig {
+                    interval: std::time::Duration::from_secs(
+                        std::env::var("NEBULACR_USAGE__ROLLUP_INTERVAL_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(300),
+                    ),
+                };
+                let rollup =
+                    nebula_cost::Rollup::new(pool.clone(), rollup_cfg, rollup_control.clone());
+                tokio::spawn(async move {
+                    let _ = rollup.run().await;
+                });
+                info!("usage rollup spawned");
+
+                // Hold the controls so the drainer/rollup don't shut down
+                // when their last reference goes away. Stored on AppState
+                // so future admin endpoints can flip them.
+                let _ = (drainer_control, rollup_control);
+
+                Arc::new(nebula_cost::PgUsageRecorder::new(pool))
+            }
+            None => {
+                warn!(
+                    "NEBULACR_USAGE__ENABLED=true but no Postgres pool available; \
+                     enable scanner or GC to provide one. Falling back to no-op."
+                );
+                Arc::new(nebula_cost::NoopUsageRecorder)
+            }
+        }
+    } else {
+        Arc::new(nebula_cost::NoopUsageRecorder)
+    };
+
     let state = AppState {
         store,
         config: Arc::new(config),
@@ -2884,6 +4032,12 @@ async fn main() -> anyhow::Result<()> {
         failover_manager: failover_manager.clone(),
         webhook_handle,
         scanner_queue,
+        gc_refcounter,
+        gc_reaper_control,
+        gc_pool,
+        ttl_reaper_control,
+        usage_recorder,
+        artifact_registry,
         audit_log: audit_log.clone(),
         start_time,
     };
@@ -2983,8 +4137,30 @@ async fn main() -> anyhow::Result<()> {
             get(image_status_2seg),
         )
         .route("/v2/{project}/{name}/tags/list", get(list_tags_2seg))
+        // Referrers (OCI 1.1) — 010 integration
+        .route(
+            "/v2/{tenant}/{project}/{name}/referrers/{digest}",
+            get(list_referrers),
+        )
+        // Attestations upload — 015 slice 2
+        .route(
+            "/v2/{tenant}/{project}/{name}/attestations",
+            post(upload_attestation),
+        )
         // Catalog
-        .route("/v2/_catalog", get(catalog));
+        .route("/v2/_catalog", get(catalog))
+        // Online GC control plane (009 slice 2-3)
+        .route("/v2/_gc/status", get(gc_status))
+        .route("/v2/_gc/pause", post(gc_pause))
+        .route("/v2/_gc/resume", post(gc_resume))
+        .route("/v2/_gc/reconcile", post(gc_reconcile))
+        // TTL reaper control plane (013 slice 2)
+        .route("/v2/_ttl/status", get(ttl_status))
+        .route("/v2/_ttl/pause", post(ttl_pause))
+        .route("/v2/_ttl/resume", post(ttl_resume))
+        // Usage read API (017 polish)
+        .route("/v2/_usage/tenant/{tenant}", get(usage_tenant))
+        .route("/v2/_usage/top-pulled", get(usage_top_pulled));
 
     // Internal replication routes — served on both the main port (for cross-cluster
     // access via proxy) and the dedicated internal port (for intra-cluster use).

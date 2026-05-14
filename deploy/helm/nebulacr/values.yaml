@@ -464,6 +464,62 @@ scanner:
     nodeSelector: {}
     extraEnv: []
 
+## -- Lazy pulling / TOC indexer (010) --
+## When enabled, every blob upload enqueues an indexer job that
+## records a TOC artifact + a referrer of the source layer. Slice 2
+## ships a stub indexer (records metadata only); slice 3 plugs in
+## the real eStargz / zstd-chunked / SOCI rewriters.
+lazy:
+  enabled: false
+  format: "estargz"
+
+## -- Ephemeral repos / TTL tags (013) --
+## When ttl.reaper.enabled=true, a continuous reaper drains
+## expired tag rows from the `tags` table. The underlying manifest
+## blobs are removed by online GC (009) once their refcount hits 0.
+ttl:
+  reaper:
+    enabled: false
+    batch: 100
+    idleSleepSecs: 60
+
+## -- Usage / cost telemetry (017) --
+## When enabled, every blob/manifest op writes a row to
+## usage_events_staging. The drainer + rollup loop ship in slice 2;
+## slice 1 just collects raw events. Reuses the GC Postgres pool.
+usage:
+  enabled: false
+
+## -- Online GC (009 — refcount-based, zero read-only window) --
+## When enabled, every manifest push records blob edges in Postgres
+## and a continuous reaper drains zero-refcount blobs once they age
+## past the grace period. Existing deployments are unaffected when
+## gc.online.enabled=false (the manifest path uses the no-op
+## refcounter and the reaper is not spawned).
+##
+## The pool used by the scanner is reused when scanner.enabled=true;
+## otherwise set gc.online.postgresUrl explicitly.
+gc:
+  online:
+    enabled: false
+    # Postgres URL when scanner is disabled. Leave empty to inherit
+    # the chart's in-cluster postgres or the scanner's pool.
+    postgresUrl: ""
+    reaper:
+      # Spawn the continuous reaper on registry startup. Set false
+      # to enable refcounting only and run reaps from a CronJob.
+      enabled: true
+      # Minimum time a row must sit at refcount=0 before it is
+      # eligible for deletion. Bound on worst-case upload duration
+      # — keep > longest acceptable push.
+      graceSecs: 86400        # 24h
+      # Maximum rows reaped per drain cycle.
+      batch: 200
+      # Idle sleep when no rows are eligible.
+      idleSleepSecs: 30
+      # Token-bucket cap on storage delete operations per second.
+      qps: 100
+
 ## -- Postgres (scanner metadata store) --
 ## In-chart singleton StatefulSet. Set enabled=false + point scanner at an
 ## external URL for HA deployments. Password is auto-generated on first

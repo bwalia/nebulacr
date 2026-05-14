@@ -149,6 +149,7 @@ fn load_scanner_config() -> Result<ScannerConfig> {
             .unwrap_or_else(|_| "generic".into()),
         queue_backend: QueueBackend::Postgres,
         enqueue_only: false,
+        scan_dedup_enabled: env_bool("NEBULACR_SCANNER__SCAN_DEDUP_ENABLED").unwrap_or(true),
     })
 }
 
