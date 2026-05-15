@@ -1,0 +1,9 @@
+# Pinned to versions with public advisories so the showcase scan
+# always finds something. Bump these when you intentionally want a
+# clean run, but the demo's value comes from showing the dashboard
+# light up — so keep at least a couple of the older pins.
+flask==2.0.1
+jinja2==2.11.3
+requests==2.25.1
+pyyaml==5.3.1
+urllib3==1.26.5

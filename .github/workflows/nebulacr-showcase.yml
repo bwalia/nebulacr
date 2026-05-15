@@ -1,0 +1,197 @@
+name: NebulaCR Showcase
+
+# Build a small image, push it to a NebulaCR instance, wait for the
+# CVE scanner to finish, and render a summary that links to the
+# Grafana dashboards. Designed to be the visible artifact for an
+# article / video demo of NebulaCR end-to-end.
+#
+# Inputs are all repository-secret-driven so anyone can fork this
+# workflow, point it at their own NebulaCR, and get a green run with
+# real findings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag for the demo image (default: showcase-<run-number>)"
+        required: false
+        default: ""
+      base_image:
+        description: "Base image — pick one with known CVEs to make the scan show its work"
+        required: false
+        default: "python:3.9-slim"
+  schedule:
+    # Weekly demo run so the README badge stays green and recent
+    # findings show up in the dashboard.
+    - cron: "0 6 * * 1"
+
+env:
+  # The NebulaCR registry under demo. Override per fork via repo secret.
+  NEBULACR_HOST: ${{ secrets.NEBULACR_HOST || 'demo.nebulacr.org' }}
+  NEBULACR_TENANT: ${{ secrets.NEBULACR_TENANT || 'demo' }}
+  NEBULACR_PROJECT: ${{ secrets.NEBULACR_PROJECT || 'showcase' }}
+  NEBULACR_REPO: showcase-app
+  GRAFANA_BASE: ${{ secrets.GRAFANA_BASE || 'https://grafana.demo.nebulacr.org' }}
+
+jobs:
+  showcase:
+    name: Build → Push → Scan → Pull → Dashboard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: ref
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="showcase-${{ github.run_number }}"
+          fi
+          REF="${NEBULACR_HOST}/${NEBULACR_TENANT}/${NEBULACR_PROJECT}/${NEBULACR_REPO}:${TAG}"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "ref=$REF"     >> "$GITHUB_OUTPUT"
+          echo "::notice title=Image::$REF"
+
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to NebulaCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.NEBULACR_HOST }}
+          username: ${{ secrets.NEBULACR_USERNAME }}
+          password: ${{ secrets.NEBULACR_PASSWORD }}
+
+      # ── 1. BUILD ────────────────────────────────────────────────────
+      - name: Build demo image
+        uses: docker/build-push-action@v5
+        with:
+          context: examples/showcase
+          file: examples/showcase/Dockerfile
+          tags: ${{ steps.ref.outputs.ref }}
+          build-args: |
+            BASE_IMAGE=${{ inputs.base_image || 'python:3.9-slim' }}
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 2. PUSH ─────────────────────────────────────────────────────
+      - name: Push to NebulaCR
+        run: |
+          docker push "${{ steps.ref.outputs.ref }}"
+          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "${{ steps.ref.outputs.ref }}" \
+                   | awk -F@ '{print $2}')
+          echo "::notice title=Pushed::digest=$DIGEST"
+          echo "digest=$DIGEST" >> "$GITHUB_ENV"
+
+      # ── 3. SCAN — poll until the registry's scanner finishes ────────
+      - name: Wait for CVE scan
+        id: scan
+        run: |
+          set -euo pipefail
+
+          # Mint a scoped pull token. Falls back to the basic-auth user
+          # if the auth token endpoint isn't exposed.
+          SCOPE="repository:${NEBULACR_TENANT}/${NEBULACR_PROJECT}/${NEBULACR_REPO}:pull"
+          TOKEN=$(curl -fsS -u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}" \
+                    "https://${NEBULACR_HOST}/auth/token?service=nebulacr-registry&scope=${SCOPE}" \
+                  | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" \
+                  || echo "")
+
+          AUTH=()
+          if [ -n "$TOKEN" ]; then
+            AUTH=(-H "Authorization: Bearer $TOKEN")
+          else
+            AUTH=(-u "${{ secrets.NEBULACR_USERNAME }}:${{ secrets.NEBULACR_PASSWORD }}")
+          fi
+
+          # Poll the live-scan endpoint until status=Completed (or 90 s).
+          DEADLINE=$(( $(date +%s) + 90 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            BODY=$(curl -fsS "${AUTH[@]}" \
+              "https://${NEBULACR_HOST}/v2/scan/live/${digest}" 2>/dev/null || echo "{}")
+            STATUS=$(echo "$BODY" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('status','Pending'))" 2>/dev/null || echo "Pending")
+            echo "scan status: $STATUS"
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "Failed" ]; then
+              echo "$BODY" > /tmp/scan.json
+              break
+            fi
+            sleep 6
+          done
+
+          if [ ! -f /tmp/scan.json ]; then
+            echo "::error::Scan did not complete in 90s"
+            exit 1
+          fi
+
+          # Pull out the summary counts.
+          python3 <<'PY'
+          import json, os
+          d = json.load(open('/tmp/scan.json'))
+          summary = d.get('summary', {})
+          counts = {
+              'critical': summary.get('critical', 0),
+              'high':     summary.get('high', 0),
+              'medium':   summary.get('medium', 0),
+              'low':      summary.get('low', 0),
+              'unknown':  summary.get('unknown', 0),
+          }
+          policy = d.get('policy_evaluation', {})
+          status = policy.get('status', 'NO_POLICY')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              for k, v in counts.items():
+                  f.write(f"scan_{k}={v}\n")
+              f.write(f"policy_status={status}\n")
+          PY
+          echo "::notice title=Scan::critical=${scan_critical:-?} high=${scan_high:-?} policy=${policy_status:-?}"
+
+      # ── 4. PULL — prove the round-trip ──────────────────────────────
+      - name: Pull image back
+        run: |
+          docker rmi "${{ steps.ref.outputs.ref }}" || true
+          docker pull "${{ steps.ref.outputs.ref }}"
+          echo "::notice title=Pulled::round-trip OK"
+
+      # ── 5. SUMMARY — link to dashboards + a green/red banner ────────
+      - name: Render run summary
+        if: always()
+        run: |
+          {
+            echo "# NebulaCR Showcase"
+            echo
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Build  | ${{ job.status == 'success' && '✅' || '❌' }} \`${{ steps.ref.outputs.ref }}\` |"
+            echo "| Push   | ${{ job.status == 'success' && '✅' || '❌' }} digest \`${digest:-?}\` |"
+            echo "| Scan   | critical=**${scan_critical:-?}** high=**${scan_high:-?}** medium=${scan_medium:-?} low=${scan_low:-?} |"
+            echo "| Policy | \`${policy_status:-NO_POLICY}\` |"
+            echo "| Pull   | ${{ job.status == 'success' && '✅' || '❌' }} round-trip OK |"
+            echo
+            echo "## Dashboards"
+            echo
+            echo "- [Enterprise Overview](${GRAFANA_BASE}/d/nebulacr-overview/?var-tenant=${NEBULACR_TENANT})"
+            echo "- [Operations Detail ](${GRAFANA_BASE}/d/nebulacr-detail/?var-tenant=${NEBULACR_TENANT})"
+            echo
+            echo "## What just happened"
+            echo
+            echo "1. **Built** \`examples/showcase/Dockerfile\` on top of"
+            echo "   \`${{ inputs.base_image || 'python:3.9-slim' }}\` — a deliberately CVE-rich base"
+            echo "   so the scanner has something to find."
+            echo "2. **Pushed** the image to NebulaCR using the standard \`docker push\`."
+            echo "3. **Scanned** — every push enqueues a SBOM extraction +"
+            echo "   vuln match against the OSV / NVD / GHSA feeds. Findings"
+            echo "   land in Postgres, surfaced via the Grafana dashboards"
+            echo "   and the live \`/v2/scan/live/<digest>\` endpoint."
+            echo "4. **Pulled** back to prove the registry round-trips."
+            echo "5. **Linked** the dashboards above so you can see the"
+            echo "   broader fleet view (storage cost, top tenants by CVE"
+            echo "   exposure, mirror cache hit rate, etc.) populated by"
+            echo "   this push and every other push your team makes."
+            echo
+            echo "Article + video: \`docs/showcase.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
