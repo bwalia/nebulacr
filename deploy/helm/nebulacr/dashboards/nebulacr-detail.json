@@ -1,0 +1,446 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Operations view of NebulaCR — image-size distribution, too-large outliers, GC reap rate, request volume, scan queue depth, finding mix.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": ["nebulacr"],
+      "targetBlank": false,
+      "title": "NebulaCR Enterprise Overview",
+      "tooltip": "Top-line storage / cost / CVE summary",
+      "type": "link",
+      "url": "/d/nebulacr-overview/nebulacr-enterprise-overview"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "id": 200,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "Image size",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "title": "Image-size distribution",
+      "type": "histogram",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 1 },
+      "options": {
+        "bucketSize": 100000000,
+        "combine": false,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 80, "lineWidth": 0 },
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 524288000 },
+              { "color": "red", "value": 2147483648 }
+            ]
+          },
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "table",
+          "rawSql": "SELECT SUM(b.bytes)::BIGINT AS \"size\" FROM manifest_blob_refs r JOIN blob_refcounts b ON b.tenant = r.tenant AND b.blob_digest = r.blob_digest WHERE (r.tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY r.manifest_digest",
+          "rawQuery": true
+        }
+      ],
+      "description": "Manifest-size distribution. The fat right tail is your Dockerfile cleanup target. Yellow > 500 MiB, red > 2 GiB."
+    },
+    {
+      "id": 12,
+      "title": "Too-large images (top 20)",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 1 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "size", "desc": true }]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "displayMode": "auto" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "size" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.align", "value": "right" },
+              { "id": "custom.displayMode", "value": "gradient-gauge" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "layers" },
+            "properties": [
+              { "id": "custom.align", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "table",
+          "rawSql": "WITH per_manifest AS ( SELECT r.tenant, r.manifest_digest, SUM(b.bytes) AS bytes, COUNT(*) AS layers FROM manifest_blob_refs r JOIN blob_refcounts b ON b.tenant = r.tenant AND b.blob_digest = r.blob_digest WHERE (r.tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY r.tenant, r.manifest_digest) SELECT pm.tenant, pm.manifest_digest AS digest, pm.bytes::BIGINT AS size, pm.layers::INT AS layers FROM per_manifest pm ORDER BY pm.bytes DESC LIMIT 20",
+          "rawQuery": true
+        }
+      ],
+      "description": "20 largest manifests by total uncompressed-blob bytes. Drill in: oversized images have a real cost on every pull."
+    },
+    {
+      "type": "row",
+      "id": 201,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "title": "Request volume",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 13,
+      "title": "Request rate (per op)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum(rate(registry_pull_total[5m]))", "legendFormat": "blob pulls" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum(rate(registry_push_total[5m]))", "legendFormat": "blob pushes" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum(rate(registry_manifest_pull_total[5m]))", "legendFormat": "manifest pulls" },
+        { "refId": "D", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum(rate(registry_manifest_push_total[5m]))", "legendFormat": "manifest pushes" },
+        { "refId": "E", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum(rate(registry_delete_total[5m]))", "legendFormat": "deletes" }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Request latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 },
+          "unit": "s"
+        }
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(registry_request_duration_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(registry_request_duration_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(registry_request_duration_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ],
+      "description": "Watch p99 trend before chasing p50 — long-tail latency is what users notice."
+    },
+    {
+      "type": "row",
+      "id": 202,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
+      "title": "Mirror & GC",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 15,
+      "title": "Mirror cache hits vs misses",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "stacking": { "mode": "normal", "group": "A" } },
+          "unit": "reqps"
+        }
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum by (upstream) (rate(nebulacr_mirror_fetch_total[5m])) - on(upstream) sum by (upstream) (rate(nebulacr_mirror_cache_misses_total[5m]))", "legendFormat": "{{upstream}} hit" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum by (upstream) (rate(nebulacr_mirror_cache_misses_total[5m]))", "legendFormat": "{{upstream}} miss" }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Mirror upstream bytes",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 },
+          "unit": "Bps"
+        }
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum by (upstream) (rate(nebulacr_mirror_upstream_bytes_total[5m]))", "legendFormat": "{{upstream}}" }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "GC reaper rate",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "bars", "fillOpacity": 80 },
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', reaped_at) AS time, COUNT(*) AS \"blobs reaped\" FROM gc_reaps WHERE reaped_at >= $__timeFrom() AND reaped_at <= $__timeTo() AND (tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY 1 ORDER BY 1",
+          "rawQuery": true
+        }
+      ],
+      "description": "Hourly count of blobs the online-GC reaper drained. Sustained rate going to zero unexpectedly usually means storage backend is rate-limiting."
+    },
+    {
+      "type": "row",
+      "id": 203,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "title": "Scanning",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 18,
+      "title": "Findings by detector × severity",
+      "type": "barchart",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 29 },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "normal",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "showValue": "auto",
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "table",
+          "rawSql": "SELECT detector || ' / ' || severity AS series, COUNT(*) AS open FROM findings f WHERE NOT EXISTS ( SELECT 1 FROM suppressions s WHERE s.cve_id = f.finding_id AND s.detector = f.detector AND s.revoked_at IS NULL) GROUP BY detector, severity ORDER BY detector, CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END",
+          "rawQuery": true
+        }
+      ],
+      "description": "Open findings broken down by detector (cve / license / secret / malware) × severity. Targets the security-team triage workflow."
+    },
+    {
+      "id": 19,
+      "title": "Top 20 images by Critical CVEs",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 29 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "critical", "desc": true }]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "displayMode": "auto" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "(critical|high)" },
+            "properties": [
+              { "id": "custom.align", "value": "right" },
+              { "id": "custom.displayMode", "value": "color-background" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "table",
+          "rawSql": "SELECT s.tenant, s.project, s.repository, s.reference AS tag, COUNT(*) FILTER (WHERE f.severity = 'critical') AS critical, COUNT(*) FILTER (WHERE f.severity = 'high') AS high, MAX(f.detected_at) AS last_seen FROM findings f JOIN scans s ON s.digest = f.digest WHERE f.detector = 'cve' AND NOT EXISTS ( SELECT 1 FROM suppressions sup WHERE sup.cve_id = f.finding_id AND sup.detector = 'cve' AND sup.revoked_at IS NULL) AND (s.tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY s.tenant, s.project, s.repository, s.reference HAVING COUNT(*) FILTER (WHERE f.severity IN ('critical', 'high')) > 0 ORDER BY critical DESC, high DESC LIMIT 20",
+          "rawQuery": true
+        }
+      ],
+      "description": "Per-image Critical/High counts. Suppressions honoured. Sorted by Critical desc."
+    },
+    {
+      "id": 20,
+      "title": "Scan queue depth",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 38 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 },
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT NOW() AS time, status, COUNT(*) AS jobs FROM scan_jobs GROUP BY status",
+          "rawQuery": true
+        }
+      ],
+      "description": "Live scan_jobs status mix. Sustained 'queued' or 'running' growth means the scanner is falling behind."
+    },
+    {
+      "id": 21,
+      "title": "5xx error rate",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 38 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource_prom}" }, "expr": "sum by (route) (rate(nebulacr_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "{{route}}" }
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["nebulacr", "operations", "detail"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus datasource",
+        "multi": false,
+        "name": "datasource_prom",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": false, "text": "nebulacr-postgres", "value": "nebulacr-postgres" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Postgres datasource",
+        "multi": false,
+        "name": "datasource_pg",
+        "options": [],
+        "query": "postgres",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+        "definition": "SELECT DISTINCT tenant FROM blob_refcounts ORDER BY tenant",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tenant",
+        "multi": true,
+        "name": "tenant",
+        "options": [],
+        "query": "SELECT DISTINCT tenant FROM blob_refcounts ORDER BY tenant",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "NebulaCR — Operations Detail",
+  "uid": "nebulacr-detail",
+  "version": 1,
+  "weekStart": ""
+}

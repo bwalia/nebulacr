@@ -353,6 +353,33 @@ serviceMonitor:
   # Additional relabelings
   relabelings: []
 
+## -- Grafana dashboards --
+##
+## Two dashboards ship in deploy/helm/nebulacr/dashboards/:
+##   - nebulacr-overview.json — exec view: storage, image count,
+##     monthly cost projection, mirror status, CVE posture.
+##   - nebulacr-detail.json   — operations view: image-size
+##     distribution, too-large outliers, request volume, GC reaper
+##     rate, scan queue depth.
+##
+## Both use templated datasources for a Prometheus instance and a
+## Postgres instance (the registry's scanner/GC pool). Default off
+## — flip on when your Grafana sidecar is configured to scan this
+## namespace.
+##
+## Reference for the discovery label:
+##   https://github.com/grafana/helm-charts/tree/main/charts/grafana
+##   (search "sidecar.dashboards.label").
+grafana:
+  dashboards:
+    enabled: false
+    # Label the kube-prometheus-stack / kiwigrid sidecar watches for.
+    discoveryLabel: grafana_dashboard
+    # Extra labels to attach to each ConfigMap, e.g. to scope by
+    # multi-tenant Grafana folder.
+    extraLabels: {}
+    annotations: {}
+
 ## -- Prometheus alerting rules (PrometheusRule CRD) --
 ## Ships the same alert set bundled at deploy/observability/prometheus/rules/.
 ## Disabled by default — enable when prometheus-operator is installed.

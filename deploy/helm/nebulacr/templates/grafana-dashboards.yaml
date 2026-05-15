@@ -1,0 +1,36 @@
+{{/*
+Grafana dashboards.
+
+Renders a ConfigMap per JSON in `deploy/helm/nebulacr/dashboards/`,
+labelled `grafana_dashboard: "1"` so the kube-prometheus-stack /
+kiwigrid sidecar auto-loads them. Operators using a different
+provisioner can override the discovery label via
+`grafana.dashboards.discoveryLabel`.
+
+Default off — operators opt in when their Grafana is configured to
+scan this namespace.
+*/}}
+{{- if .Values.grafana.dashboards.enabled }}
+{{- range $path, $bytes := .Files.Glob "dashboards/*.json" }}
+{{- $name := regexReplaceAll "\\.json$" (base $path) "" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nebulacr.fullname" $ }}-grafana-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "nebulacr.labels" $ | nindent 4 }}
+    {{ $.Values.grafana.dashboards.discoveryLabel }}: "1"
+    {{- with $.Values.grafana.dashboards.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $.Values.grafana.dashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ $name }}.json: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

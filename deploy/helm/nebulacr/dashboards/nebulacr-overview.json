@@ -1,0 +1,525 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Executive view of NebulaCR — storage, image count, cost projection, mirror status, CVE posture. One-stop decision-making dashboard.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": ["nebulacr"],
+      "targetBlank": false,
+      "title": "NebulaCR Operations Detail",
+      "tooltip": "Per-tenant breakdown, image-size distribution, GC, CVE per repo",
+      "type": "link",
+      "url": "/d/nebulacr-detail/nebulacr-operations-detail"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "Footprint",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "title": "Total images",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT NOW() AS time, COUNT(DISTINCT manifest_digest)::BIGINT AS \"images\" FROM manifest_blob_refs WHERE ($__tenantFilter) OR ('${tenant:csv}' = '$$__all') OR (tenant = ANY(string_to_array('${tenant:csv}', ',')))",
+          "rawQuery": true
+        }
+      ],
+      "description": "Distinct manifest digests recorded by the GC refcount writer. Tenants whose 009 GC isn't enabled are not counted."
+    },
+    {
+      "id": 2,
+      "title": "Total storage",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1099511627776 },
+              { "color": "red", "value": 5497558138880 }
+            ]
+          },
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT NOW() AS time, COALESCE(SUM(bytes), 0)::BIGINT AS \"bytes\" FROM blob_refcounts WHERE refcount > 0 AND (tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all')",
+          "rawQuery": true
+        }
+      ],
+      "description": "Sum of unique-blob bytes across the selected tenants. Refcount > 0 excludes blobs scheduled for reaping."
+    },
+    {
+      "id": 3,
+      "title": "Avg image size",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 524288000 },
+              { "color": "red", "value": 2147483648 }
+            ]
+          },
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT NOW() AS time, COALESCE(AVG(per_manifest_bytes), 0)::BIGINT AS \"bytes\" FROM ( SELECT manifest_digest, SUM(bytes) AS per_manifest_bytes FROM manifest_blob_refs r JOIN blob_refcounts b ON b.tenant = r.tenant AND b.blob_digest = r.blob_digest WHERE (r.tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY manifest_digest) t",
+          "rawQuery": true
+        }
+      ],
+      "description": "Mean bytes per manifest. Yellow > 500 MiB, red > 2 GiB — typical thresholds for 'audit your Dockerfile'."
+    },
+    {
+      "id": 4,
+      "title": "Projected monthly cost",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red", "value": 5000 }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "WITH model AS ( SELECT (spec->>'egress_per_gb')::float8 AS egress_per_gb, (spec->>'storage_per_gb_month')::float8 AS storage_per_gb_month FROM cost_models ORDER BY updated_at DESC LIMIT 1), egress30 AS ( SELECT COALESCE(SUM(bytes), 0)::float8 / 1e9 AS gb FROM usage_daily WHERE op = 'pull' AND bucket_at >= NOW() - INTERVAL '30 days' AND (tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all')), storage AS ( SELECT COALESCE(SUM(bytes), 0)::float8 / 1e9 AS gb FROM blob_refcounts WHERE refcount > 0 AND (tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all')) SELECT NOW() AS time, ((SELECT gb FROM egress30) * COALESCE((SELECT egress_per_gb FROM model), 0.09)) + ((SELECT gb FROM storage) * COALESCE((SELECT storage_per_gb_month FROM model), 0.023)) AS \"USD\"",
+          "rawQuery": true
+        }
+      ],
+      "description": "Projection: last-30d egress × egress_per_gb + current storage × storage_per_gb_month. Falls back to AWS us-east-1 defaults when no CostModel is configured ($0.09/GB egress, $0.023/GB-month storage)."
+    },
+    {
+      "id": 5,
+      "title": "Open critical+high CVEs",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT NOW() AS time, COUNT(*)::BIGINT AS \"open\" FROM findings f WHERE f.severity IN ('critical', 'high') AND NOT EXISTS ( SELECT 1 FROM suppressions s WHERE s.cve_id = f.finding_id AND s.detector = f.detector AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > NOW()))",
+          "rawQuery": true
+        }
+      ],
+      "description": "All findings of severity high or critical that are not actively suppressed. Numbers > 0 are operator-actionable."
+    },
+    {
+      "id": 6,
+      "title": "Mirror cache hit ratio",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "green", "value": 0.85 }
+            ]
+          },
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "max": 1
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource_prom}" },
+          "expr": "1 - (sum(rate(nebulacr_mirror_cache_misses_total[5m])) / clamp_min(sum(rate(nebulacr_mirror_fetch_total[5m])), 1))",
+          "instant": true
+        }
+      ],
+      "description": "Pull-through cache hit ratio over the last 5 minutes. Below 50%: upstream re-pulls dominate; review cache TTL or upstream rate limits."
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "title": "Cost & growth",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 7,
+      "title": "Storage trend (30d)",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "stacking": { "mode": "normal", "group": "A" } },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT bucket_at AS time, tenant, SUM(bytes)::BIGINT AS bytes FROM usage_daily WHERE op = 'push' AND bucket_at >= $__timeFrom() AND bucket_at <= $__timeTo() AND (tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY bucket_at, tenant ORDER BY bucket_at",
+          "rawQuery": true
+        }
+      ],
+      "description": "Daily bytes pushed per tenant. Stacked area shows where the storage growth is coming from."
+    },
+    {
+      "id": 8,
+      "title": "Egress trend (30d)",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "stacking": { "mode": "normal", "group": "A" } },
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "time_series",
+          "rawSql": "SELECT bucket_at AS time, tenant, SUM(bytes)::BIGINT AS bytes FROM usage_daily WHERE op = 'pull' AND bucket_at >= $__timeFrom() AND bucket_at <= $__timeTo() AND (tenant = ANY(string_to_array('${tenant:csv}', ',')) OR '${tenant:csv}' = '$$__all') GROUP BY bucket_at, tenant ORDER BY bucket_at",
+          "rawQuery": true
+        }
+      ],
+      "description": "Daily bytes pulled per tenant — the dominant cost driver in most cloud bills."
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "title": "Top tenants",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 9,
+      "title": "Top 10 tenants by storage",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 15 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "bytes", "desc": true }]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "displayMode": "auto" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "bytes" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.align", "value": "right" },
+              { "id": "custom.displayMode", "value": "gradient-gauge" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "monthly_cost_usd" },
+            "properties": [
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "decimals", "value": 2 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "images" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.align", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "table",
+          "rawSql": "WITH model AS ( SELECT (spec->>'egress_per_gb')::float8 AS egress_per_gb, (spec->>'storage_per_gb_month')::float8 AS storage_per_gb_month FROM cost_models ORDER BY updated_at DESC LIMIT 1), st AS ( SELECT tenant, SUM(bytes) AS bytes FROM blob_refcounts WHERE refcount > 0 GROUP BY tenant), eg AS ( SELECT tenant, SUM(bytes)::float8 / 1e9 AS gb FROM usage_daily WHERE op = 'pull' AND bucket_at >= NOW() - INTERVAL '30 days' GROUP BY tenant), im AS ( SELECT tenant, COUNT(DISTINCT manifest_digest) AS images FROM manifest_blob_refs GROUP BY tenant) SELECT st.tenant, st.bytes, COALESCE(im.images, 0) AS images, ((COALESCE(eg.gb, 0) * COALESCE((SELECT egress_per_gb FROM model), 0.09)) + ((st.bytes::float8 / 1e9) * COALESCE((SELECT storage_per_gb_month FROM model), 0.023)))::numeric(12,2) AS monthly_cost_usd FROM st LEFT JOIN eg ON eg.tenant = st.tenant LEFT JOIN im ON im.tenant = st.tenant ORDER BY st.bytes DESC LIMIT 10",
+          "rawQuery": true
+        }
+      ],
+      "description": "Storage + image count + projected monthly cost per tenant. Sorted by storage descending."
+    },
+    {
+      "id": 10,
+      "title": "Top 10 tenants by CVE exposure",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 15 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "critical", "desc": true }]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "displayMode": "auto" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "critical" },
+            "properties": [
+              { "id": "custom.align", "value": "right" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "high" },
+            "properties": [
+              { "id": "custom.align", "value": "right" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 1 },
+                    { "color": "red", "value": 10 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+          "format": "table",
+          "rawSql": "SELECT s.tenant, COUNT(*) FILTER (WHERE f.severity = 'critical' AND NOT EXISTS (SELECT 1 FROM suppressions sup WHERE sup.cve_id = f.finding_id AND sup.detector = f.detector AND sup.revoked_at IS NULL))::BIGINT AS critical, COUNT(*) FILTER (WHERE f.severity = 'high' AND NOT EXISTS (SELECT 1 FROM suppressions sup WHERE sup.cve_id = f.finding_id AND sup.detector = f.detector AND sup.revoked_at IS NULL))::BIGINT AS high, COUNT(DISTINCT f.digest)::BIGINT AS affected_images FROM findings f JOIN scans s ON s.digest = f.digest GROUP BY s.tenant ORDER BY critical DESC, high DESC LIMIT 10",
+          "rawQuery": true
+        }
+      ],
+      "description": "Tenants ranked by open Critical/High findings. Suppressions are honoured."
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["nebulacr", "overview", "executive"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus datasource",
+        "multi": false,
+        "name": "datasource_prom",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": false, "text": "nebulacr-postgres", "value": "nebulacr-postgres" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Postgres datasource",
+        "multi": false,
+        "name": "datasource_pg",
+        "options": [],
+        "query": "postgres",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "postgres", "uid": "${datasource_pg}" },
+        "definition": "SELECT DISTINCT tenant FROM blob_refcounts ORDER BY tenant",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tenant",
+        "multi": true,
+        "name": "tenant",
+        "options": [],
+        "query": "SELECT DISTINCT tenant FROM blob_refcounts ORDER BY tenant",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "NebulaCR — Enterprise Overview",
+  "uid": "nebulacr-overview",
+  "version": 1,
+  "weekStart": ""
+}
