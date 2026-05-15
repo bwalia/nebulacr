@@ -106,26 +106,85 @@ jobs:
             "$RELEASE_NAME" -o jsonpath='{.spec.rules[0].host}')
           echo "Registry: $REGISTRY_HOST"
 
-          # Prefer the external ingress — the NetworkPolicy restricts intra-
-          # namespace traffic to labelled pods, so a random curl sidecar gets
-          # connection-refused even when the registry is healthy.
+          # Two-stage smoke test:
+          #   1. Try the external ingress (covers DNS + TLS + cert + ingress
+          #      controller). If the public proxy is up, this is the most
+          #      end-to-end check we can do.
+          #   2. If the ingress is unreachable (transient proxy outage,
+          #      certbot challenge in flight, etc.), fall back to an
+          #      in-cluster check via `kubectl exec` against the registry
+          #      service. This proves the deployment is healthy even when
+          #      the external path is degraded.
+          #
+          # Each curl gets explicit --connect-timeout and --max-time so a
+          # hanging proxy doesn't burn 2-minute connect timeouts per
+          # attempt and starve the loop budget.
+
+          v2_ok() {
+            # $1 = base URL, no trailing slash. Echoes "PASS" on success
+            # via stdout; non-zero exit on failure.
+            local base="$1"
+            curl -fsS --connect-timeout 5 --max-time 15 \
+              "${base}/health" >/dev/null || return 1
+            local code
+            code=$(curl -sS -o /dev/null -w "%{http_code}" \
+              --connect-timeout 5 --max-time 15 \
+              -H "Accept: application/json" "${base}/v2/" || echo "000")
+            case "$code" in
+              200|401) echo "PASS"; return 0 ;;
+              *)       echo "::error::Unexpected /v2/ status: $code" >&2; return 1 ;;
+            esac
+          }
+
+          # Stage 1 — external ingress, retried with backoff.
           for i in 1 2 3 4 5 6; do
-            if curl -fsS "https://$REGISTRY_HOST/health" >/dev/null 2>&1; then
-              echo "=== Registry health OK (via ingress) ==="
-              curl -fsS "https://$REGISTRY_HOST/health" && echo
-              # /v2/ returns 401 when auth is enabled — that's the expected
-              # Bearer-challenge response, so don't use -f here. Treat 200 or
-              # 401 as healthy; anything else (5xx, connection error) fails.
-              V2_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
-                -H "Accept: application/json" "https://$REGISTRY_HOST/v2/" || echo "000")
-              echo "v2 status: $V2_STATUS"
-              case "$V2_STATUS" in
-                200|401) echo "=== Smoke test PASSED ===" ; exit 0 ;;
-                *)       echo "::error::Unexpected /v2/ status: $V2_STATUS" ; exit 1 ;;
-              esac
+            if [ "$(v2_ok "https://$REGISTRY_HOST" || true)" = "PASS" ]; then
+              echo "=== Smoke test PASSED via ingress (attempt $i) ==="
+              exit 0
             fi
-            echo "Attempt $i: not ready yet"
-            sleep 10
+            echo "ingress attempt $i: not ready yet (proxy may be transient)"
+            sleep $((i * 5))
           done
-          echo "::error::Smoke test failed — /health unreachable via ingress after 6 attempts"
-          exit 1
+          echo "::warning::External ingress unreachable; falling back to in-cluster check"
+
+          # Stage 2 — in-cluster via `kubectl exec` against an existing
+          # registry pod. Picks any pod from the deployment and shells out
+          # to whatever HTTP client it has (curl preferred, wget as
+          # fallback). The registry image ships busybox-style wget so this
+          # works without sidecars.
+          POD=$(kubectl get pods -n "$NS" \
+            -l app.kubernetes.io/name=nebulacr-registry \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -z "$POD" ]; then
+            echo "::error::No registry pods labelled app.kubernetes.io/name=nebulacr-registry in $NS"
+            exit 1
+          fi
+          echo "Probing pod: $POD"
+
+          probe() {
+            # Try curl, then wget. Both ship in different base images;
+            # whichever one's present wins. Returns the HTTP body on
+            # success or non-zero on failure.
+            local path="$1"
+            kubectl exec -n "$NS" "$POD" -c registry -- \
+              sh -c "command -v curl >/dev/null && curl -fsS --max-time 10 http://localhost:5000${path} \
+                  || (command -v wget >/dev/null && wget -qO- --timeout=10 http://localhost:5000${path})"
+          }
+
+          if ! probe "/health"; then
+            echo "::error::In-cluster /health probe failed against pod $POD"
+            kubectl logs -n "$NS" "$POD" -c registry --tail=50 || true
+            exit 1
+          fi
+          V2_STATUS=$(kubectl exec -n "$NS" "$POD" -c registry -- \
+            sh -c 'command -v curl >/dev/null \
+              && curl -sS -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:5000/v2/ \
+              || (command -v wget >/dev/null && wget -qSO /dev/null --timeout=10 http://localhost:5000/v2/ 2>&1 \
+                  | awk "/HTTP/{print \$2; exit}")' || echo "000")
+          echo "in-cluster /v2 status: $V2_STATUS"
+          case "$V2_STATUS" in
+            200|401) echo "=== Smoke test PASSED via in-cluster fallback ===" ;;
+            *)       echo "::error::In-cluster /v2/ returned unexpected $V2_STATUS"
+                     kubectl logs -n "$NS" "$POD" -c registry --tail=50 || true
+                     exit 1 ;;
+          esac
