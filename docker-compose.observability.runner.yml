@@ -1,0 +1,45 @@
+# ============================================================================
+# Runner override for the observability stack.
+#
+# Bind mounts in docker-compose.observability.yml resolve relative to the
+# compose file's directory. On a developer laptop that's just the git
+# checkout — works fine. On a Kubernetes-hosted GitHub Actions runner
+# that uses Docker-outside-of-Docker (DooD), the host docker daemon
+# runs on the cluster node, NOT inside the runner pod. The runner's
+# checkout is invisible to the host daemon, so when compose tells
+# Docker to bind-mount `./deploy/.../prometheus.yml`, Docker resolves
+# the path on the host (where it doesn't exist) and silently
+# auto-creates an empty directory there — which then fails the
+# subsequent file mount with "not a directory: are you trying to
+# mount a directory onto a file?"
+#
+# The fix: use named volumes for the config + provisioning trees and
+# pre-populate them via `docker run -i ... tar -x` (which streams the
+# content over the docker socket, avoiding host-filesystem bind mounts
+# entirely). The deploy-observability workflow handles that.
+#
+# Apply with:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.observability.yml \
+#                  -f docker-compose.observability.runner.yml up -d
+# ============================================================================
+
+services:
+  prometheus:
+    volumes: !override
+      - prometheus-config:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    volumes: !override
+      - grafana-provisioning:/etc/grafana/provisioning:ro
+      - grafana-dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  # Populated by the deploy-observability workflow's `Stage configs
+  # into named volumes` step before `docker compose up`. See the
+  # docs/grafana-dashboards.md note on runner provisioning.
+  prometheus-config:
+  grafana-provisioning:
+  grafana-dashboards:
