@@ -59,6 +59,52 @@ jobs:
           echo "Bound host ports:"
           docker compose ${COMPOSE_FILE} config | awk '/^      - "/{print $2}' | tr -d '"'
 
+      - name: Verify bind-mount source paths
+        if: ${{ github.event.inputs.action != 'down' }}
+        run: |
+          # Defensive cleanup: a previous failed `docker compose up` on
+          # this runner can leave Docker-auto-created directories where
+          # bind-mount targets should be regular files (the rules-dir
+          # mount works either way; the prometheus.yml mount needs a
+          # file). When that happens, the next runtime mount fails with
+          # "not a directory: Are you trying to mount a directory onto
+          # a file (or vice-versa)?" — even though `docker compose
+          # config` parses fine, since the YAML never inspects host
+          # state. We restore from git when the type is wrong.
+          set -euo pipefail
+          paths_must_be_files=(
+            "deploy/observability/prometheus/prometheus.yml"
+          )
+          paths_must_be_dirs=(
+            "deploy/observability/prometheus/rules"
+            "deploy/observability/grafana/provisioning"
+            "deploy/observability/grafana/dashboards"
+          )
+          fixed=0
+          for p in "${paths_must_be_files[@]}"; do
+            if [ ! -f "$p" ]; then
+              echo "::warning::expected file at $p — restoring from git"
+              rm -rf -- "$p"
+              git checkout -- "$p"
+              fixed=$((fixed + 1))
+            fi
+          done
+          for p in "${paths_must_be_dirs[@]}"; do
+            if [ ! -d "$p" ]; then
+              echo "::warning::expected directory at $p — restoring from git"
+              rm -rf -- "$p"
+              git checkout -- "$p"
+              fixed=$((fixed + 1))
+            fi
+          done
+          if [ "$fixed" -gt 0 ]; then
+            echo "::notice::repaired $fixed bind-mount source path(s) before bringing the stack up"
+          fi
+          # Tail the file we know causes trouble so the run log captures
+          # what Prometheus is being given.
+          echo "── prometheus.yml head ──"
+          head -20 deploy/observability/prometheus/prometheus.yml
+
       - name: Pull images
         if: ${{ github.event.inputs.action != 'down' && (github.event.inputs.pull_images == 'true' || github.event_name == 'push') }}
         run: |
