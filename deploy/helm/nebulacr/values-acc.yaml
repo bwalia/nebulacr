@@ -183,11 +183,24 @@ grafana:
         hosts:
           - acc-nebulacr-grafana.diytaxreturn.co.uk
 
-# Default URLs for the parent-chart-rendered datasources. Prometheus
-# url defaults to the kube-prometheus-stack server in the monitoring
-# namespace; postgres defaults work because postgres.enabled=true.
+# Default URLs for the parent-chart-rendered datasources. The actual
+# kube-prometheus-stack release in this cluster is named
+# `prometheus-stack` (the prom-operator labels prefixed with
+# `prometheus-stack-kube-prom-*`). Postgres defaults work because
+# postgres.enabled=true.
 nebulacrGrafanaDatasources:
   enabled: true
   prometheus:
-    url: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
-    rootDirectory: /var/lib/nebulacr/data
+    url: http://prometheus-stack-kube-prom-prometheus.monitoring.svc:9090
+
+# Render the ServiceMonitor for both registry + auth so the
+# kube-prometheus-stack picks up /metrics. Without this Prometheus
+# never scrapes the workload and the Grafana dashboards stay empty.
+serviceMonitor:
+  enabled: true
+  # The kube-prometheus-stack picks up ServiceMonitors with this
+  # label (`release: prometheus-stack`).
+  labels:
+    release: prometheus-stack
+  interval: 30s
+  scrapeTimeout: 10s

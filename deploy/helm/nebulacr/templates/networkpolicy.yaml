@@ -30,13 +30,17 @@ spec:
       ports:
         - port: {{ .Values.auth.port }}
           protocol: TCP
-    # Allow metrics scraping from monitoring namespace
+    # Allow metrics scraping from monitoring namespace.
+    # /metrics is served on the HTTP port (5001) by nebula-auth too;
+    # see the registry netpol comment below for context.
     {{- if .Values.networkPolicy.monitoringNamespace }}
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
       ports:
+        - port: {{ .Values.auth.port }}
+          protocol: TCP
         - port: {{ .Values.auth.metricsPort }}
           protocol: TCP
     {{- end }}
@@ -73,13 +77,19 @@ spec:
       ports:
         - port: {{ .Values.registry.port }}
           protocol: TCP
-    # Allow metrics scraping from monitoring namespace
+    # Allow metrics scraping from monitoring namespace.
+    # `/metrics` is on the HTTP port (5000), not the dedicated
+    # metricsPort which the binary doesn't bind. We open both so
+    # operators using a future split-port build don't have to flip
+    # this back.
     {{- if .Values.networkPolicy.monitoringNamespace }}
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
       ports:
+        - port: {{ .Values.registry.port }}
+          protocol: TCP
         - port: {{ .Values.registry.metricsPort }}
           protocol: TCP
     {{- end }}
@@ -131,6 +141,19 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
+    {{- if .Values.grafana.enabled }}
+    # In-chart Grafana also reads Postgres for the enterprise
+    # dashboards (storage / cost / CVE panels). Limited to the
+    # subchart's own pod label.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    {{- end }}
 {{- end }}
 {{- if .Values.redis.enabled }}
 ---

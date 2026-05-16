@@ -347,6 +347,16 @@ spec:
         {{- end }}
 ---
 {{- if and (eq .Values.storage.backend "filesystem") .Values.storage.filesystem.persistence.enabled (not .Values.storage.filesystem.persistence.existingClaim) }}
+{{- /*
+A PVC's `.spec` is immutable once bound. If we render the chart
+without `.spec.volumeName` but the live PVC has one, helm v3 SSA
+diff says "set volumeName to empty" and the API rejects with
+"spec: Forbidden". To stay compatible with bound PVCs from
+previous releases, look up the live object and re-emit its
+volumeName so the rendered spec matches reality.
+See deploy run 25965869599.
+*/ -}}
+{{- $existingPvc := lookup "v1" "PersistentVolumeClaim" .Release.Namespace (printf "%s-data" (include "nebulacr.fullname" .)) -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -361,6 +371,9 @@ spec:
     - {{ .Values.storage.filesystem.persistence.accessMode }}
   {{- if .Values.storage.filesystem.persistence.storageClass }}
   storageClassName: {{ .Values.storage.filesystem.persistence.storageClass | quote }}
+  {{- end }}
+  {{- if and $existingPvc $existingPvc.spec.volumeName }}
+  volumeName: {{ $existingPvc.spec.volumeName | quote }}
   {{- end }}
   resources:
     requests:

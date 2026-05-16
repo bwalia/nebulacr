@@ -17,7 +17,11 @@ spec:
     matchNames:
       - {{ .Release.Namespace }}
   endpoints:
-    - port: metrics
+    # `/metrics` is served by the same Axum router as the HTTP API on
+    # port 5000. The dedicated `metrics` Service port (9090) isn't
+    # bound by the binary today, so scraping `port: metrics` always
+    # times out — use the http port.
+    - port: http
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
       path: /metrics
@@ -48,7 +52,9 @@ spec:
     matchNames:
       - {{ .Release.Namespace }}
   endpoints:
-    - port: metrics
+    # Same story as the registry: nebula-auth serves /metrics on its
+    # HTTP port (5001), not on a dedicated metrics port.
+    - port: http
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
       path: /metrics
