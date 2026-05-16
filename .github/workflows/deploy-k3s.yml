@@ -67,6 +67,76 @@ jobs:
             -f "${{ steps.values.outputs.file }}" \
             --dry-run --debug 2>&1 | tail -50
 
+      - name: Pre-deploy reconciliation (one-shot ownership + immutable spec)
+        run: |
+          # Two specific failure modes show up on this release that
+          # can't be fixed inside the chart alone — see run
+          # 25965587486:
+          #
+          # 1. SSA field-manager conflicts. Helm v3 server-side
+          #    applies under field-manager `helm`. Any field
+          #    previously written by `kubectl patch` (manager
+          #    `kubectl-patch`) or by the legacy first-install
+          #    pathway (manager `before-first-apply`) belongs to
+          #    that other manager, and helm refuses to overwrite
+          #    with `Apply failed with N conflict: conflict with
+          #    "<manager>"`. We fix it by re-applying the rendered
+          #    chart once with `--server-side --force-conflicts
+          #    --field-manager=helm`, which transfers ownership.
+          #
+          # 2. Immutable StatefulSet spec. K8s forbids any change
+          #    to a StatefulSet's `volumeClaimTemplates`. The chart
+          #    used to put a `helm.sh/chart` label on the VCT,
+          #    which moves on every chart-version bump and trips
+          #    the API validation. The chart no longer emits those
+          #    labels, but the live object still has them, and
+          #    the diff alone is enough to fail. Orphan-delete
+          #    the StatefulSet (cascade=orphan keeps the running
+          #    pod and the PVC) so helm can recreate it cleanly
+          #    on the next step. The orphaned pod is adopted by
+          #    the new StatefulSet via its selectorLabels, and
+          #    the data on the PVC is preserved.
+          NS="${{ steps.values.outputs.namespace }}"
+          ROLL_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:0:7}"
+
+          # (1) reclaim field ownership on mutable kinds
+          RENDER=$(mktemp)
+          helm template "$RELEASE_NAME" "$CHART_PATH" \
+            -n "$NS" \
+            -f "${{ steps.values.outputs.file }}" \
+            --set "registry.podAnnotations.nebulacr\\.io/rolled-at=${ROLL_ID}" \
+            --set "auth.podAnnotations.nebulacr\\.io/rolled-at=${ROLL_ID}" \
+            > "$RENDER"
+          # Drop StatefulSet (handled in step 2) and Job (immutable
+          # spec; recreated each run anyway). Use awk to split on
+          # `---` and skip docs whose `kind:` is in the deny-list,
+          # so we don't depend on yq being available.
+          awk '
+            BEGIN { RS="---\n"; ORS="---\n" }
+            {
+              if ($0 ~ /\nkind: (StatefulSet|Job)\n/) next
+              if ($0 ~ /^kind: (StatefulSet|Job)\n/) next
+              print
+            }
+          ' "$RENDER" \
+            | kubectl apply --server-side --force-conflicts \
+                --field-manager=helm -n "$NS" -f - || true
+
+          # (2) orphan-delete the StatefulSet if its rendered VCT
+          # differs from the live VCT, so helm upgrade isn't blocked
+          # by `spec: Forbidden`. Cheap heuristic: if the live VCT
+          # carries a `helm.sh/chart` label and the chart template
+          # no longer emits one, the upgrade will conflict — drop
+          # the StatefulSet now (orphan keeps pod + PVC).
+          if kubectl get statefulset nebulacr-postgres -n "$NS" >/dev/null 2>&1; then
+            LIVE_VCT_CHART=$(kubectl get statefulset nebulacr-postgres -n "$NS" \
+              -o jsonpath='{.spec.volumeClaimTemplates[0].metadata.labels.helm\.sh/chart}' 2>/dev/null || true)
+            if [ -n "$LIVE_VCT_CHART" ]; then
+              echo "Orphan-deleting nebulacr-postgres (live VCT has helm.sh/chart=$LIVE_VCT_CHART; new chart drops it)"
+              kubectl delete statefulset nebulacr-postgres -n "$NS" --cascade=orphan --wait=true
+            fi
+          fi
+
       - name: Deploy with Helm
         run: |
           # Bump a pod-annotation every run so pods roll even when the tag is
@@ -75,12 +145,17 @@ jobs:
           # pulled — which bit us once. The chart reads these under
           # .Values.registry.podAnnotations / .Values.auth.podAnnotations
           # (per-component), so the --set paths must match.
+          #
+          # `--take-ownership` is defence-in-depth on top of the
+          # pre-deploy reclaim step; it lets helm adopt resources
+          # whose ownership annotations are missing or stale.
           ROLL_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:0:7}"
           helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
             -n "${{ steps.values.outputs.namespace }}" \
             -f "${{ steps.values.outputs.file }}" \
             --set "registry.podAnnotations.nebulacr\\.io/rolled-at=${ROLL_ID}" \
             --set "auth.podAnnotations.nebulacr\\.io/rolled-at=${ROLL_ID}" \
+            --take-ownership \
             --wait --timeout 5m
 
       - name: Verify deployment

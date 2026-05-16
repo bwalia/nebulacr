@@ -109,10 +109,14 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
   volumeClaimTemplates:
+    # No metadata.labels here on purpose: a StatefulSet's volumeClaimTemplates
+    # are part of its immutable spec. If the chart version (helm.sh/chart
+    # label) ever moves the API server rejects the upgrade with
+    # "spec: Forbidden: updates to statefulset spec for fields other than
+    # 'replicas', ..." — see deploy run 25965587486. Labels add no value
+    # for the PVC anyway, so leave it minimal.
     - metadata:
         name: data
-        labels:
-          {{- include "nebulacr.postgres.labels" . | nindent 10 }}
       spec:
         accessModes:
           - {{ .Values.postgres.persistence.accessMode | default "ReadWriteOnce" }}
