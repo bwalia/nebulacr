@@ -1,3 +1,8 @@
 /target
 /target-docker
 /.cargo-home
+
+# Unpacked Helm subchart artefacts. `helm dependency update` writes
+# the tarball + extracted dir into deploy/helm/nebulacr/charts/. The
+# Chart.lock IS committed so the resolved version is pinned.
+deploy/helm/nebulacr/charts/

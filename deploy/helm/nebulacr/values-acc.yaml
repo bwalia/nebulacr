@@ -141,4 +141,53 @@ storage:
       enabled: true
       size: 500Gi
       storageClass: local-path
+
+# Render the nebulacr dashboard ConfigMaps (overview + detail) with
+# the discovery label the in-chart Grafana sidecar watches for.
+nebulacrDashboards:
+  enabled: true
+
+# In-chart Grafana — published at acc-nebulacr-grafana.diytaxreturn.co.uk
+# with the same TLS/class as the registry ingress.
+grafana:
+  enabled: true
+
+  ## Inject the in-cluster postgres password into the grafana
+  ## container's env so the postgres datasource Secret rendered by
+  ## templates/grafana-datasources.yaml resolves
+  ## ${POSTGRES_DS_PASSWORD} at runtime.
+  envValueFrom:
+    POSTGRES_DS_PASSWORD:
+      secretKeyRef:
+        name: nebulacr-postgres
+        key: password
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: local-path
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  ingress:
+    enabled: true
+    ingressClassName: wslproxy
+    annotations:
+      cert-manager.io/cluster-issuer: main-issuer
+    hosts:
+      - acc-nebulacr-grafana.diytaxreturn.co.uk
+    tls:
+      - secretName: nebulacr-grafana-tls
+        hosts:
+          - acc-nebulacr-grafana.diytaxreturn.co.uk
+
+# Default URLs for the parent-chart-rendered datasources. Prometheus
+# url defaults to the kube-prometheus-stack server in the monitoring
+# namespace; postgres defaults work because postgres.enabled=true.
+nebulacrGrafanaDatasources:
+  enabled: true
+  prometheus:
+    url: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
     rootDirectory: /var/lib/nebulacr/data

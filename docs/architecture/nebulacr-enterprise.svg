@@ -1,0 +1,465 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1480 900"
+     role="img"
+     aria-label="NebulaCR enterprise architecture: data plane, control plane, observability and AI agent">
+  <title>NebulaCR Enterprise Architecture</title>
+  <desc>
+    A single mapped diagram of NebulaCR end-to-end: how a `docker push`
+    flows through the registry, scanner, GC refcount writer, lazy-pull
+    indexer and lineage detector; where Grafana, Prometheus and the
+    Postgres-backed cost / CVE / GC tables sit; how the AI agent
+    (nebula-pilot), import runner, attestations and rebuild emitters
+    plug in. Solid arrows = synchronous request paths; dashed arrows
+    = asynchronous fire-and-forget; dotted = read-only telemetry.
+  </desc>
+
+  <defs>
+    <style><![CDATA[
+      .bg          { fill: #0e1116; }
+      .lane        { fill: #1a2030; stroke: #2a3346; stroke-width: 1.5; rx: 12; }
+      .lane-label  { font: 600 14px/1 'Inter','SF Pro Text','Helvetica Neue',sans-serif; fill: #6e7d99; letter-spacing: .08em; }
+      .box         { fill: #14202e; stroke: #3b4a66; stroke-width: 1.4; rx: 8; }
+      .box-data    { fill: #122035; stroke: #4f6796; }
+      .box-control { fill: #112030; stroke: #6c5ce7; }
+      .box-obs     { fill: #18241b; stroke: #4ec97a; }
+      .box-ai      { fill: #261b2c; stroke: #e2879c; }
+      .box-ext     { fill: #1d1d24; stroke: #6b7280; stroke-dasharray: 4 3; }
+      .title       { font: 700 16px 'Inter','SF Pro Text',sans-serif; fill: #ecedf1; }
+      .label       { font: 500 11px 'Inter','SF Pro Text',sans-serif; fill: #c4cad6; }
+      .sub         { font: 400 10px 'Inter','SF Pro Text',sans-serif; fill: #8a93a6; }
+      .caption     { font: 700 22px 'Inter','SF Pro Text',sans-serif; fill: #ecedf1; }
+      .legend      { font: 500 11px 'Inter','SF Pro Text',sans-serif; fill: #c4cad6; }
+      .pill        { fill: #1f2937; stroke: #38445b; rx: 4; }
+      .pill-text   { font: 600 9.5px 'Inter','SF Pro Text',sans-serif; fill: #c4cad6; }
+      .arrow-sync  { stroke: #93c5fd; stroke-width: 1.7; fill: none; }
+      .arrow-async { stroke: #fbbf24; stroke-width: 1.7; fill: none; stroke-dasharray: 6 4; }
+      .arrow-tel   { stroke: #6ee7b7; stroke-width: 1.5; fill: none; stroke-dasharray: 2 3; }
+      .arrow-text  { font: 500 10px 'Inter','SF Pro Text',sans-serif; fill: #93c5fd; }
+      .arrow-text-async { font: 500 10px 'Inter','SF Pro Text',sans-serif; fill: #fbbf24; }
+      .arrow-text-tel   { font: 500 10px 'Inter','SF Pro Text',sans-serif; fill: #6ee7b7; }
+    ]]></style>
+
+    <marker id="arrow-sync"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#93c5fd" />
+    </marker>
+    <marker id="arrow-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24" />
+    </marker>
+    <marker id="arrow-tel"   viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6ee7b7" />
+    </marker>
+  </defs>
+
+  <rect class="bg" width="100%" height="100%" />
+
+  <!-- ── Title bar ─────────────────────────────────────────────── -->
+  <text class="caption" x="40" y="46">NebulaCR — Enterprise Architecture</text>
+  <text class="sub"     x="40" y="68">
+    Data plane (push / pull) • Async pipelines (scan, GC, lazy-pull, lineage, rebuild) •
+    Postgres-backed state • Observability • AI agent
+  </text>
+
+  <!-- ── Legend ────────────────────────────────────────────────── -->
+  <g transform="translate(1010,30)">
+    <rect class="lane" width="430" height="56" rx="8" />
+    <line x1="20" y1="20" x2="60" y2="20" class="arrow-sync"  marker-end="url(#arrow-sync)" />
+    <text class="legend" x="68" y="24">sync request path</text>
+    <line x1="20" y1="38" x2="60" y2="38" class="arrow-async" marker-end="url(#arrow-async)" />
+    <text class="legend" x="68" y="42">fire-and-forget enqueue</text>
+    <line x1="220" y1="20" x2="260" y2="20" class="arrow-tel"   marker-end="url(#arrow-tel)" />
+    <text class="legend" x="268" y="24">telemetry read</text>
+    <rect class="box-control" x="220" y="32" width="14" height="14" rx="3" />
+    <text class="legend" x="240" y="42">control plane</text>
+    <rect class="box-obs"     x="320" y="32" width="14" height="14" rx="3" />
+    <text class="legend" x="340" y="42">observability</text>
+  </g>
+
+  <!-- ── Lane: Clients & ingress ───────────────────────────────── -->
+  <g transform="translate(40,100)">
+    <rect class="lane" width="280" height="780" />
+    <text class="lane-label" x="20" y="26">CLIENTS &amp; INGRESS</text>
+
+    <g transform="translate(40,60)">
+      <rect class="box" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">CI / CD</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">docker push / pull · cosign · oras</text>
+    </g>
+
+    <g transform="translate(40,140)">
+      <rect class="box" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">Engineers</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">kubectl pull · helm push · CLI</text>
+    </g>
+
+    <g transform="translate(40,220)">
+      <rect class="box" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">k8s nodes</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">pod-image pulls (containerd / CRI-O)</text>
+    </g>
+
+    <g transform="translate(40,310)">
+      <rect class="box" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">Ingress / TLS</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">cert-manager · acc-nebulacr.diytaxreturn.co.uk</text>
+    </g>
+
+    <g transform="translate(40,400)">
+      <rect class="box-ext" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">Upstream registries</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">Docker Hub · GHCR · Quay · k8s.io</text>
+    </g>
+
+    <g transform="translate(40,490)">
+      <rect class="box-ext" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">Source registries</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">Nexus · Harbor · ACR · Distribution</text>
+    </g>
+
+    <g transform="translate(40,580)">
+      <rect class="box-ai" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">Operators</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">Web UI / CLI · MCP client</text>
+    </g>
+
+    <g transform="translate(40,670)">
+      <rect class="box-obs" width="200" height="62" />
+      <text class="title" x="100" y="26" text-anchor="middle">Grafana</text>
+      <text class="sub"   x="100" y="46" text-anchor="middle">enterprise overview · ops detail</text>
+    </g>
+  </g>
+
+  <!-- ── Lane: Data plane ──────────────────────────────────────── -->
+  <g transform="translate(360,100)">
+    <rect class="lane" width="380" height="780" />
+    <text class="lane-label" x="20" y="26">DATA PLANE</text>
+
+    <!-- Auth -->
+    <g transform="translate(40,60)">
+      <rect class="box" width="300" height="62" />
+      <text class="title" x="150" y="26" text-anchor="middle">nebula-auth</text>
+      <text class="sub"   x="150" y="46" text-anchor="middle">OIDC + JWT · /auth/token</text>
+    </g>
+
+    <!-- Registry -->
+    <g transform="translate(40,150)">
+      <rect class="box" width="300" height="120" />
+      <text class="title" x="150" y="28" text-anchor="middle">nebula-registry</text>
+      <text class="label" x="20" y="56">OCI Distribution v2 · /v2/* · /metrics</text>
+      <g transform="translate(20,68)">
+        <rect class="pill" x="0"   y="0" width="56" height="16" />
+        <text class="pill-text" x="28"  y="11.5" text-anchor="middle">009 GC</text>
+        <rect class="pill" x="64"  y="0" width="56" height="16" />
+        <text class="pill-text" x="92"  y="11.5" text-anchor="middle">013 TTL</text>
+        <rect class="pill" x="128" y="0" width="56" height="16" />
+        <text class="pill-text" x="156" y="11.5" text-anchor="middle">016 art-types</text>
+        <rect class="pill" x="0"   y="22" width="56" height="16" />
+        <text class="pill-text" x="28"  y="33.5" text-anchor="middle">015 attest</text>
+        <rect class="pill" x="64"  y="22" width="56" height="16" />
+        <text class="pill-text" x="92"  y="33.5" text-anchor="middle">010 referrers</text>
+        <rect class="pill" x="128" y="22" width="56" height="16" />
+        <text class="pill-text" x="156" y="33.5" text-anchor="middle">017 usage</text>
+      </g>
+      <text class="sub" x="20" y="116">put_manifest · get_blob · complete_blob_upload</text>
+    </g>
+
+    <!-- Pull-through cache -->
+    <g transform="translate(40,300)">
+      <rect class="box" width="300" height="62" />
+      <text class="title" x="150" y="26" text-anchor="middle">nebula-mirror</text>
+      <text class="sub"   x="150" y="46" text-anchor="middle">pull-through cache · circuit breaker</text>
+    </g>
+
+    <!-- Replication -->
+    <g transform="translate(40,390)">
+      <rect class="box" width="300" height="62" />
+      <text class="title" x="150" y="26" text-anchor="middle">nebula-replication</text>
+      <text class="sub"   x="150" y="46" text-anchor="middle">multi-region · async / semi-sync</text>
+    </g>
+
+    <!-- P2P mesh -->
+    <g transform="translate(40,480)">
+      <rect class="box" width="300" height="62" />
+      <text class="title" x="150" y="26" text-anchor="middle">nebula-peer (011)</text>
+      <text class="sub"   x="150" y="46" text-anchor="middle">in-cluster TCP gossip · digest verify</text>
+    </g>
+
+    <!-- Migration importer -->
+    <g transform="translate(40,570)">
+      <rect class="box" width="300" height="62" />
+      <text class="title" x="150" y="26" text-anchor="middle">nebula-import (012)</text>
+      <text class="sub"   x="150" y="46" text-anchor="middle">Distribution · Nexus · Harbor · ACR</text>
+    </g>
+
+    <!-- Object storage -->
+    <g transform="translate(40,660)">
+      <rect class="box-ext" width="300" height="62" />
+      <text class="title" x="150" y="26" text-anchor="middle">Object storage</text>
+      <text class="sub"   x="150" y="46" text-anchor="middle">S3 · GCS · Azure Blob · filesystem</text>
+    </g>
+  </g>
+
+  <!-- ── Lane: Async pipelines ─────────────────────────────────── -->
+  <g transform="translate(780,100)">
+    <rect class="lane" width="320" height="780" />
+    <text class="lane-label" x="20" y="26">ASYNC PIPELINES</text>
+
+    <!-- Scanner -->
+    <g transform="translate(30,60)">
+      <rect class="box" width="260" height="120" />
+      <text class="title" x="130" y="26" text-anchor="middle">nebula-scanner (014)</text>
+      <text class="label" x="20" y="50">SBOM · matcher · policy · suppress</text>
+      <g transform="translate(20,60)">
+        <rect class="pill" x="0"  y="0" width="50" height="16" />
+        <text class="pill-text" x="25"  y="11.5" text-anchor="middle">cve</text>
+        <rect class="pill" x="58" y="0" width="50" height="16" />
+        <text class="pill-text" x="83"  y="11.5" text-anchor="middle">license</text>
+        <rect class="pill" x="116" y="0" width="50" height="16" />
+        <text class="pill-text" x="141" y="11.5" text-anchor="middle">secret</text>
+        <rect class="pill" x="174" y="0" width="50" height="16" />
+        <text class="pill-text" x="199" y="11.5" text-anchor="middle">malware</text>
+      </g>
+      <text class="sub" x="20" y="106">OSV · NVD · GHSA ingest · Ollama AI</text>
+    </g>
+
+    <!-- GC reaper -->
+    <g transform="translate(30,210)">
+      <rect class="box" width="260" height="62" />
+      <text class="title" x="130" y="26" text-anchor="middle">nebula-gc reaper (009)</text>
+      <text class="sub"   x="130" y="46" text-anchor="middle">refcount drain · reconciler · backfill</text>
+    </g>
+
+    <!-- TTL reaper -->
+    <g transform="translate(30,300)">
+      <rect class="box" width="260" height="62" />
+      <text class="title" x="130" y="26" text-anchor="middle">TTL reaper (013)</text>
+      <text class="sub"   x="130" y="46" text-anchor="middle">expired tags · SCM webhook</text>
+    </g>
+
+    <!-- Lazy indexer -->
+    <g transform="translate(30,390)">
+      <rect class="box" width="260" height="62" />
+      <text class="title" x="130" y="26" text-anchor="middle">Lazy indexer (010)</text>
+      <text class="sub"   x="130" y="46" text-anchor="middle">eStargz · zstd:chunked · SOCI</text>
+    </g>
+
+    <!-- Lineage / rebuild -->
+    <g transform="translate(30,480)">
+      <rect class="box" width="260" height="62" />
+      <text class="title" x="130" y="26" text-anchor="middle">Lineage + rebuild (018)</text>
+      <text class="sub"   x="130" y="46" text-anchor="middle">label/history · GH/GL/Tekton emitters</text>
+    </g>
+
+    <!-- Usage drainer -->
+    <g transform="translate(30,570)">
+      <rect class="box" width="260" height="62" />
+      <text class="title" x="130" y="26" text-anchor="middle">Usage drainer + rollup (017)</text>
+      <text class="sub"   x="130" y="46" text-anchor="middle">staging → events → hourly → daily</text>
+    </g>
+
+    <!-- Attestation verifier -->
+    <g transform="translate(30,660)">
+      <rect class="box" width="260" height="62" />
+      <text class="title" x="130" y="26" text-anchor="middle">Attestation verifier (015)</text>
+      <text class="sub"   x="130" y="46" text-anchor="middle">DSSE · ed25519 / RSA · SLSA-level</text>
+    </g>
+  </g>
+
+  <!-- ── Lane: State + obs + AI ────────────────────────────────── -->
+  <g transform="translate(1140,100)">
+    <rect class="lane" width="300" height="780" />
+    <text class="lane-label" x="20" y="26">STATE · OBS · AI</text>
+
+    <!-- Postgres -->
+    <g transform="translate(30,60)">
+      <rect class="box-data" width="240" height="220" />
+      <text class="title" x="120" y="28" text-anchor="middle">Postgres</text>
+      <text class="label" x="20" y="56">Tables (selected):</text>
+      <g transform="translate(20,68)">
+        <text class="sub" x="0" y="14">scans · vulnerabilities · findings</text>
+        <text class="sub" x="0" y="30">blob_refcounts · manifest_blob_refs</text>
+        <text class="sub" x="0" y="46">blob_paths · gc_reaps · gc_drift</text>
+        <text class="sub" x="0" y="62">tags · ttl_reaps · ephemeral_repos</text>
+        <text class="sub" x="0" y="78">lazy_index · lazy_jobs · referrers</text>
+        <text class="sub" x="0" y="94">usage_events · usage_hourly · usage_daily</text>
+        <text class="sub" x="0" y="110">attestations · trusted_builders</text>
+        <text class="sub" x="0" y="126">image_lineage · rebuild_subscriptions</text>
+        <text class="sub" x="0" y="142">artifact_meta · pilot_*</text>
+      </g>
+    </g>
+
+    <!-- Redis -->
+    <g transform="translate(30,300)">
+      <rect class="box-data" width="240" height="62" />
+      <text class="title" x="120" y="26" text-anchor="middle">Redis</text>
+      <text class="sub"   x="120" y="46" text-anchor="middle">scan results (1h TTL) · admission cache</text>
+    </g>
+
+    <!-- Prometheus -->
+    <g transform="translate(30,390)">
+      <rect class="box-obs" width="240" height="62" />
+      <text class="title" x="120" y="26" text-anchor="middle">Prometheus</text>
+      <text class="sub"   x="120" y="46" text-anchor="middle">registry_* · nebulacr_mirror_* etc.</text>
+    </g>
+
+    <!-- Pilot -->
+    <g transform="translate(30,480)">
+      <rect class="box-ai" width="240" height="120" />
+      <text class="title" x="120" y="26" text-anchor="middle">nebula-pilot (019)</text>
+      <text class="label" x="20" y="50">Tool registry + chat loop</text>
+      <text class="sub"   x="20" y="66">Anthropic · OpenAI · Ollama</text>
+      <text class="sub"   x="20" y="82">RBAC · dry-run · approval gate</text>
+      <text class="sub"   x="20" y="98">audit-log every invocation</text>
+    </g>
+
+    <!-- LLM provider -->
+    <g transform="translate(30,620)">
+      <rect class="box-ext" width="240" height="62" />
+      <text class="title" x="120" y="26" text-anchor="middle">LLM provider</text>
+      <text class="sub"   x="120" y="46" text-anchor="middle">Anthropic · OpenAI · Ollama</text>
+    </g>
+
+    <!-- Audit log -->
+    <g transform="translate(30,710)">
+      <rect class="box-control" width="240" height="62" />
+      <text class="title" x="120" y="26" text-anchor="middle">Audit log (005)</text>
+      <text class="sub"   x="120" y="46" text-anchor="middle">hash-chained · S3 export</text>
+    </g>
+  </g>
+
+  <!-- ── Edges (sync) ──────────────────────────────────────────── -->
+
+  <!-- CI/Engineers/k8s → Ingress -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,191 L335,371" />
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,271 L335,381" />
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,131 L335,361" />
+
+  <!-- Ingress → Auth -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,371 L380,177" />
+  <text class="arrow-text" x="282" y="265">/auth/token</text>
+
+  <!-- Ingress → Registry -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,381 L380,205" />
+  <text class="arrow-text" x="282" y="305">/v2/*</text>
+
+  <!-- Registry ↔ Auth -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M510,150 L510,170" />
+
+  <!-- Registry → Mirror (cache miss) -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M510,270 L510,300" />
+  <text class="arrow-text" x="520" y="290">cache miss</text>
+
+  <!-- Mirror → Upstream registries -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M380,331 L240,431" />
+  <text class="arrow-text" x="276" y="385">upstream pull</text>
+
+  <!-- Registry → Object storage -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M510,270 L510,660" />
+  <text class="arrow-text" x="520" y="385">blobs / manifests</text>
+
+  <!-- Registry → Replication -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M510,270 L510,390" />
+
+  <!-- k8s nodes ↔ Peer mesh -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,251 L380,511" />
+  <text class="arrow-text" x="276" y="430">peer pull</text>
+
+  <!-- Importer → Source registries -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M380,601 L240,521" />
+  <text class="arrow-text" x="276" y="555">crawl + copy</text>
+
+  <!-- ── Edges (async / fire-and-forget) ───────────────────────── -->
+
+  <!-- Registry → Scanner -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,210 L810,120" />
+  <text class="arrow-text-async" x="710" y="155">enqueue scan</text>
+
+  <!-- Registry → GC reaper (refcount writes) -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,230 L810,241" />
+  <text class="arrow-text-async" x="710" y="225">refcount</text>
+
+  <!-- Registry → TTL reaper -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,250 L810,331" />
+  <text class="arrow-text-async" x="710" y="296">TTL header</text>
+
+  <!-- Registry → Lazy indexer -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,270 L810,421" />
+
+  <!-- Registry → Lineage detector -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,270 L810,511" />
+
+  <!-- Registry → Usage drainer -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,270 L810,601" />
+
+  <!-- Registry → Attestation verifier -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M660,270 L810,691" />
+
+  <!-- ── Edges to state ──────────────────────────────────────── -->
+
+  <!-- Scanner → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,120 L1170,170" />
+  <text class="arrow-text-async" x="1085" y="135">scans · findings</text>
+
+  <!-- Scanner → Redis -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,160 L1170,331" />
+
+  <!-- GC → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,241 L1170,200" />
+
+  <!-- TTL → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,331 L1170,225" />
+
+  <!-- Lazy → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,421 L1170,250" />
+
+  <!-- Lineage → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,511 L1170,275" />
+
+  <!-- Usage → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,601 L1170,275" />
+
+  <!-- Attest → Postgres -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1070,691 L1170,275" />
+
+  <!-- ── Edges (telemetry — Prometheus + Grafana) ──────────────── -->
+
+  <!-- Registry /metrics → Prometheus -->
+  <path class="arrow-tel" marker-end="url(#arrow-tel)" d="M660,170 L1170,420" />
+  <text class="arrow-text-tel" x="900" y="295">/metrics</text>
+
+  <!-- Auth /metrics → Prometheus -->
+  <path class="arrow-tel" marker-end="url(#arrow-tel)" d="M660,90 L1170,420" />
+
+  <!-- Mirror /metrics → Prometheus -->
+  <path class="arrow-tel" marker-end="url(#arrow-tel)" d="M660,330 L1170,420" />
+
+  <!-- Postgres → Grafana (read) -->
+  <path class="arrow-tel" marker-end="url(#arrow-tel)" d="M1170,170 L240,790" />
+
+  <!-- Prometheus → Grafana -->
+  <path class="arrow-tel" marker-end="url(#arrow-tel)" d="M1170,420 L240,770" />
+  <text class="arrow-text-tel" x="700" y="565">grafana datasources</text>
+
+  <!-- ── Edges (AI agent) ─────────────────────────────────────── -->
+
+  <!-- Operators → Pilot -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M240,701 L1170,540" />
+  <text class="arrow-text" x="700" y="635">chat / MCP / CLI</text>
+
+  <!-- Pilot → LLM -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M1260,600 L1260,620" />
+
+  <!-- Pilot → Postgres (tool dispatch) -->
+  <path class="arrow-sync" marker-end="url(#arrow-sync)" d="M1170,535 L1170,260" />
+  <text class="arrow-text" x="1080" y="395">tool RBAC + dispatch</text>
+
+  <!-- Pilot → Audit log -->
+  <path class="arrow-async" marker-end="url(#arrow-async)" d="M1260,600 L1260,710" />
+  <text class="arrow-text-async" x="1265" y="660">audit</text>
+
+  <!-- ── Footer ────────────────────────────────────────────────── -->
+  <text class="sub" x="40" y="892">
+    Diagram corresponds to docs/design/009–019. Each Postgres-backed feature ships behind a NEBULACR_*__ENABLED kill-switch (default off);
+    Grafana picks up dashboards via the `grafana_dashboard: "1"` ConfigMap label.
+  </text>
+</svg>

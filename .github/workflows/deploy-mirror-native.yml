@@ -11,6 +11,14 @@ on:
         description: "NebulaCR image tag to deploy"
         required: false
         default: "latest"
+      observability:
+        description: "Deploy Prometheus + Grafana sidecars (host ports 9091 + 13002)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -60,9 +68,14 @@ jobs:
           ANSIBLE_HOST_KEY_CHECKING: "false"
         run: |
           cd deploy/ansible
+          # Workflow input controls whether the playbook also deploys
+          # the Prometheus + Grafana sidecars on the mirror host.
+          # Default true so the dashboard is available out of the box.
+          OBS="${{ github.event.inputs.observability || 'true' }}"
           ansible-playbook -i inventory.yml deploy-mirror.yml \
             --private-key "${{ steps.ssh.outputs.key }}" \
             -e "nebulacr_version=${{ github.event.inputs.version || 'latest' }}" \
+            -e "nebulacr_observability_enabled=${OBS}" \
             -v
 
       - name: Verify deployment

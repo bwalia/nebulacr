@@ -1,0 +1,117 @@
+{{/*
+Grafana sidecar-discoverable datasource Secrets.
+
+When the in-chart Grafana subchart is enabled (`grafana.enabled=true`)
+its sidecar watches every namespace for Secrets labelled
+`grafana_datasource: "1"` and merges them into Grafana's provisioning
+config at runtime. We render one Secret per datasource here so that:
+
+  - The Postgres password references the chart's existing postgres
+    Secret (kept out of the rendered manifest) instead of leaking
+    into a ConfigMap.
+  - Operators who are NOT using the in-chart subchart but DO have a
+    sidecar-equipped Grafana elsewhere still get the datasources
+    auto-loaded — same label contract.
+
+Override URLs and credentials via `nebulacrGrafanaDatasources.*` in
+values.yaml.
+*/}}
+{{- if .Values.nebulacrGrafanaDatasources.enabled }}
+
+{{- /* ── Prometheus datasource ───────────────────────────────────── */}}
+{{- $promUrl := .Values.nebulacrGrafanaDatasources.prometheus.url }}
+{{- if not $promUrl }}
+{{- $promUrl = printf "http://prometheus.%s.svc:9090" .Release.Namespace }}
+{{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-grafana-ds-prometheus
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.labels" . | nindent 4 }}
+    grafana_datasource: "1"
+type: Opaque
+stringData:
+  prometheus.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: {{ $promUrl | quote }}
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: 15s
+          httpMethod: POST
+
+{{- /* ── Postgres datasource ─────────────────────────────────────── */}}
+{{- $pg := .Values.nebulacrGrafanaDatasources.postgres }}
+{{- $pgHost := $pg.host }}
+{{- if not $pgHost }}
+{{- $pgHost = printf "%s.%s.svc:5432" (include "nebulacr.postgres.fullname" .) .Release.Namespace }}
+{{- end }}
+{{- $pgUser := $pg.user }}
+{{- if not $pgUser }}
+{{- $pgUser = .Values.postgres.username | default "nebulacr" }}
+{{- end }}
+{{- $pgDb := $pg.database }}
+{{- if not $pgDb }}
+{{- $pgDb = .Values.postgres.database | default "nebulacr" }}
+{{- end }}
+{{- $pgSecretName := $pg.passwordSecret.name }}
+{{- if not $pgSecretName }}
+{{- $pgSecretName = include "nebulacr.postgres.secretName" . }}
+{{- end }}
+{{- $pgSecretKey := $pg.passwordSecret.key | default "password" }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "nebulacr.fullname" . }}-grafana-ds-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebulacr.labels" . | nindent 4 }}
+    grafana_datasource: "1"
+  annotations:
+    # The sidecar re-reads this Secret on change. We tell it the
+    # password lives in another Secret it should follow — but the
+    # sidecar can't follow secret refs across YAML files, so we
+    # expand the password inline here and rely on Kubernetes's
+    # Secret-rendering pipeline keeping the value off etcd-printed
+    # log lines.
+    nebulacr.io/postgres-secret: {{ $pgSecretName | quote }}
+type: Opaque
+stringData:
+  postgres.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: nebulacr-postgres
+        uid: nebulacr-postgres
+        type: postgres
+        access: proxy
+        url: {{ $pgHost | quote }}
+        user: {{ $pgUser | quote }}
+        editable: false
+        jsonData:
+          database: {{ $pgDb | quote }}
+          sslmode: {{ $pg.sslmode | default "disable" | quote }}
+          postgresVersion: 1600
+          maxOpenConns: 4
+          maxIdleConns: 2
+          connMaxLifetime: 14400
+        secureJsonData:
+          password: ${POSTGRES_DS_PASSWORD}
+{{- /*
+  The literal `${POSTGRES_DS_PASSWORD}` is expanded by Grafana itself
+  at runtime via env interpolation — supported since Grafana 7.1 with
+  the `--config` flag. The sidecar passes the secret content through
+  to grafana-server which performs the substitution. This means we
+  must additionally inject POSTGRES_DS_PASSWORD into the grafana
+  container env from `$pgSecretName.$pgSecretKey`. The
+  `grafana-extra-env-secret.yaml` template wires that.
+*/}}
+{{- end }}

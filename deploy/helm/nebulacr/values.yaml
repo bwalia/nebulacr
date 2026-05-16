@@ -353,7 +353,7 @@ serviceMonitor:
   # Additional relabelings
   relabelings: []
 
-## -- Grafana dashboards --
+## -- NebulaCR Grafana dashboard ConfigMaps --
 ##
 ## Two dashboards ship in deploy/helm/nebulacr/dashboards/:
 ##   - nebulacr-overview.json — exec view: storage, image count,
@@ -365,20 +365,161 @@ serviceMonitor:
 ## Both use templated datasources for a Prometheus instance and a
 ## Postgres instance (the registry's scanner/GC pool). Default off
 ## — flip on when your Grafana sidecar is configured to scan this
-## namespace.
+## namespace, OR when grafana.enabled=true (the in-chart subchart's
+## sidecar will pick them up automatically).
+##
+## NOTE: this used to be `grafana.dashboards.*`. Renamed once the
+## chart added a real Grafana subchart so the `grafana.*` block
+## could belong entirely to the upstream chart's values.
 ##
 ## Reference for the discovery label:
 ##   https://github.com/grafana/helm-charts/tree/main/charts/grafana
 ##   (search "sidecar.dashboards.label").
+nebulacrDashboards:
+  enabled: false
+  # Label the in-chart subchart's sidecar (or
+  # kube-prometheus-stack / kiwigrid) watches for.
+  discoveryLabel: grafana_dashboard
+  # Extra labels to attach to each ConfigMap, e.g. to scope by
+  # multi-tenant Grafana folder.
+  extraLabels: {}
+  annotations: {}
+
+## -- In-chart Grafana subchart (grafana/grafana) --
+##
+## When grafana.enabled=true, the upstream Grafana chart is pulled
+## in and pre-configured to:
+##   - admin/admin
+##   - sidecar that auto-discovers ConfigMaps with the
+##     `grafana_dashboard: "1"` label (matches our nebulacrDashboards
+##     output)
+##   - Prometheus datasource pointing at the in-cluster registry's
+##     /metrics endpoint
+##   - Postgres datasource pointing at the in-chart `postgres`
+##     StatefulSet (when postgres.enabled=true) or an external one
+##
+## Override anything from the upstream chart by adding it under
+## `grafana.<key>` here — values are passed through verbatim.
+## See the upstream chart's values for the full surface:
+##   https://github.com/grafana/helm-charts/blob/main/charts/grafana/values.yaml
 grafana:
-  dashboards:
+  enabled: false
+  fullnameOverride: ""
+  ## NOTE: per the upstream chart, set credentials via either
+  ## adminUser/adminPassword inline OR a secret keyRef. The default
+  ## here is the chart's standard "admin/strongpassword" pattern;
+  ## production deployments should set admin.existingSecret and
+  ## point at a Vault-managed secret.
+  adminUser: admin
+  adminPassword: admin
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  ## Sidecar auto-loads dashboards + datasources from any namespace
+  ## the discovery label is found in. Required for the
+  ## nebulacrDashboards ConfigMaps to land in Grafana automatically.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folder: /tmp/dashboards
+      provider:
+        foldersFromFilesStructure: false
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      labelValue: "1"
+      searchNamespace: ALL
+
+  ## Datasources.
+  ##
+  ## We don't use the upstream chart's `datasources.datasources.yaml`
+  ## block because the Postgres datasource needs to reference the
+  ## chart's existing postgres secret rather than embed the password.
+  ## The actual datasource Secrets are rendered by
+  ## templates/grafana-datasources.yaml using a `grafana_datasource:
+  ## "1"` label so the chart's own sidecar (configured above) picks
+  ## them up from this namespace.
+  ##
+  ## We also wire envFromSecret to pull POSTGRES_DS_PASSWORD into
+  ## the grafana container's env so Grafana's runtime ${VAR}
+  ## interpolation can resolve the postgres datasource password
+  ## without the secret leaking into the rendered Secret YAML.
+
+  ## Disable the chart's built-in inline datasource block — we
+  ## render Secret-shaped datasources from the parent chart's
+  ## templates/grafana-datasources.yaml so the postgres password
+  ## can reference the chart's existing postgres secret.
+  datasources: {}
+
+  ## Per-key env var lookups. The Postgres datasource references
+  ## ${POSTGRES_DS_PASSWORD} which Grafana resolves from container
+  ## env at runtime — this injects the value from the chart's own
+  ## postgres secret. Override for an external Postgres by setting
+  ## `nebulacrGrafanaDatasources.postgres.passwordSecret.{name,key}`.
+  envValueFrom: {}
+    # POSTGRES_DS_PASSWORD:
+    #   secretKeyRef:
+    #     name: <release>-postgres
+    #     key:  password
+
+  ## Persistence — small PVC by default so dashboards/preferences
+  ## survive pod restarts.
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: ""
+
+  ## Ingress for the in-cluster grafana. Defaults off; flip on +
+  ## set host per environment (see values-acc.yaml).
+  ingress:
     enabled: false
-    # Label the kube-prometheus-stack / kiwigrid sidecar watches for.
-    discoveryLabel: grafana_dashboard
-    # Extra labels to attach to each ConfigMap, e.g. to scope by
-    # multi-tenant Grafana folder.
-    extraLabels: {}
+    ingressClassName: ""
     annotations: {}
+    hosts: []
+    tls: []
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+## -- Datasources for the in-chart Grafana --
+##
+## Rendered by templates/grafana-datasources.yaml as Secrets labelled
+## `grafana_datasource: "1"`. The Grafana sidecar (configured above
+## under `grafana.sidecar.datasources.enabled=true`) auto-discovers
+## them. Defaults assume the registry + scanner + postgres are all
+## in the same namespace; override per environment.
+nebulacrGrafanaDatasources:
+  enabled: true
+  prometheus:
+    # When a kube-prometheus-stack Prometheus already exists, point
+    # at it. Default is the URL the chart's docker-compose
+    # observability stack uses; in-cluster operators will typically
+    # set this to e.g. http://kube-prometheus-stack-prometheus.monitoring:9090.
+    url: ""    # default: http://prometheus.{{ .Release.Namespace }}.svc:9090
+  postgres:
+    # When postgres.enabled=true the chart's own postgres service is
+    # used and the password is pulled from the chart's secret.
+    # Override .host / .user / .database when pointing at an
+    # external Postgres; password is taken from `passwordSecret`.
+    host: ""           # default: <release>-postgres.<ns>.svc:5432
+    user: ""           # default: scanner.postgresUser or "nebulacr"
+    database: ""       # default: scanner.postgresDb or "nebulacr"
+    sslmode: disable
+    passwordSecret:
+      # When empty, falls back to the chart-managed postgres secret
+      # rendered by nebulacr.postgres.secretName.
+      name: ""
+      key: password
 
 ## -- Prometheus alerting rules (PrometheusRule CRD) --
 ## Ships the same alert set bundled at deploy/observability/prometheus/rules/.

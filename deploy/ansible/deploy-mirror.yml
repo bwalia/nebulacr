@@ -30,6 +30,22 @@
     bin_dir: /usr/local/bin
     primary_registry: "acc-nebulacr.diytaxreturn.co.uk"
 
+    # ── Observability stack (Prometheus + Grafana) ───────────────
+    # Toggle the entire observability stack on/off. When true, both
+    # services run as docker containers managed by systemd-via-docker
+    # (no docker-compose dependency). Default false so existing
+    # deployments are no-op upgrades.
+    observability_enabled: "{{ nebulacr_observability_enabled | default(false) }}"
+    prometheus_image: "prom/prometheus:v2.55.1"
+    prometheus_port: "{{ nebulacr_prometheus_port | default('9091') }}"
+    prometheus_dir: /var/lib/nebulacr/prometheus
+    grafana_image: "grafana/grafana:11.3.1"
+    grafana_port: "{{ nebulacr_grafana_port | default('13002') }}"
+    grafana_dir: /var/lib/nebulacr/grafana
+    grafana_admin_user: "{{ nebulacr_grafana_admin_user | default('admin') }}"
+    # Override in inventory or with -e — admin/admin is for demos.
+    grafana_admin_password: "{{ nebulacr_grafana_admin_password | default('admin') }}"
+
   tasks:
     # ── System user ──────────────────────────────────────────
     - name: Create nebulacr system user
@@ -302,6 +318,188 @@
       debug:
         msg: "NebulaCR Mirror is healthy on port {{ registry_port }}: {{ health.json }}"
 
+    # ── Observability: Prometheus + Grafana ───────────────────────
+    # Runs both as docker containers reusing the host's docker daemon
+    # (already present from the binary-extract step). Each ships its
+    # config from a host directory we own, so dashboards survive
+    # `docker rm` and `docker pull` re-rolls.
+    - name: Observability — directories
+      when: observability_enabled | bool
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ prometheus_dir }}"
+        - "{{ prometheus_dir }}/rules"
+        - "{{ grafana_dir }}"
+        - "{{ grafana_dir }}/provisioning/datasources"
+        - "{{ grafana_dir }}/provisioning/dashboards"
+        - "{{ grafana_dir }}/dashboards"
+
+    - name: Observability — write prometheus.yml
+      when: observability_enabled | bool
+      copy:
+        dest: "{{ prometheus_dir }}/prometheus.yml"
+        owner: root
+        group: root
+        mode: "0644"
+        # The mirror's nebulacr binaries listen on the host network
+        # at registry_port + auth_port, both of which serve /metrics.
+        # Prometheus uses host.docker.internal — the docker bridge
+        # gateway hostname — to reach them without a custom network.
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+            external_labels:
+              cluster: nebulacr-mirror
+              host: {{ ansible_hostname }}
+
+          scrape_configs:
+            - job_name: nebulacr-registry
+              metrics_path: /metrics
+              static_configs:
+                - targets:
+                    - host.docker.internal:{{ registry_port }}
+                  labels:
+                    service: nebulacr-registry
+            - job_name: nebulacr-auth
+              metrics_path: /metrics
+              static_configs:
+                - targets:
+                    - host.docker.internal:{{ auth_port }}
+                  labels:
+                    service: nebulacr-auth
+            - job_name: prometheus
+              static_configs:
+                - targets:
+                    - localhost:9090
+      notify: restart prometheus
+
+    - name: Observability — Grafana datasource (Prometheus)
+      when: observability_enabled | bool
+      copy:
+        dest: "{{ grafana_dir }}/provisioning/datasources/prometheus.yml"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              uid: prometheus
+              type: prometheus
+              access: proxy
+              url: http://nebulacr-prometheus:9090
+              isDefault: true
+              editable: false
+              jsonData:
+                timeInterval: 15s
+                httpMethod: POST
+      notify: restart grafana
+
+    - name: Observability — Grafana dashboard provider
+      when: observability_enabled | bool
+      copy:
+        dest: "{{ grafana_dir }}/provisioning/dashboards/nebulacr.yml"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          apiVersion: 1
+          providers:
+            - name: NebulaCR
+              orgId: 1
+              folder: NebulaCR
+              type: file
+              disableDeletion: false
+              allowUiUpdates: true
+              updateIntervalSeconds: 30
+              options:
+                path: /var/lib/grafana/dashboards
+      notify: restart grafana
+
+    # Pull each NebulaCR dashboard JSON from the source repo on the
+    # control node and ship to the mirror. The same files the Helm
+    # chart ConfigMaps emit, kept in deploy/observability for the
+    # docker-compose stack.
+    - name: Observability — copy dashboard JSONs
+      when: observability_enabled | bool
+      copy:
+        src: "{{ item }}"
+        dest: "{{ grafana_dir }}/dashboards/{{ item | basename }}"
+        owner: root
+        group: root
+        mode: "0644"
+      with_fileglob:
+        - "{{ playbook_dir }}/../observability/grafana/dashboards/*.json"
+      notify: restart grafana
+
+    - name: Observability — Prometheus container
+      when: observability_enabled | bool
+      docker_container:
+        name: nebulacr-prometheus
+        image: "{{ prometheus_image }}"
+        restart_policy: unless-stopped
+        published_ports:
+          - "{{ prometheus_port }}:9090"
+        volumes:
+          - "{{ prometheus_dir }}/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+          - "{{ prometheus_dir }}/rules:/etc/prometheus/rules:ro"
+          - "nebulacr-prometheus-data:/prometheus"
+        command:
+          - --config.file=/etc/prometheus/prometheus.yml
+          - --storage.tsdb.path=/prometheus
+          - --storage.tsdb.retention.time=15d
+          - --web.enable-lifecycle
+        # host.docker.internal must resolve so prometheus can scrape
+        # the host-network nebulacr binaries.
+        etc_hosts:
+          host.docker.internal: host-gateway
+
+    - name: Observability — Grafana container
+      when: observability_enabled | bool
+      docker_container:
+        name: nebulacr-grafana
+        image: "{{ grafana_image }}"
+        restart_policy: unless-stopped
+        published_ports:
+          - "{{ grafana_port }}:3000"
+        env:
+          GF_SECURITY_ADMIN_USER: "{{ grafana_admin_user }}"
+          GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
+          GF_USERS_ALLOW_SIGN_UP: "false"
+          GF_AUTH_ANONYMOUS_ENABLED: "false"
+        volumes:
+          - "{{ grafana_dir }}/provisioning:/etc/grafana/provisioning:ro"
+          - "{{ grafana_dir }}/dashboards:/var/lib/grafana/dashboards:ro"
+          - "nebulacr-grafana-data:/var/lib/grafana"
+        # Connect both containers to the same docker bridge so
+        # Grafana can resolve `nebulacr-prometheus` by name.
+        networks:
+          - name: nebulacr-obs
+
+    - name: Observability — wait for Grafana
+      when: observability_enabled | bool
+      uri:
+        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+        return_content: true
+      register: grafana_health
+      retries: 12
+      delay: 5
+      until: grafana_health.status == 200
+
+    - name: Observability — show URLs
+      when: observability_enabled | bool
+      debug:
+        msg: |
+          Observability stack live on {{ ansible_hostname }}:
+            Grafana    → http://{{ ansible_default_ipv4.address }}:{{ grafana_port }}/  ({{ grafana_admin_user }}/{{ grafana_admin_password }})
+            Prometheus → http://{{ ansible_default_ipv4.address }}:{{ prometheus_port }}/
+
   handlers:
     - name: restart nebulacr-auth
       systemd:
@@ -312,3 +510,17 @@
       systemd:
         name: nebulacr-registry
         state: restarted
+
+    - name: restart prometheus
+      docker_container:
+        name: nebulacr-prometheus
+        state: started
+        restart: true
+      when: observability_enabled | bool
+
+    - name: restart grafana
+      docker_container:
+        name: nebulacr-grafana
+        state: started
+        restart: true
+      when: observability_enabled | bool
